@@ -1,0 +1,33 @@
+name: Test ref with slashes
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Checkout pytorch/test-infra for pkg-helpers
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/vision
+          ref: refs/heads/main
+          python-version: '3.12'
+          cuda-version: cpu
+          arch: x86_64
+      - name: Assert all slashes replaced in ARTIFACT_NAME
+        run: |
+          echo "ARTIFACT_NAME: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_vision_refs_heads_main_3.12_cpu_x86_64" ]; then
+            echo "FAIL: expected 'pytorch_vision_refs_heads_main_3.12_cpu_x86_64'"
+            exit 1
+          fi
+          case "$ARTIFACT_NAME" in
+            */*) echo "FAIL: artifact name contains '/'"; exit 1 ;;
+          esac
+          echo "PASS"

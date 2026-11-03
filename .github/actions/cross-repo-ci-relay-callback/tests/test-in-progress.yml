@@ -1,0 +1,108 @@
+name: Test in_progress callback
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install fake curl that captures the callback payload
+        run: |
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/curl <<'EOF'
+          #!/bin/sh
+          # Fake curl: capture the POSTed payload instead of contacting the relay.
+          out=""; hdr=""; data=""; prev=""
+          for arg in "$@"; do
+            case "$prev" in
+              --output|-o) out="$arg" ;;
+              --dump-header|-D) hdr="$arg" ;;
+              --data|-d) data="$arg" ;;
+            esac
+            prev="$arg"
+          done
+          cap="${CAPTURE_FILE:-/tmp/action-payload.json}"
+          case "$data" in
+            @*) cp "${data#@}" "$cap" ;;
+            *) printf '%s' "$data" > "$cap" ;;
+          esac
+          [ -n "$out" ] && echo '{"ok":true}' > "$out"
+          [ -n "$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+          printf '200'
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/curl
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+
+      - name: Locate report_callback.py
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/report_callback.py" ]; then
+            SCRIPT="$GITHUB_WORKSPACE/report_callback.py"
+          else
+            SCRIPT="$(find "$GITHUB_WORKSPACE" -name report_callback.py -not -path '*/tests/*' | head -1)"
+          fi
+          echo "script: $SCRIPT"
+          [ -n "$SCRIPT" ] || { echo "FAIL: report_callback.py not found"; exit 1; }
+          echo "SCRIPT=$SCRIPT" >> "$GITHUB_ENV"
+
+      - name: Run reporter directly in in_progress mode
+        env:
+          SCHEMA_VERSION: "1"
+          STATUS: in_progress
+          CONCLUSION: success
+          WORKFLOW_NAME: My Workflow
+          WORKFLOW_URL: https://github.com/example/repo/actions/runs/42
+          RUN_ID: "42"
+          RUN_ATTEMPT: "1"
+          JOB_NAME: build-cpu
+          CHECK_RUN_ID: ""
+          OIDC_TOKEN: dummy-oidc
+          CALLBACK_URL: http://127.0.0.1:9/
+          CLIENT_PAYLOAD: '{"event_type":"pull_request","delivery_id":"abc123","payload":{"head_sha":"deadbeef"}}'
+          CAPTURE_FILE: /tmp/direct-inprogress.json
+        run: |
+          PATH="/tmp/fakebin:$PATH" python3 "$SCRIPT"
+          cat /tmp/direct-inprogress.json; echo
+          python3 - /tmp/direct-inprogress.json <<'EOF'
+          import json, sys
+          p = json.load(open(sys.argv[1]))
+          w = p["workflow"]
+          assert p["event_type"] == "pull_request", p
+          assert p["delivery_id"] == "abc123", p
+          assert w["status"] == "in_progress", w
+          assert w["conclusion"] is None, "conclusion must be ignored for in_progress"
+          assert w["completed_at"] is None, w
+          assert w["started_at"], w
+          assert w["job_name"] == "build-cpu", w
+          assert w["check_run_id"] == "42-1", w
+          assert w["run_id"] == "42", w
+          assert w["schema_version"] == "1", w
+          assert w["name"] == "My Workflow", w
+          assert "test_results" not in w and "artifact_url" not in w, w
+          print("PASS")
+          EOF
+
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          status: in_progress
+          callback-url: http://127.0.0.1:9/
+          job-name: build-cpu
+
+      - name: Assert action outcome
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            cat /tmp/action-payload.json || { echo "FAIL: no payload captured"; exit 1; }
+            python3 -c 'import json; w=json.load(open("/tmp/action-payload.json"))["workflow"]; assert w["status"]=="in_progress" and w["job_name"]=="build-cpu", w'
+            echo "PASS: payload sent"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (no OIDC token / no client_payload under act)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

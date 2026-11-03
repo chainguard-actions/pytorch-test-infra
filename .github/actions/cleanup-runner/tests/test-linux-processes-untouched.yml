@@ -1,0 +1,31 @@
+name: Test leftover processes are untouched on Linux
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start a background process
+        run: |
+          nohup sleep 600 > /dev/null 2>&1 &
+          echo $! > /tmp/sleep.pid
+          echo "started pid $(cat /tmp/sleep.pid)"
+      - id: action
+        uses: .
+      - name: Assert background process still running
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          PID=$(cat /tmp/sleep.pid)
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "FAIL: process $PID was killed on a non-Windows runner"
+            exit 1
+          fi
+          kill "$PID" || true
+          echo "PASS"

@@ -1,0 +1,46 @@
+name: Test pull retries then succeeds
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and aws (pull fails twice)
+        run: |
+          set -e
+          rm -rf /tmp/fakedocker && mkdir -p /tmp/fakedocker/bin
+          cat > /tmp/fakedocker/bin/docker <<'EOF'
+          #!/bin/bash
+          echo "docker $*" >> /tmp/fakedocker/calls.log
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) echo '{"config":{"size":1048576},"layers":[{"size":1048576},{"size":2097152}]}'; exit 0 ;;
+            inspect) [ -f /tmp/fakedocker/local-image ] && exit 0 || exit 1 ;;
+            pull)
+              n=$(cat /tmp/fakedocker/pull-failures 2>/dev/null || echo 0)
+              if [ "$n" -gt 0 ]; then echo $((n-1)) > /tmp/fakedocker/pull-failures; echo "pull failed"; exit 1; fi
+              exit 0 ;;
+          esac
+          exit 0
+          EOF
+          cat > /tmp/fakedocker/bin/aws <<'EOF'
+          #!/bin/bash
+          echo "aws $*" >> /tmp/fakedocker/calls.log
+          echo "fake-password"
+          EOF
+          chmod +x /tmp/fakedocker/bin/docker /tmp/fakedocker/bin/aws
+          touch /tmp/fakedocker/calls.log
+          echo 2 > /tmp/fakedocker/pull-failures
+          echo "/tmp/fakedocker/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/pytorch/flaky:v2
+      - name: Assert pull was retried 3 times
+        run: |
+          cat /tmp/fakedocker/calls.log
+          count=$(grep -c "^docker pull example.com/pytorch/flaky:v2$" /tmp/fakedocker/calls.log || true)
+          echo "pull count: $count"
+          if [ "$count" != "3" ]; then echo "FAIL: expected 3 pull attempts"; exit 1; fi
+          echo "PASS"

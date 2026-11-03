@@ -1,0 +1,12 @@
+{
+  "owner": "pytorch",
+  "repo": "test-infra",
+  "version": "v20261027-001733",
+  "path": ".github/actions/docker-build-remote-buildkit",
+  "commit_sha": "9206d491d3a5507163cb9d5b77040d4c3ef5e038",
+  "url": "https://github.com/pytorch/test-infra",
+  "policy_sha": "d636be7e43ef829af6e853da6b3c7566db9f72fe",
+  "test_policy_sha": "843adf9e4b8f85d0c08b27b9d0b09dd094b54702",
+  "test_agent_version": "2",
+  "harden_agent_version": "2"
+}

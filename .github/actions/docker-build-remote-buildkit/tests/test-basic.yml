@@ -1,0 +1,58 @@
+name: Test basic buildx build
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FAKE_DOCKER_MODE: success
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -rf /tmp/fake-docker
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" "$RUNNER_TEMP/fakebin/docker"
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: "ghcr.io/example/img:abc123, ghcr.io/example/img:latest"
+          context: ./tests
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.title=demo
+          connect-delay: '0'
+      - name: Assert image output is the first tag
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/img:abc123" ]; then
+            echo "FAIL: expected 'ghcr.io/example/img:abc123'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert builder registered and buildx args correct
+        run: |
+          echo "--- calls ---"; cat /tmp/fake-docker/calls.log
+          echo "--- args ---"; cat /tmp/fake-docker/build-args-1.txt
+          grep -q "^buildx create --name remote-buildkit --driver remote --use tcp://buildkitd-" /tmp/fake-docker/calls.log || { echo "FAIL: builder not registered"; exit 1; }
+          count="$(cat /tmp/fake-docker/build-count)"
+          [ "$count" = "1" ] || { echo "FAIL: expected 1 build, got $count"; exit 1; }
+          A=/tmp/fake-docker/build-args-1.txt
+          for want in "ghcr.io/example/img:abc123" "ghcr.io/example/img:latest" "FOO=bar" "BAZ=qux" \
+                      "org.opencontainers.image.title=demo" "--push" "./tests"; do
+            grep -qxF -- "$want" "$A" || { echo "FAIL: missing arg '$want'"; exit 1; }
+          done
+          [ "$(grep -cxF -- '--tag' "$A")" = "2" ] || { echo "FAIL: expected 2 --tag"; exit 1; }
+          [ "$(grep -cxF -- '--build-arg' "$A")" = "2" ] || { echo "FAIL: expected 2 --build-arg"; exit 1; }
+          grep -qxE 'linux/(amd64|arm64)' "$A" || { echo "FAIL: missing platform"; exit 1; }
+          [ "$(tail -n1 "$A")" = "./tests" ] || { echo "FAIL: context should be last"; exit 1; }
+          if grep -qxF -- '--file' "$A" || grep -qxF -- '--target' "$A"; then
+            echo "FAIL: unexpected --file/--target"; exit 1
+          fi
+          echo "PASS"

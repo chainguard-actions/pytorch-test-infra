@@ -1,0 +1,68 @@
+name: Test basic upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          rm -f /tmp/aws-args /tmp/aws-uploaded.json /tmp/claude_usage.json
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/aws-args
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-uploaded.json
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ github.workspace }}/tests/fixtures/claude-output.json
+      - name: Assert payload uploaded
+        env:
+          EXPECTED_ACTOR: ${{ github.actor }}
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_ATTEMPT: ${{ github.run_attempt }}
+          EXPECTED_REPO: ${{ github.repository }}
+        run: |
+          set -e
+          if [ ! -f /tmp/aws-uploaded.json ]; then
+            echo "FAIL: aws s3 cp not called"; exit 1
+          fi
+          echo "args: $(cat /tmp/aws-args)"
+          cat /tmp/aws-uploaded.json
+          P=/tmp/aws-uploaded.json
+          check() {
+            actual="$(jq -r "$1" "$P")"
+            echo "$1 => $actual"
+            if [ "$actual" != "$2" ]; then echo "FAIL: $1 expected '$2'"; exit 1; fi
+          }
+          check .duration_ms 12345
+          check .num_turns 7
+          check .total_cost_usd 0.5
+          check .input_tokens 100
+          check .output_tokens 200
+          check .cache_read_input_tokens 300
+          check .cache_creation_input_tokens 400
+          check .model claude-sonnet-4
+          check .event_name workflow_dispatch
+          check .pr_number 0
+          check .actor "$EXPECTED_ACTOR"
+          check .repo "$EXPECTED_REPO"
+          if [ "$(jq 'has("result")' "$P")" != "false" ]; then
+            echo "FAIL: payload should not include result text"; exit 1
+          fi
+          if ! jq -e '.timestamp | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.000$")' "$P" >/dev/null; then
+            echo "FAIL: bad timestamp"; exit 1
+          fi
+          EXPECTED_ARGS="s3 cp /tmp/claude_usage.json s3://ossci-raw-job-status/claude_code_usage/$EXPECTED_REPO/${EXPECTED_RUN_ID}_${EXPECTED_ATTEMPT}.json"
+          if [ "$(cat /tmp/aws-args)" != "$EXPECTED_ARGS" ]; then
+            echo "FAIL: expected args '$EXPECTED_ARGS'"; exit 1
+          fi
+          echo "PASS"

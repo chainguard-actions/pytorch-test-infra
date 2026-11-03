@@ -1,0 +1,46 @@
+name: Test failure when nightly branch missing
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up local bare remote without nightly branch
+        run: |
+          set -e
+          export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
+          rm -rf /tmp/remote2 /tmp/seed2
+          mkdir -p /tmp/remote2
+          git init --bare /tmp/remote2/no-nightly.git
+          git init /tmp/seed2
+          cd /tmp/seed2
+          git checkout -b main
+          echo "main" > file.txt
+          git add file.txt
+          git commit -m "main commit"
+          git push /tmp/remote2/no-nightly.git main
+          git config --global url."file:///tmp/remote2/no-nightly".insteadOf "https://github.com/test-org/no-nightly"
+          git config --global --add safe.directory '*'
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          token: ${{ github.token }}
+          repository: test-org/no-nightly
+          ref: main
+          path: no-nightly-checkout
+      - name: Assert action failed and no nightly branch was created
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected failure when nightly branch is missing"
+            exit 1
+          fi
+          if git -C /tmp/remote2/no-nightly.git rev-parse --verify -q refs/heads/nightly; then
+            echo "FAIL: nightly branch should not exist"
+            exit 1
+          fi
+          echo "PASS"

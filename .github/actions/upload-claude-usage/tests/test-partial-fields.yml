@@ -1,0 +1,45 @@
+name: Test result entry with partial fields
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          rm -f /tmp/aws-args /tmp/aws-uploaded.json /tmp/claude_usage.json
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/aws-args
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-uploaded.json
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ github.workspace }}/tests/fixtures/claude-output-partial.json
+      - name: Assert defaults applied
+        run: |
+          if [ ! -f /tmp/aws-uploaded.json ]; then echo "FAIL: not uploaded"; exit 1; fi
+          cat /tmp/aws-uploaded.json
+          P=/tmp/aws-uploaded.json
+          check() {
+            actual="$(jq -r "$1" "$P")"
+            echo "$1 => $actual"
+            if [ "$actual" != "$2" ]; then echo "FAIL: $1 expected '$2'"; exit 1; fi
+          }
+          check .duration_ms 999
+          check .num_turns 0
+          check .total_cost_usd 0
+          check .input_tokens 0
+          check .output_tokens 0
+          check .cache_read_input_tokens 0
+          check .cache_creation_input_tokens 0
+          check .model ""
+          echo "PASS"

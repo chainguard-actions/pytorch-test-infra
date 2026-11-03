@@ -1,0 +1,54 @@
+name: Test python 3.15t free-threading pre-release mapping
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: pytorch/vision
+      REF: feature/a/b
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake conda
+        run: |
+          set -eux
+          rm -f /tmp/fake-conda.log
+          SRC="$GITHUB_WORKSPACE/tests/fixtures/fake-conda.sh"
+          if [ -w /usr/local/bin ]; then
+            install -m 0755 "$SRC" /usr/local/bin/conda
+          else
+            sudo install -m 0755 "$SRC" /usr/local/bin/conda
+          fi
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          install -m 0755 "$SRC" "$RUNNER_TEMP/fakebin/conda"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          repository: octocat/Hello-World
+          ref: master
+          python-version: "3.15t"
+          cuda-version: cu130
+          arch: x86_64
+      - name: Assert ARTIFACT_NAME replaces all slashes
+        run: |
+          echo "actual: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_vision_feature_a_b_3.15t_cu130_x86_64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda create args
+        run: |
+          cat /tmp/fake-conda.log
+          LINE="$(grep "conda_environment_" /tmp/fake-conda.log | grep "^conda create" || true)"
+          echo "create line: $LINE"
+          for want in "python=3.15.0rc2" "python-freethreading" "-c conda-forge/label/python_rc"; do
+            if ! echo "$LINE" | grep -qF -- "$want"; then
+              echo "FAIL: missing '$want'"; exit 1
+            fi
+          done
+          if echo "$LINE" | grep -qF "openssl"; then
+            echo "FAIL: openssl pin should be cleared for 3.15t"; exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,36 @@
+name: Test default (wait for ssh)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          LOG="$RUNNER_TEMP/calls.log"
+          : > "$LOG"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<EOF
+          #!/bin/sh
+          echo "docker \$*" >> "$LOG"
+          exit 0
+          EOF
+          cat > "$RUNNER_TEMP/fakebin/who" <<EOF
+          #!/bin/sh
+          echo "who called" >> "$LOG"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker" "$RUNNER_TEMP/fakebin/who"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert ssh check ran then docker cleanup
+        run: |
+          LOG="$RUNNER_TEMP/calls.log"
+          cat "$LOG"
+          if [ "$(grep -c 'who called' "$LOG")" != "1" ]; then echo "FAIL: who should be called exactly once"; exit 1; fi
+          if ! grep -q "^docker system prune -af" "$LOG"; then echo "FAIL: prune not called"; exit 1; fi
+          first="$(head -n1 "$LOG")"
+          if [ "$first" != "who called" ]; then echo "FAIL: ssh wait should run before docker cleanup"; exit 1; fi
+          echo "PASS"

@@ -1,0 +1,54 @@
+name: Test python 3.14t free-threading mapping
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: pytorch/audio
+      REF: main
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake conda
+        run: |
+          set -eux
+          rm -f /tmp/fake-conda.log
+          SRC="$GITHUB_WORKSPACE/tests/fixtures/fake-conda.sh"
+          if [ -w /usr/local/bin ]; then
+            install -m 0755 "$SRC" /usr/local/bin/conda
+          else
+            sudo install -m 0755 "$SRC" /usr/local/bin/conda
+          fi
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          install -m 0755 "$SRC" "$RUNNER_TEMP/fakebin/conda"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          repository: octocat/Hello-World
+          ref: master
+          python-version: "3.14t"
+          cuda-version: cpu
+          arch: aarch64
+      - name: Assert ARTIFACT_NAME keeps t suffix
+        run: |
+          echo "actual: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_audio_main_3.14t_cpu_aarch64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda create args
+        run: |
+          cat /tmp/fake-conda.log
+          LINE="$(grep "conda_environment_" /tmp/fake-conda.log | grep "^conda create" || true)"
+          echo "create line: $LINE"
+          for want in "python=3.14 " "python-freethreading" "openssl=3.5.6"; do
+            if ! echo "$LINE " | grep -qF -- "$want"; then
+              echo "FAIL: missing '$want'"; exit 1
+            fi
+          done
+          if echo "$LINE" | grep -qF "python=3.14t"; then
+            echo "FAIL: python=3.14t should have been mapped to python=3.14"; exit 1
+          fi
+          echo "PASS"

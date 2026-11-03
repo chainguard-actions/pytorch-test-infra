@@ -1,0 +1,33 @@
+name: Test chown directory with spaces
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/dir with spaces"
+          echo data > "$GITHUB_WORKSPACE/dir with spaces/file.txt"
+      - id: action
+        uses: .
+        with:
+          directory: ${{ github.workspace }}/dir with spaces
+          ALPINE_IMAGE: alpine:3.20
+      - name: Assert step succeeded and ownership correct
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          OWNER="$(stat -c '%u:%g' "$GITHUB_WORKSPACE/dir with spaces/file.txt")"
+          echo "owner: $OWNER"
+          if [ "$OWNER" != "$(id -u):$(id -g)" ]; then
+            echo "FAIL: wrong owner"
+            exit 1
+          fi
+          echo "PASS"

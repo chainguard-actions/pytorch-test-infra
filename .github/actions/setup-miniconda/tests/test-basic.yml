@@ -1,0 +1,49 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert conda env vars exported
+        run: |
+          echo "CONDA_ENV=$CONDA_ENV"
+          echo "CONDA_PREFIX=$CONDA_PREFIX"
+          echo "CONDA_RUN=$CONDA_RUN"
+          echo "CONDA_INSTALL=$CONDA_INSTALL"
+          echo "CONDA_EXE=$CONDA_EXE"
+          if [ "$CONDA_ENV" != "${RUNNER_TEMP}/conda_environment_${GITHUB_RUN_ID}" ]; then
+            echo "FAIL: CONDA_ENV unexpected"; exit 1
+          fi
+          if [ "$CONDA_PREFIX" != "$CONDA_ENV" ]; then
+            echo "FAIL: CONDA_PREFIX != CONDA_ENV"; exit 1
+          fi
+          if [ -z "$CONDA_RUN" ] || [ -z "$CONDA_INSTALL" ]; then
+            echo "FAIL: CONDA_RUN/CONDA_INSTALL not set"; exit 1
+          fi
+          if [ "$CONDA_EXE" != "${RUNNER_TEMP}/miniconda/bin/conda" ] || [ ! -x "$CONDA_EXE" ]; then
+            echo "FAIL: CONDA_EXE not valid"; exit 1
+          fi
+          if [ ! -d "$CONDA_PREFIX" ]; then
+            echo "FAIL: env dir missing"; exit 1
+          fi
+          echo "PASS"
+      - name: Assert python version and default packages
+        run: |
+          VER=$($CONDA_RUN python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          echo "python: $VER"
+          if [ "$VER" != "3.9" ]; then
+            echo "FAIL: expected python 3.9"; exit 1
+          fi
+          $CONDA_RUN cmake --version | grep -q "3.22" || { echo "FAIL: cmake 3.22 missing"; exit 1; }
+          $CONDA_RUN ninja --version || { echo "FAIL: ninja missing"; exit 1; }
+          echo "PASS"
+      - name: Assert channel priority reset
+        run: |
+          OUT=$(conda config --show channel_priority)
+          echo "$OUT"
+          echo "$OUT" | grep -q "disabled" || { echo "FAIL: channel_priority not disabled"; exit 1; }
+          echo "PASS"

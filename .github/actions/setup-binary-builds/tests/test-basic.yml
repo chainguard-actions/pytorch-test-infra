@@ -1,0 +1,84 @@
+name: Test basic usage (python 3.10.19)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: pytorch/vision
+      REF: release/2.0
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake conda
+        run: |
+          set -eux
+          rm -f /tmp/fake-conda.log
+          SRC="$GITHUB_WORKSPACE/tests/fixtures/fake-conda.sh"
+          if [ -w /usr/local/bin ]; then
+            install -m 0755 "$SRC" /usr/local/bin/conda
+          else
+            sudo install -m 0755 "$SRC" /usr/local/bin/conda
+          fi
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          install -m 0755 "$SRC" "$RUNNER_TEMP/fakebin/conda"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          repository: octocat/Hello-World
+          ref: master
+          python-version: "3.10.19"
+          cuda-version: cu121
+          arch: x86_64
+      - name: Assert checkout into repository subdirectory
+        run: |
+          ls -la "$GITHUB_WORKSPACE/octocat/Hello-World" || true
+          if [ ! -f "$GITHUB_WORKSPACE/octocat/Hello-World/README" ]; then
+            echo "FAIL: expected octocat/Hello-World/README"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert ARTIFACT_NAME
+        run: |
+          echo "actual: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_vision_release_2.0_3.10_cu121_x86_64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda env outputs
+        run: |
+          cat /tmp/fake-conda.log
+          echo "CONDA_ENV=$CONDA_ENV"
+          echo "CONDA_RUN=$CONDA_RUN"
+          echo "BUILD_ENV_FILE=$BUILD_ENV_FILE"
+          EXPECTED_ENV="${RUNNER_TEMP}/conda_environment_${GITHUB_RUN_ID}"
+          if [ "$CONDA_ENV" != "$EXPECTED_ENV" ]; then
+            echo "FAIL: CONDA_ENV expected $EXPECTED_ENV"; exit 1
+          fi
+          if [ "$CONDA_RUN" != "conda run --no-capture-output -p $EXPECTED_ENV" ]; then
+            echo "FAIL: unexpected CONDA_RUN"; exit 1
+          fi
+          if [ "$BUILD_ENV_FILE" != "${RUNNER_TEMP}/build_env_${GITHUB_RUN_ID}" ]; then
+            echo "FAIL: unexpected BUILD_ENV_FILE"; exit 1
+          fi
+          if ! grep -q "FAKE_PKG_HELPER=1" "$BUILD_ENV_FILE"; then
+            echo "FAIL: build env file missing pkg helper output"; exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda invocations
+        run: |
+          LOG=/tmp/fake-conda.log
+          grep -q "^conda clean --all --quiet --yes" "$LOG" || { echo "FAIL: no conda clean"; exit 1; }
+          grep -q "^conda config --set channel_priority false" "$LOG" || { echo "FAIL: no channel_priority reset"; exit 1; }
+          LINE="$(grep "conda_environment_" "$LOG" | grep "^conda create" || true)"
+          echo "create line: $LINE"
+          for want in "python=3.10.19" "cmake=3.31.2" "ninja=1.12.1" "openssl=3.5.6" "wheel=0.37"; do
+            if ! echo "$LINE" | grep -qF -- "$want"; then
+              echo "FAIL: missing $want"; exit 1
+            fi
+          done
+          if echo "$LINE" | grep -qF "conda-forge"; then
+            echo "FAIL: unexpected conda-forge channel"; exit 1
+          fi
+          echo "PASS"

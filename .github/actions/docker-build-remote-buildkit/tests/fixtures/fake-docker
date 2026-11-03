@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Fake docker CLI for tests. Records every call and simulates `docker buildx build`
+# outcomes based on FAKE_DOCKER_MODE:
+#   success           - build succeeds
+#   cold-then-success - first 2 builds fail with a connection-phase error, then succeed
+#   always-cold       - every build fails with a connection-phase error
+#   build-error       - build starts (emits progress) then fails with a real error
+state="${FAKE_DOCKER_STATE:-/tmp/fake-docker}"
+mkdir -p "${state}"
+echo "$*" >> "${state}/calls.log"
+
+if [ "${1:-}" = "buildx" ] && [ "${2:-}" = "build" ]; then
+  n="$(cat "${state}/build-count" 2>/dev/null || echo 0)"
+  n=$((n + 1))
+  echo "${n}" > "${state}/build-count"
+  printf '%s\n' "$@" > "${state}/build-args-${n}.txt"
+  case "${FAKE_DOCKER_MODE:-success}" in
+    success)
+      echo "#1 [internal] load build definition from Dockerfile"
+      echo "#2 DONE 0.1s"
+      exit 0
+      ;;
+    cold-then-success)
+      if [ "${n}" -lt 3 ]; then
+        echo "ERROR: failed to dial gRPC: connection refused" >&2
+        exit 1
+      fi
+      echo "#1 [internal] load build definition from Dockerfile"
+      exit 0
+      ;;
+    always-cold)
+      echo "ERROR: failed to dial gRPC: connection refused" >&2
+      exit 1
+      ;;
+    build-error)
+      echo "#1 [internal] load build definition from Dockerfile"
+      echo "#5 [2/3] RUN false"
+      echo "ERROR: failed to solve: process did not complete successfully (connection refused in RUN)" >&2
+      exit 1
+      ;;
+  esac
+fi
+exit 0

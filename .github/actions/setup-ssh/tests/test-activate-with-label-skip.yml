@@ -1,0 +1,36 @@
+name: Test activate-with-label skips outside pull_request
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Seed existing authorized_keys
+        run: |
+          mkdir -p "$HOME/.ssh"
+          echo "ssh-ed25519 AAAATESTSENTINELKEY sentinel@test" > "$HOME/.ssh/authorized_keys"
+          cp "$HOME/.ssh/authorized_keys" /tmp/authorized_keys.before
+      - id: action
+        uses: .
+        with:
+          github-secret: ${{ github.token }}
+          activate-with-label: "true"
+          label: with-ssh
+          remove-existing-keys: "true"
+          fail-silently: "false"
+      - name: Assert action skipped and left keys untouched
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success (skip) on non-pull_request event"
+            exit 1
+          fi
+          cat "$HOME/.ssh/authorized_keys"
+          if ! cmp -s /tmp/authorized_keys.before "$HOME/.ssh/authorized_keys"; then
+            echo "FAIL: authorized_keys was modified even though the action should have skipped"
+            exit 1
+          fi
+          echo "PASS"

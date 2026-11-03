@@ -1,0 +1,33 @@
+name: Test real build error is not retried
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FAKE_DOCKER_MODE: build-error
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -rf /tmp/fake-docker
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" "$RUNNER_TEMP/fakebin/docker"
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          tags: ghcr.io/example/broken:1
+          connect-attempts: '5'
+          connect-delay: '0'
+      - name: Assert failed once without retry
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          count="$(cat /tmp/fake-docker/build-count)"
+          echo "outcome: $OUTCOME builds: $count"
+          [ "$OUTCOME" = "failure" ] || { echo "FAIL: expected failure"; exit 1; }
+          [ "$count" = "1" ] || { echo "FAIL: real build error must not be retried"; exit 1; }
+          echo "PASS"

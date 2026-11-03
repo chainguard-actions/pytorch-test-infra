@@ -1,0 +1,29 @@
+name: Test pre-existing repository directory is cleaned
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create stale directory content
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/actions/checkout"
+          echo stale > "$GITHUB_WORKSPACE/actions/checkout/stale-file.txt"
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          submodules: "false"
+      - name: Assert stale file removed and fresh checkout present
+        run: |
+          if [ -e "$GITHUB_WORKSPACE/actions/checkout/stale-file.txt" ]; then
+            echo "FAIL: stale file still present"
+            exit 1
+          fi
+          if [ ! -f "$GITHUB_WORKSPACE/actions/checkout/action.yml" ]; then
+            echo "FAIL: action.yml not found after checkout"
+            exit 1
+          fi
+          echo "PASS"

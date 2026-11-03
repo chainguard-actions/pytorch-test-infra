@@ -1,0 +1,43 @@
+name: Test with venv input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create virtual environment
+        run: |
+          set -eux
+          python3 -m venv "$RUNNER_TEMP/test-venv" || {
+            (sudo apt-get update && sudo apt-get install -y python3-venv) || (apt-get update && apt-get install -y python3-venv)
+            python3 -m venv "$RUNNER_TEMP/test-venv"
+          }
+          test -f "$RUNNER_TEMP/test-venv/bin/activate"
+          echo "VENV_ACTIVATE=$RUNNER_TEMP/test-venv/bin/activate" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          venv: ${{ env.VENV_ACTIVATE }}
+      - name: Assert psutil was installed into the venv
+        run: |
+          source "$VENV_ACTIVATE"
+          python3 -c 'import psutil; print("psutil", psutil.__version__)' || {
+            echo "FAIL: psutil not installed in venv (venv not activated?)"
+            exit 1
+          }
+          echo "PASS"
+      - name: Assert runners-info is non-empty valid JSON
+        env:
+          ACTUAL: ${{ steps.action.outputs.runners-info }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "FAIL: runners-info output is empty"
+            exit 1
+          fi
+          printf '%s' "$ACTUAL" | python3 -c 'import json,sys; json.load(sys.stdin)' || {
+            echo "FAIL: runners-info is not valid JSON"
+            exit 1
+          }
+          echo "PASS"

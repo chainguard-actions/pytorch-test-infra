@@ -1,0 +1,26 @@
+name: Test push input ignored when build is skipped
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          docker-image-name: pytorch-linux-jammy-py3
+          docker-build-dir: does/not/exist
+          repo-name: myrepo
+          push: "true"
+          force-push: "true"
+      - name: Assert image passed through unchanged and no push attempted
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "pytorch-linux-jammy-py3" ]; then
+            echo "FAIL: expected 'pytorch-linux-jammy-py3'"
+            exit 1
+          fi
+          echo "PASS"

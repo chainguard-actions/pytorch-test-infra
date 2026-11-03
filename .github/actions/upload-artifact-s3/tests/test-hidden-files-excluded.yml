@@ -1,0 +1,40 @@
+name: Test hidden files are excluded by default
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create directory containing only hidden files
+        run: |
+          mkdir -p hidden-only-dir
+          echo "secret" > hidden-only-dir/.hidden-file
+          ls -la hidden-only-dir
+      - id: action
+        uses: .
+        with:
+          path: hidden-only-dir
+          if-no-files-found: ignore
+          include-hidden-files: 'false'
+          s3-bucket: actionchain-nonexistent-test-bucket
+      - name: Assert hidden files were skipped (no upload attempted)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          ACTUAL: ${{ steps.action.outputs.uploaded-objects }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "uploaded-objects: '$ACTUAL'"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success (hidden file should be excluded so no upload is attempted)"
+            exit 1
+          fi
+          if [ -n "$ACTUAL" ]; then
+            echo "FAIL: expected no uploaded-objects output"
+            exit 1
+          fi
+          echo "PASS"

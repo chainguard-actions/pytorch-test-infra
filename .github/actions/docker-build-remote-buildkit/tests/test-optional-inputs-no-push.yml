@@ -1,0 +1,54 @@
+name: Test optional inputs with push=false
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FAKE_DOCKER_MODE: success
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -rf /tmp/fake-docker
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" "$RUNNER_TEMP/fakebin/docker"
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: |
+            registry.example.com/one:v1
+
+            registry.example.com/two:v1
+          file: docker/Custom.Dockerfile
+          target: runtime
+          push: 'false'
+          cache-from: |
+            type=registry,ref=registry.example.com/cache:a
+          cache-to: |
+            type=registry,ref=registry.example.com/cache:a,mode=max
+          connect-delay: '0'
+      - name: Assert image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "registry.example.com/one:v1" ]; then
+            echo "FAIL: expected 'registry.example.com/one:v1'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert buildx args
+        run: |
+          A=/tmp/fake-docker/build-args-1.txt
+          cat "$A"
+          [ "$(grep -cxF -- '--tag' "$A")" = "2" ] || { echo "FAIL: expected 2 --tag (blank line skipped)"; exit 1; }
+          grep -A1 -xF -- '--file' "$A" | grep -qxF 'docker/Custom.Dockerfile' || { echo "FAIL: --file"; exit 1; }
+          grep -A1 -xF -- '--target' "$A" | grep -qxF 'runtime' || { echo "FAIL: --target"; exit 1; }
+          grep -A1 -xF -- '--cache-from' "$A" | grep -qxF 'type=registry,ref=registry.example.com/cache:a' || { echo "FAIL: --cache-from"; exit 1; }
+          grep -A1 -xF -- '--cache-to' "$A" | grep -qxF 'type=registry,ref=registry.example.com/cache:a,mode=max' || { echo "FAIL: --cache-to"; exit 1; }
+          if grep -qxF -- '--push' "$A"; then echo "FAIL: --push must not be set"; exit 1; fi
+          [ "$(tail -n1 "$A")" = "." ] || { echo "FAIL: default context '.' should be last"; exit 1; }
+          echo "PASS"

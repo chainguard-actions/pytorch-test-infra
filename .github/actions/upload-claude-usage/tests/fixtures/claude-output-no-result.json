@@ -1,0 +1,4 @@
+[
+  {"type": "system", "subtype": "init", "session_id": "abc"},
+  {"type": "assistant", "message": {"content": "hello"}}
+]

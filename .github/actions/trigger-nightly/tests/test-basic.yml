@@ -1,0 +1,69 @@
+name: Test basic nightly commit push
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up local bare remote and redirect github URL to it
+        run: |
+          set -e
+          export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.com GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.com
+          rm -rf /tmp/remote /tmp/seed
+          mkdir -p /tmp/remote
+          git init --bare /tmp/remote/test-repo.git
+          git init /tmp/seed
+          cd /tmp/seed
+          git checkout -b nightly
+          echo "old nightly" > file.txt
+          git add file.txt
+          git commit -m "old nightly"
+          git checkout --orphan main
+          git rm -rf . >/dev/null
+          echo "main content" > file.txt
+          echo "extra" > extra.txt
+          git add file.txt extra.txt
+          git commit -m "main commit"
+          git push /tmp/remote/test-repo.git main nightly
+          git -C /tmp/remote/test-repo.git rev-parse refs/heads/nightly > /tmp/old-nightly
+          git -C /tmp/remote/test-repo.git rev-parse refs/heads/main > /tmp/main-sha
+          git -C /tmp/remote/test-repo.git rev-parse 'refs/heads/main^{tree}' > /tmp/main-tree
+          git config --global url."file:///tmp/remote/test-repo".insteadOf "https://github.com/test-org/test-repo"
+          git config --global --add safe.directory '*'
+      - id: action
+        uses: .
+        with:
+          token: ${{ github.token }}
+          repository: test-org/test-repo
+          ref: main
+          path: nightly-checkout
+      - name: Assert checkout landed in path at ref
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/nightly-checkout/extra.txt" ]; then
+            echo "FAIL: checkout of main not found under nightly-checkout"
+            exit 1
+          fi
+          echo "PASS: checkout present"
+      - name: Assert nightly branch updated
+        run: |
+          set -e
+          R=/tmp/remote/test-repo.git
+          NEW=$(git -C $R rev-parse refs/heads/nightly)
+          OLD=$(cat /tmp/old-nightly)
+          echo "old nightly: $OLD new nightly: $NEW"
+          if [ "$NEW" = "$OLD" ]; then echo "FAIL: nightly not updated"; exit 1; fi
+          PARENT=$(git -C $R rev-parse "$NEW^1")
+          if [ "$PARENT" != "$OLD" ]; then echo "FAIL: parent $PARENT != old nightly $OLD"; exit 1; fi
+          TREE=$(git -C $R rev-parse "$NEW^{tree}")
+          if [ "$TREE" != "$(cat /tmp/main-tree)" ]; then echo "FAIL: tree mismatch"; exit 1; fi
+          MSG=$(git -C $R log -1 --format=%s "$NEW")
+          AUTHOR=$(git -C $R log -1 --format=%an "$NEW")
+          echo "message: $MSG author: $AUTHOR"
+          EXPECTED="$(date +%Y-%m-%d) nightly release ($(cat /tmp/main-sha))"
+          case "$MSG" in
+            *"nightly release ($(cat /tmp/main-sha))") ;;
+            *) echo "FAIL: unexpected message, expected like '$EXPECTED'"; exit 1 ;;
+          esac
+          if [ "$AUTHOR" != "pytorchbot" ]; then echo "FAIL: author should be pytorchbot"; exit 1; fi
+          echo "PASS"

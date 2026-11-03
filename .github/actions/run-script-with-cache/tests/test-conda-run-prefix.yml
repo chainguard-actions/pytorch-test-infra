@@ -1,0 +1,30 @@
+name: Test CONDA_RUN prefix used
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env file and script
+        run: |
+          echo 'true' > "$RUNNER_TEMP/build_env.sh"
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/build_env.sh" >> "$GITHUB_ENV"
+          echo "CONDA_RUN=env PREFIX_VAR=prefixed" >> "$GITHUB_ENV"
+          rm -f "$GITHUB_WORKSPACE/conda-marker.txt"
+          cat > "$GITHUB_WORKSPACE/conda-script.sh" <<'EOF'
+          echo "${PREFIX_VAR:-unset}" > "${GITHUB_WORKSPACE}/conda-marker.txt"
+          EOF
+      - id: action
+        uses: .
+        with:
+          script: conda-script.sh
+      - name: Assert CONDA_RUN prefix applied
+        run: |
+          ACTUAL="$(cat "$GITHUB_WORKSPACE/conda-marker.txt" 2>/dev/null || true)"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "prefixed" ]; then
+            echo "FAIL: expected 'prefixed'"
+            exit 1
+          fi
+          echo "PASS"

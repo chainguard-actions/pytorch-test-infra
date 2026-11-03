@@ -1,0 +1,392 @@
+import { S3Client } from "@aws-sdk/client-s3";
+import * as drciUtils from "lib/drciUtils";
+import { OWNER, REPO } from "lib/drciUtils";
+import * as greenlightEligibility from "lib/greenlight/greenlightEligibility";
+import { renderGreenlightEligibility } from "lib/greenlight/greenlightEligibility";
+import * as getS3Client from "lib/s3";
+import nock from "nock";
+import { Probot } from "probot";
+import myProbotApp from "../lib/bot/drciBot";
+import pytorchBot from "../lib/bot/pytorchBot";
+import * as clickhouse from "../lib/clickhouse";
+import { handleScope, requireDeepCopy } from "./common";
+import { successfulA } from "./drci.test";
+import * as utils from "./utils";
+
+nock.disableNetConnect();
+
+const comment_id = 10;
+const comment_node_id = "abcd";
+const some_user = "github_user";
+
+describe("verify-drci-functionality", () => {
+  let probot: Probot;
+
+  beforeEach(() => {
+    probot = utils.testProbot();
+    probot.load(myProbotApp);
+    nock("https://raw.githubusercontent.com")
+      .get((url) => url.includes("rules.json"))
+      .reply(200, []);
+
+    const mockS3 = {
+      send: jest.fn(),
+    };
+    const mockS3Client = jest.spyOn(getS3Client, "getS3Client");
+    mockS3Client.mockImplementation(() => mockS3 as unknown as S3Client);
+  });
+
+  afterEach(() => {
+    nock.cleanAll();
+    jest.restoreAllMocks();
+  });
+
+  test("Dr. CI comments on any user's PR", async () => {
+    nock("https://api.github.com")
+      .post("/app/installations/2/access_tokens")
+      .reply(200, { token: "test" });
+
+    const payload = require("./fixtures/pull_request.opened")["payload"];
+    payload["pull_request"]["user"]["login"] = some_user;
+    payload["repository"]["owner"]["login"] = OWNER;
+    payload["repository"]["name"] = REPO;
+
+    jest
+      .spyOn(clickhouse, "queryClickhouse")
+      .mockImplementation((query, params) => {
+        return Promise.resolve([]);
+      });
+    const scope = nock("https://api.github.com")
+      .get(`/repos/${OWNER}/${REPO}/issues/31/comments`, (body) => {
+        return true;
+      })
+      .reply(200)
+      .post(`/repos/${OWNER}/${REPO}/issues/31/comments`, (body) => {
+        const comment = body.body;
+        expect(comment.includes(drciUtils.DRCI_COMMENT_START)).toBeTruthy();
+        expect(
+          comment.includes("See artifacts and rendered test results")
+        ).toBeTruthy();
+        expect(
+          comment.includes("Need help or want to give feedback on the CI?")
+        ).toBeTruthy();
+        expect(comment.includes(drciUtils.DOCS_URL)).toBeTruthy();
+        return true;
+      })
+      .reply(200);
+
+    await probot.receive({ name: "pull_request", payload: payload, id: "2" });
+    handleScope(scope);
+  });
+
+  test("Dr. CI edits existing comment if a comment is already present", async () => {
+    nock("https://api.github.com")
+      .post("/app/installations/2/access_tokens")
+      .reply(200, { token: "test" });
+
+    const payload = require("./fixtures/pull_request.opened")["payload"];
+    payload["pull_request"]["user"]["login"] = some_user;
+    payload["repository"]["owner"]["login"] = OWNER;
+    payload["repository"]["name"] = REPO;
+
+    jest
+      .spyOn(clickhouse, "queryClickhouse")
+      .mockImplementation((query, params) => {
+        return Promise.resolve([]);
+      });
+
+    const scope = nock("https://api.github.com")
+      .get(`/repos/${OWNER}/${REPO}/issues/31/comments`, (body) => {
+        return true;
+      })
+      .reply(200, [
+        {
+          id: comment_id,
+          node_id: comment_node_id,
+          user: { login: drciUtils.DRCI_COMMENT_AUTHOR },
+          body: "<!-- drci-comment-start -->\nhello\n<!-- drci-comment-end -->\n",
+        },
+      ])
+      .patch(
+        `/repos/${OWNER}/${REPO}/issues/comments/${comment_id}`,
+        (body) => {
+          const comment = body.body;
+          expect(comment.includes(drciUtils.DRCI_COMMENT_START)).toBeTruthy();
+          expect(
+            comment.includes("See artifacts and rendered test results")
+          ).toBeTruthy();
+          expect(
+            comment.includes("Need help or want to give feedback on the CI?")
+          ).toBeTruthy();
+          expect(comment.includes(drciUtils.DOCS_URL)).toBeTruthy();
+          return true;
+        }
+      )
+      .reply(200);
+    await probot.receive({ name: "pull_request", payload: payload, id: "2" });
+    handleScope(scope);
+  });
+
+  test("Dr. CI ignores a marker-bearing comment from a non-bot author and posts its own", async () => {
+    // Regression test: another tool (e.g. an internal diff-handoff bot) can post
+    // a comment that embeds the DRCI_COMMENT_START marker. Dr. CI must not treat
+    // that comment as its own and overwrite it; it should post a fresh comment.
+    nock("https://api.github.com")
+      .post("/app/installations/2/access_tokens")
+      .reply(200, { token: "test" });
+
+    const payload = require("./fixtures/pull_request.opened")["payload"];
+    payload["pull_request"]["user"]["login"] = some_user;
+    payload["repository"]["owner"]["login"] = OWNER;
+    payload["repository"]["name"] = REPO;
+
+    jest
+      .spyOn(clickhouse, "queryClickhouse")
+      .mockImplementation((query, params) => {
+        return Promise.resolve([]);
+      });
+
+    const scope = nock("https://api.github.com")
+      .get(`/repos/${OWNER}/${REPO}/issues/31/comments`, (body) => {
+        return true;
+      })
+      .reply(200, [
+        {
+          id: comment_id,
+          node_id: comment_node_id,
+          user: { login: some_user },
+          body: "<!-- drci-comment-start -->\nhandoff\n<!-- drci-comment-end -->\n",
+        },
+      ])
+      // Must create a new comment rather than patch the impostor one.
+      .post(`/repos/${OWNER}/${REPO}/issues/31/comments`, (body) => {
+        const comment = body.body;
+        expect(comment.includes(drciUtils.DRCI_COMMENT_START)).toBeTruthy();
+        expect(
+          comment.includes("See artifacts and rendered test results")
+        ).toBeTruthy();
+        return true;
+      })
+      .reply(200);
+
+    await probot.receive({ name: "pull_request", payload: payload, id: "2" });
+    handleScope(scope);
+  });
+
+  test("Dr. CI does not comment when the PR is not open", async () => {
+    nock("https://api.github.com")
+      .post("/app/installations/2/access_tokens")
+      .reply(200, { token: "test" });
+
+    const payload = require("./fixtures/pull_request.opened")["payload"];
+    payload["pull_request"]["user"]["login"] = some_user;
+    payload["pull_request"]["state"] = "closed";
+    payload["repository"]["owner"]["login"] = OWNER;
+    payload["repository"]["name"] = REPO;
+
+    const mock = jest.spyOn(drciUtils, "formDrciHeader");
+    mock.mockImplementation();
+
+    await probot.receive({ name: "pull_request", payload: payload, id: "2" });
+    expect(mock).not.toHaveBeenCalled();
+  });
+
+  test("Dr. CI does not comment when the repo is not PyTorch", async () => {
+    nock("https://api.github.com")
+      .post("/app/installations/2/access_tokens")
+      .reply(200, { token: "test" });
+
+    const payload = require("./fixtures/pull_request.opened")["payload"];
+    payload["pull_request"]["user"]["login"] = some_user;
+    payload["repository"]["owner"]["login"] = OWNER;
+    payload["repository"]["name"] = "torchdynamo";
+
+    const mock = jest.spyOn(drciUtils, "formDrciHeader");
+    mock.mockImplementation();
+
+    await probot.receive({ name: "pull_request", payload: payload, id: "2" });
+    expect(mock).not.toHaveBeenCalled();
+  });
+
+  test("Dr. CI edits existing comment if an explicit update request is made", async () => {
+    probot = utils.testProbot();
+    probot.load(pytorchBot);
+
+    nock("https://api.github.com")
+      .post("/app/installations/2/access_tokens")
+      .reply(200, { token: "test" });
+
+    const event = require("./fixtures/pull_request_comment");
+    event["payload"]["repository"]["owner"]["login"] = OWNER;
+    event["payload"]["repository"]["name"] = REPO;
+    event["payload"]["comment"]["body"] = "@pytorchmergebot drci";
+    const pytorchbot_comment_number = event["payload"]["comment"]["id"];
+
+    jest
+      .spyOn(clickhouse, "queryClickhouseSaved")
+      .mockImplementation((queryName, inputParams) => {
+        if (queryName === "pr_commits") {
+          return Promise.resolve([
+            {
+              sha: "MOCK",
+              message: "Anything goes",
+            },
+          ]);
+        }
+        if (queryName === "recent_pr_workflows_query") {
+          return Promise.resolve([successfulA]);
+        }
+        return Promise.resolve([]);
+      });
+
+    jest
+      .spyOn(clickhouse, "queryClickhouse")
+      .mockImplementation((query, params) => {
+        return Promise.resolve([]);
+      });
+
+    const scope = nock("https://api.github.com")
+      .post(
+        `/repos/${OWNER}/${REPO}/issues/comments/${pytorchbot_comment_number}/reactions`,
+        (body) => {
+          expect(JSON.stringify(body)).toContain('{"content":"+1"}');
+          return true;
+        }
+      )
+      .reply(200, {})
+      .get((url) => url.includes(`/repos/${OWNER}/${REPO}/compare/`))
+      .reply(200, {
+        merge_base_commit: {
+          sha: "dummyMergeBaseSha",
+          commit: {
+            committer: {
+              date: "2023-08-08T06:03:21Z",
+            },
+          },
+        },
+      })
+      .get(`/repos/${OWNER}/${REPO}/issues/1000/comments`)
+      .reply(200, [
+        {
+          id: comment_id,
+          node_id: comment_node_id,
+          user: { login: drciUtils.DRCI_COMMENT_AUTHOR },
+          body: "<!-- drci-comment-start -->\nhello\n<!-- drci-comment-end -->\n",
+        },
+      ])
+      .post(`/repos/${OWNER}/${REPO}/check-runs`, (body) => {
+        expect(body["name"] === "Dr.CI").toBeTruthy();
+        expect(body["status"] === "completed").toBeTruthy();
+        expect(body["conclusion"] === "neutral").toBeTruthy();
+        expect(
+          body["output"]["title"] === "Dr.CI classification results"
+        ).toBeTruthy();
+        return true;
+      })
+      .reply(200, {})
+      .get(`/repos/${OWNER}/${REPO}/git/commits/abcdefg`)
+      .reply(200, { committer: { date: "Anything goes" } })
+      .patch(
+        `/repos/${OWNER}/${REPO}/issues/comments/${comment_id}`,
+        (body) => {
+          const comment = body.body;
+          expect(comment.includes(drciUtils.DRCI_COMMENT_START)).toBeTruthy();
+          expect(
+            comment.includes("See artifacts and rendered test results")
+          ).toBeTruthy();
+          expect(
+            comment.includes("Need help or want to give feedback on the CI?")
+          ).toBeTruthy();
+          expect(comment.includes(drciUtils.DOCS_URL)).toBeTruthy();
+          return true;
+        }
+      )
+      .reply(200)
+      .get(`/repos/${OWNER}/${REPO}/pulls/1000`)
+      .reply(200, { title: "A mock pull request", body: "Anything goes" })
+      .get(`/repos/${OWNER}/${REPO}/pulls/1000/commits?per_page=100`)
+      .reply(200, [{ sha: "MOCK", message: "Anything goes" }]);
+    await probot.receive(event);
+    handleScope(scope);
+  });
+
+  // The other tests share the cached fixture objects and mutate them, so these copy
+  // them and set every field they depend on.
+  function greenlightPayload(fixture: string) {
+    const payload = requireDeepCopy(fixture)["payload"];
+    payload["pull_request"]["user"]["login"] = "alice";
+    payload["pull_request"]["state"] = "open";
+    payload["pull_request"]["draft"] = false;
+    payload["repository"]["owner"]["login"] = OWNER;
+    payload["repository"]["name"] = REPO;
+    return payload;
+  }
+
+  test("Dr. CI shows the GreenLight eligibility line on an opened PR", async () => {
+    nock("https://api.github.com")
+      .post("/app/installations/2/access_tokens")
+      .reply(200, { token: "test" });
+    jest.spyOn(clickhouse, "queryClickhouse").mockResolvedValue([]);
+
+    let comment = "";
+    const scope = nock("https://api.github.com")
+      .get(`/repos/${OWNER}/${REPO}/issues/31/comments`)
+      .reply(200, [])
+      .get(
+        (uri) =>
+          uri.startsWith(`/repos/${OWNER}/${REPO}/contents/`) &&
+          uri.includes("merge_rules.yaml")
+      )
+      .reply(200, {
+        content: Buffer.from(
+          "- patterns: ['*']\n  approved_by: [alice]"
+        ).toString("base64"),
+      })
+      .get(`/repos/${OWNER}/${REPO}/pulls/31/reviews?per_page=100`)
+      .reply(200, [])
+      .post(`/repos/${OWNER}/${REPO}/issues/31/comments`, (body) => {
+        comment = body.body;
+        return true;
+      })
+      .reply(200);
+
+    await probot.receive({
+      name: "pull_request",
+      payload: greenlightPayload("./fixtures/pull_request.opened"),
+      id: "2",
+    });
+    handleScope(scope);
+
+    expect(comment).toContain(drciUtils.DRCI_COMMENT_START);
+    expect(comment).toContain(renderGreenlightEligibility("waiting"));
+  });
+
+  test("Dr. CI shows no GreenLight line on a synchronized PR", async () => {
+    nock("https://api.github.com")
+      .post("/app/installations/2/access_tokens")
+      .reply(200, { token: "test" });
+    jest.spyOn(clickhouse, "queryClickhouse").mockResolvedValue([]);
+    const gate = jest.spyOn(greenlightEligibility, "greenlightEligibilityGate");
+
+    let comment = "";
+    const scope = nock("https://api.github.com")
+      .get(`/repos/${OWNER}/${REPO}/issues/30/comments`)
+      .reply(200, [])
+      .post(`/repos/${OWNER}/${REPO}/issues/30/comments`, (body) => {
+        comment = body.body;
+        return true;
+      })
+      .reply(200);
+
+    await probot.receive({
+      name: "pull_request",
+      payload: greenlightPayload("./fixtures/pull_request.synchronize"),
+      id: "2",
+    });
+    handleScope(scope);
+
+    expect(comment).toContain(drciUtils.DRCI_COMMENT_START);
+    expect(comment).not.toContain("GreenLight");
+    expect(gate).not.toHaveBeenCalled();
+  });
+});

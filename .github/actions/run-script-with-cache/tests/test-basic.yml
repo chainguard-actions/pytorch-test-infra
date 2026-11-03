@@ -1,0 +1,35 @@
+name: Test basic script run
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env file and script
+        run: |
+          echo 'export MY_BUILD_VAR=from-env-file' > "$RUNNER_TEMP/build_env.sh"
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/build_env.sh" >> "$GITHUB_ENV"
+          echo "CONDA_RUN=" >> "$GITHUB_ENV"
+          rm -f "$GITHUB_WORKSPACE/basic-marker.txt"
+          cat > "$GITHUB_WORKSPACE/basic-script.sh" <<'EOF'
+          echo "running script, MY_BUILD_VAR=${MY_BUILD_VAR}"
+          echo "${MY_BUILD_VAR}" > "${GITHUB_WORKSPACE}/basic-marker.txt"
+          EOF
+      - id: action
+        uses: .
+        with:
+          script: basic-script.sh
+      - name: Assert script ran with sourced env
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/basic-marker.txt" ]; then
+            echo "FAIL: marker file not created"
+            exit 1
+          fi
+          ACTUAL="$(cat "$GITHUB_WORKSPACE/basic-marker.txt")"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "from-env-file" ]; then
+            echo "FAIL: expected 'from-env-file'"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,41 @@
+name: Test custom bucket and prefix
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          rm -f /tmp/aws-args /tmp/aws-uploaded.json /tmp/claude_usage.json
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/aws-args
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-uploaded.json
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ github.workspace }}/tests/fixtures/claude-output.json
+          s3-bucket: my-test-bucket
+          s3-prefix: my/prefix
+      - name: Assert destination
+        env:
+          EXPECTED_RUN_ID: ${{ github.run_id }}
+          EXPECTED_ATTEMPT: ${{ github.run_attempt }}
+          EXPECTED_REPO: ${{ github.repository }}
+        run: |
+          ACTUAL="$(cat /tmp/aws-args 2>/dev/null)"
+          echo "actual: $ACTUAL"
+          EXPECTED="s3 cp /tmp/claude_usage.json s3://my-test-bucket/my/prefix/$EXPECTED_REPO/${EXPECTED_RUN_ID}_${EXPECTED_ATTEMPT}.json"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: expected '$EXPECTED'"; exit 1
+          fi
+          echo "PASS"

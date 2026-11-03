@@ -1,0 +1,44 @@
+name: Test full ECR image name passthrough
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            *secretsmanager*) echo '{"SecretString":"{\"docker_hub_readonly_token\":\"x\"}"}' ;;
+            *) echo "fake-password" ;;
+          esac
+          exit 0
+          EOF
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/act-fake-docker-calls
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws" "$RUNNER_TEMP/fakebin/docker"
+          rm -f /tmp/act-fake-docker-calls /tmp/act-docker-build-marker
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: registry.example.com/myrepo/my-image:sometag
+          docker-build-dir: tests/fixtures/docker
+          repo-name: myrepo
+          docker-registry: registry.example.com
+      - name: Assert image used as-is
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "registry.example.com/myrepo/my-image:sometag" ]; then
+            echo "FAIL: expected full name unchanged"
+            exit 1
+          fi
+          echo "PASS"

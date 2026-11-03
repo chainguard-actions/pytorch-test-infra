@@ -1,0 +1,49 @@
+name: Test basic venv creation (mocked macOS + Homebrew)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake brew and fake Homebrew python
+        run: |
+          FAKE_DIR="$RUNNER_TEMP/fake-brew"
+          rm -rf "$FAKE_DIR"
+          mkdir -p "$FAKE_DIR/bin" "$FAKE_DIR/prefix/bin"
+          cp tests/fixtures/fake-brew.sh "$FAKE_DIR/bin/brew"
+          cp tests/fixtures/fake-python.sh "$FAKE_DIR/prefix/bin/python3.12"
+          chmod +x "$FAKE_DIR/bin/brew" "$FAKE_DIR/prefix/bin/python3.12"
+          : > "$FAKE_DIR/log"
+          echo "FAKE_LOG=$FAKE_DIR/log" >> "$GITHUB_ENV"
+          echo "FAKE_PREFIX=$FAKE_DIR/prefix" >> "$GITHUB_ENV"
+          echo "$FAKE_DIR/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/tests/fixtures/fake-darwin.js
+        with:
+          python-version: "3.12"
+      - name: Assert brew calls
+        run: |
+          echo "log:"; cat "$FAKE_LOG"
+          grep -qx "brew update" "$FAKE_LOG" || { echo "FAIL: brew update not called"; exit 1; }
+          grep -qx "brew install python@3.12" "$FAKE_LOG" || { echo "FAIL: brew install python@3.12 not called"; exit 1; }
+          grep -qx "brew --prefix" "$FAKE_LOG" || { echo "FAIL: brew --prefix not called"; exit 1; }
+          if grep -q "pip install" "$FAKE_LOG"; then echo "FAIL: pip install should not run without requirements"; exit 1; fi
+          echo "PASS"
+      - name: Assert VENV_PATH exported and venv created
+        run: |
+          echo "VENV_PATH: $VENV_PATH"
+          echo "PATH: $PATH"
+          case "$VENV_PATH" in
+            "$RUNNER_TEMP"/venv-3.12-*) ;;
+            *) echo "FAIL: VENV_PATH not of form \$RUNNER_TEMP/venv-3.12-<ts>"; exit 1 ;;
+          esac
+          grep -qx "python -m venv $VENV_PATH" "$FAKE_LOG" || { echo "FAIL: venv not created with brew python"; exit 1; }
+          [ -x "$VENV_PATH/bin/python" ] || { echo "FAIL: venv python missing"; exit 1; }
+          case ":$PATH:" in
+            *":$VENV_PATH/bin:"*) ;;
+            *) echo "FAIL: venv bin not on PATH"; exit 1 ;;
+          esac
+          echo "PASS"

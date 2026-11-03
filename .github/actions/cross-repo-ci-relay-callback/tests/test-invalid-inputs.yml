@@ -1,0 +1,128 @@
+name: Test invalid input handling
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install fake curl that captures the callback payload
+        run: |
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/curl <<'EOF'
+          #!/bin/sh
+          # Fake curl: capture the POSTed payload instead of contacting the relay.
+          out=""; hdr=""; data=""; prev=""
+          for arg in "$@"; do
+            case "$prev" in
+              --output|-o) out="$arg" ;;
+              --dump-header|-D) hdr="$arg" ;;
+              --data|-d) data="$arg" ;;
+            esac
+            prev="$arg"
+          done
+          cap="${CAPTURE_FILE:-/tmp/action-payload.json}"
+          case "$data" in
+            @*) cp "${data#@}" "$cap" ;;
+            *) printf '%s' "$data" > "$cap" ;;
+          esac
+          [ -n "$out" ] && echo '{"ok":true}' > "$out"
+          [ -n "$hdr" ] && printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+          printf '200'
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/curl
+
+      - name: Locate report_callback.py
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/report_callback.py" ]; then
+            SCRIPT="$GITHUB_WORKSPACE/report_callback.py"
+          else
+            SCRIPT="$(find "$GITHUB_WORKSPACE" -name report_callback.py -not -path '*/tests/*' | head -1)"
+          fi
+          echo "script: $SCRIPT"
+          [ -n "$SCRIPT" ] || { echo "FAIL: report_callback.py not found"; exit 1; }
+          echo "SCRIPT=$SCRIPT" >> "$GITHUB_ENV"
+
+      - name: Assert reporter rejects invalid inputs
+        env:
+          SCHEMA_VERSION: "1"
+          WORKFLOW_NAME: My Workflow
+          WORKFLOW_URL: https://github.com/example/repo/actions/runs/1
+          RUN_ID: "1"
+          RUN_ATTEMPT: "1"
+          JOB_NAME: job
+          OIDC_TOKEN: dummy-oidc
+          CALLBACK_URL: http://127.0.0.1:9/
+          CLIENT_PAYLOAD: '{"event_type":"pull_request","delivery_id":"x"}'
+          CAPTURE_FILE: /tmp/invalid-payload.json
+        run: |
+          fails=0
+          expect_fail() {
+            name="$1"; pattern="$2"; shift 2
+            rm -f /tmp/invalid-payload.json
+            set +e
+            out="$(env "$@" PATH="/tmp/fakebin:$PATH" python3 "$SCRIPT" 2>&1)"
+            rc=$?
+            set -e
+            echo "[$name] rc=$rc output: $out"
+            if [ "$rc" -eq 0 ]; then
+              echo "FAIL [$name]: expected non-zero exit"; fails=$((fails+1)); return
+            fi
+            if ! echo "$out" | grep -q "$pattern"; then
+              echo "FAIL [$name]: expected message matching '$pattern'"; fails=$((fails+1)); return
+            fi
+            if [ -f /tmp/invalid-payload.json ]; then
+              echo "FAIL [$name]: payload should not have been sent"; fails=$((fails+1)); return
+            fi
+            echo "PASS [$name]"
+          }
+
+          expect_fail "bad status" "status must be 'in_progress' or 'completed'" STATUS=bogus
+          expect_fail "delivery-id without event-type" "must be set together" STATUS=completed CONCLUSION=success DELIVERY_ID_OVERRIDE=abc
+          expect_fail "event-type without delivery-id" "must be set together" STATUS=completed CONCLUSION=success EVENT_TYPE_OVERRIDE=nightly
+          expect_fail "bad event-type" "event-type must be 'nightly' or 'periodic'" STATUS=completed DELIVERY_ID_OVERRIDE=abc EVENT_TYPE_OVERRIDE=weekly
+          expect_fail "nightly in_progress" "require status 'completed'" STATUS=in_progress DELIVERY_ID_OVERRIDE=abc EVENT_TYPE_OVERRIDE=nightly
+          expect_fail "bad client payload" "CLIENT_PAYLOAD is not valid JSON" STATUS=in_progress "CLIENT_PAYLOAD={not json"
+          expect_fail "bad test results" "TEST_RESULTS is not valid JSON" STATUS=completed CONCLUSION=success "TEST_RESULTS={oops"
+          expect_fail "failed tests not array" "FAILED_TESTS_DETAIL must be a JSON array" STATUS=completed CONCLUSION=success 'FAILED_TESTS_DETAIL={"name":"x"}'
+
+          # Invalid triage verdict is only a warning: callback still sent without it.
+          rm -f /tmp/invalid-payload.json
+          out="$(env STATUS=completed CONCLUSION=success 'TRIAGE_VERDICT=["not","object"]' PATH="/tmp/fakebin:$PATH" python3 "$SCRIPT" 2>&1)" || { echo "FAIL [triage]: should not fail: $out"; fails=$((fails+1)); }
+          echo "[triage] output: $out"
+          if echo "$out" | grep -q "ignoring invalid TRIAGE_VERDICT" && \
+             python3 -c 'import json; w=json.load(open("/tmp/invalid-payload.json"))["workflow"]; assert "triage_verdict" not in w'; then
+            echo "PASS [triage]"
+          else
+            echo "FAIL [triage]: expected warning and verdict dropped"; fails=$((fails+1))
+          fi
+
+          if [ "$fails" -ne 0 ]; then
+            echo "FAIL: $fails case(s) failed"
+            exit 1
+          fi
+          echo "PASS: all validation cases"
+
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          status: bogus
+          callback-url: http://127.0.0.1:9/
+
+      - name: Assert action failed on invalid status
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected failure for invalid status, got '$OUTCOME'"
+            exit 1
+          fi
+          if [ -f /tmp/action-payload.json ]; then
+            echo "FAIL: no callback should have been sent"
+            exit 1
+          fi
+          echo "PASS"

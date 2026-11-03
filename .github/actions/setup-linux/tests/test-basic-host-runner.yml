@@ -1,0 +1,113 @@
+name: Test basic host (non-container) runner
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock binaries (aws, docker, curl, lspci, sudo, systemctl)
+        run: |
+          set -euo pipefail
+          MOCK="$RUNNER_TEMP/mockbin"
+          LOG="$RUNNER_TEMP/mock.log"
+          mkdir -p "$MOCK"
+          : > "$LOG"
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+
+          cat > "$MOCK/curl" <<EOF
+          #!/bin/bash
+          case "\$*" in
+            *169.254.169.254/latest/api/token*) echo "mock-token"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/*) echo "mock-metadata"; exit 0 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+
+          cat > "$MOCK/aws" <<EOF
+          #!/bin/bash
+          echo "aws \$*" >> "$LOG"
+          case "\$1 \$2" in
+            "sts get-caller-identity")
+              printf '{\n    "UserId": "AIDAEXAMPLE",\n    "Account": "123456789012",\n    "Arn": "arn:aws:iam::123456789012:user/test"\n}\n' ;;
+            "ecr get-login-password") echo "mock-password" ;;
+          esac
+          exit 0
+          EOF
+
+          cat > "$MOCK/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG"
+          if [ "\$1" = "login" ]; then
+            pw="\$(cat)"
+            echo "docker-login-password \$pw" >> "$LOG"
+          fi
+          exit 0
+          EOF
+
+          cat > "$MOCK/lspci" <<EOF
+          #!/bin/bash
+          echo "00:00.0 Host bridge: Intel Corporation 440FX"
+          EOF
+
+          cat > "$MOCK/systemctl" <<EOF
+          #!/bin/bash
+          echo "systemctl \$*" >> "$LOG"
+          exit 0
+          EOF
+
+          cat > "$MOCK/sudo" <<EOF
+          #!/bin/bash
+          exec "\$@"
+          EOF
+
+          chmod +x "$MOCK"/*
+          echo "$MOCK" >> "$GITHUB_PATH"
+      - name: Ensure not detected as container runner
+        run: |
+          if [ -f /.inarc ] || [ -f /.incontainer ]; then
+            rm -f /.inarc /.incontainer 2>/dev/null || sudo rm -f /.inarc /.incontainer
+          fi
+      - id: action
+        uses: .
+      - name: Assert environment variables exported and directories created
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          echo "RUNNER_DOCS_DIR=$RUNNER_DOCS_DIR"
+          fail=0
+          [ "$RUNNER_ARTIFACT_DIR" = "$RUNNER_TEMP/artifacts" ] || { echo "FAIL: RUNNER_ARTIFACT_DIR"; fail=1; }
+          [ "$RUNNER_TEST_RESULTS_DIR" = "$RUNNER_TEMP/test-results" ] || { echo "FAIL: RUNNER_TEST_RESULTS_DIR"; fail=1; }
+          [ "$RUNNER_DOCS_DIR" = "$RUNNER_TEMP/docs" ] || { echo "FAIL: RUNNER_DOCS_DIR"; fail=1; }
+          for d in "$RUNNER_ARTIFACT_DIR" "$RUNNER_TEST_RESULTS_DIR" "$RUNNER_DOCS_DIR"; do
+            [ -d "$d" ] || { echo "FAIL: directory $d missing"; fail=1; }
+          done
+          [ "$fail" = 0 ] || exit 1
+          echo "PASS"
+      - name: Assert github env file preserved
+        run: |
+          F="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          if [ ! -s "$F" ]; then
+            echo "FAIL: $F missing or empty"
+            exit 1
+          fi
+          grep -q '^GITHUB' "$F" || { echo "FAIL: no GITHUB vars in $F"; exit 1; }
+          echo "PASS"
+      - name: Assert ECR login and docker cleanup happened
+        run: |
+          cat "$RUNNER_TEMP/mock.log"
+          LOG="$RUNNER_TEMP/mock.log"
+          grep -q '^aws sts get-caller-identity' "$LOG" || { echo "FAIL: sts not called"; exit 1; }
+          grep -q '^aws ecr get-login-password --region us-east-1' "$LOG" || { echo "FAIL: ecr get-login-password not called"; exit 1; }
+          grep -q '^docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com' "$LOG" || { echo "FAIL: docker login wrong"; exit 1; }
+          grep -q '^docker-login-password mock-password' "$LOG" || { echo "FAIL: password not piped"; exit 1; }
+          grep -q '^docker system prune -af' "$LOG" || { echo "FAIL: docker prune not run on host runner"; exit 1; }
+          echo "PASS"
+      - name: Assert GPU_FLAG not set (no NVIDIA)
+        run: |
+          echo "GPU_FLAG='${GPU_FLAG:-}'"
+          if [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG should not be set"
+            exit 1
+          fi
+          echo "PASS"

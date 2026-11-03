@@ -1,0 +1,28 @@
+name: Test linux export (no quotes)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install export script at the path the action expects
+        run: |
+          mkdir -p test-infra/.github/scripts
+          cp tests/fixtures/export_matrix_variables.py test-infra/.github/scripts/export_matrix_variables.py
+          rm -f "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}" "${RUNNER_TEMP}/matrix_to_export.json"
+      - id: action
+        uses: .
+        with:
+          binary-matrix: '{"python_version": "3.10", "gpu_arch_type": "cuda"}'
+          target-os: linux
+      - name: Assert exported variables
+        run: |
+          f="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          echo "--- matrix json"; cat "${RUNNER_TEMP}/matrix_to_export.json"
+          echo "--- env file"; cat "$f" || { echo "FAIL: env file missing"; exit 1; }
+          grep -q '"python_version": "3.10"' "${RUNNER_TEMP}/matrix_to_export.json" || { echo "FAIL: matrix json not written"; exit 1; }
+          grep -qx 'PYTHON_VERSION=3.10' "$f" || { echo "FAIL: PYTHON_VERSION missing/quoted"; exit 1; }
+          grep -qx 'GPU_ARCH_TYPE=cuda' "$f" || { echo "FAIL: GPU_ARCH_TYPE missing/quoted"; exit 1; }
+          if grep -q '"' "$f"; then echo "FAIL: linux values must not be quoted"; exit 1; fi
+          echo "PASS"

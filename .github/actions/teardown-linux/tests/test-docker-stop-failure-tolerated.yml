@@ -1,0 +1,35 @@
+name: Test docker stop failure is tolerated
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker (ps returns ids, stop fails)
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          LOG="$RUNNER_TEMP/calls.log"
+          : > "$LOG"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<EOF
+          #!/bin/sh
+          echo "docker \$*" >> "$LOG"
+          case "\$1" in
+            ps) echo abc123; echo def456; exit 0 ;;
+            stop) exit 1 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          skip-wait-ssh: "1"
+      - name: Assert stop got container ids and prune still ran
+        run: |
+          LOG="$RUNNER_TEMP/calls.log"
+          cat "$LOG"
+          if ! grep -q "^docker stop abc123 def456" "$LOG"; then echo "FAIL: stop not called with container ids"; exit 1; fi
+          if ! grep -q "^docker system prune -af" "$LOG"; then echo "FAIL: prune not called after stop failure"; exit 1; fi
+          echo "PASS"

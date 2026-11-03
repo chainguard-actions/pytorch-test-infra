@@ -1,0 +1,49 @@
+name: Test setup-windows with cuda version and no EC2 metadata
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fakes (metadata endpoint unreachable)
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$FAKEBIN"
+          cat > "$FAKEBIN/powershell" <<'EOF'
+          #!/bin/sh
+          echo "fake powershell invoked: $*"
+          exit 0
+          EOF
+          cp "$FAKEBIN/powershell" "$FAKEBIN/pwsh"
+          cat > "$FAKEBIN/cygpath" <<'EOF'
+          #!/bin/sh
+          for a in "$@"; do last="$a"; done
+          echo "$last"
+          EOF
+          # Fake curl: metadata endpoint fails immediately (not on EC2)
+          cat > "$FAKEBIN/curl" <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            *169.254.169.254*) echo "curl: (7) Failed to connect" >&2; exit 7 ;;
+          esac
+          exec /usr/bin/curl "$@"
+          EOF
+          chmod +x "$FAKEBIN"/*
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: "12.1"
+      - name: Assert action completed and set environment
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          [ "$OUTCOME" = "success" ] || { echo "FAIL: action did not succeed"; exit 1; }
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          [ -n "$RUNNER_ARTIFACT_DIR" ] && [ -d "$RUNNER_ARTIFACT_DIR" ] || { echo "FAIL: artifact dir"; exit 1; }
+          [ -n "$RUNNER_TEST_RESULTS_DIR" ] && [ -d "$RUNNER_TEST_RESULTS_DIR" ] || { echo "FAIL: test-results dir"; exit 1; }
+          [ "$(git config --global --get core.longpaths)" = "true" ] || { echo "FAIL: core.longpaths"; exit 1; }
+          echo "PASS"

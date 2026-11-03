@@ -1,0 +1,36 @@
+name: Test in-container runner detection
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create /.incontainer marker
+        run: |
+          if [ "$(id -u)" = 0 ]; then SUDO=""; else SUDO="sudo"; fi
+          $SUDO rm -f /.inarc || true
+          $SUDO touch /.incontainer
+          ls -la /.incontainer
+      - id: action
+        uses: .
+      - name: Assert outputs
+        env:
+          HAS_NVIDIA: ${{ steps.action.outputs.has-nvidia }}
+          IN_CONTAINER: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "has-nvidia: $HAS_NVIDIA"
+          echo "in-container-runner: $IN_CONTAINER"
+          if [ "$IN_CONTAINER" != "true" ]; then
+            echo "FAIL: expected in-container-runner=true"
+            exit 1
+          fi
+          if [ "$HAS_NVIDIA" != "false" ]; then
+            echo "FAIL: expected has-nvidia=false"
+            exit 1
+          fi
+          if [ "${HAS_NVIDIA_GPU:-}" != "false" ]; then
+            echo "FAIL: expected HAS_NVIDIA_GPU=false"
+            exit 1
+          fi
+          echo "PASS"

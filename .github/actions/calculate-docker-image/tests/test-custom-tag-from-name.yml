@@ -1,0 +1,47 @@
+name: Test custom tag prefix from image name
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            *secretsmanager*) echo '{"SecretString":"{\"docker_hub_readonly_token\":\"x\"}"}' ;;
+            *) echo "fake-password" ;;
+          esac
+          exit 0
+          EOF
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/act-fake-docker-calls
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws" "$RUNNER_TEMP/fakebin/docker"
+          rm -f /tmp/act-fake-docker-calls /tmp/act-docker-build-marker
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: my-image:cuda12
+          docker-build-dir: tests/fixtures/docker
+          repo-name: myrepo
+          docker-registry: registry.example.com
+      - name: Assert computed image includes custom tag prefix
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          HASH=$(git rev-parse HEAD:tests/fixtures/docker)
+          EXPECTED="registry.example.com/myrepo/my-image:cuda12-${HASH}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: image mismatch"
+            exit 1
+          fi
+          echo "PASS"

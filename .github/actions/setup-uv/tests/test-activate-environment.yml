@@ -1,0 +1,30 @@
+name: Test activate-environment
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          python-version: "3.12"
+          activate-environment: "true"
+      - name: Assert virtual environment is activated
+        run: |
+          echo "VIRTUAL_ENV: $VIRTUAL_ENV"
+          if [ -z "$VIRTUAL_ENV" ] || [ ! -d "$VIRTUAL_ENV" ]; then
+            echo "FAIL: VIRTUAL_ENV not set or missing"
+            exit 1
+          fi
+          if [ ! -x "$VIRTUAL_ENV/bin/python" ]; then
+            echo "FAIL: venv python missing"
+            exit 1
+          fi
+          PYV="$("$VIRTUAL_ENV/bin/python" --version)"
+          echo "venv python: $PYV"
+          case "$PYV" in
+            *3.12*) echo "PASS" ;;
+            *) echo "FAIL: expected Python 3.12"; exit 1 ;;
+          esac

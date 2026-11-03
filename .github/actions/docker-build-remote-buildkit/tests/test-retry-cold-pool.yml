@@ -1,0 +1,32 @@
+name: Test retry on connection-phase failure
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FAKE_DOCKER_MODE: cold-then-success
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -rf /tmp/fake-docker
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" "$RUNNER_TEMP/fakebin/docker"
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: ghcr.io/example/retry:1
+          connect-attempts: '5'
+          connect-delay: '0'
+      - name: Assert retried until success
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          count="$(cat /tmp/fake-docker/build-count)"
+          echo "builds: $count image: $IMAGE"
+          [ "$count" = "3" ] || { echo "FAIL: expected 3 build attempts"; exit 1; }
+          [ "$IMAGE" = "ghcr.io/example/retry:1" ] || { echo "FAIL: image output"; exit 1; }
+          echo "PASS"

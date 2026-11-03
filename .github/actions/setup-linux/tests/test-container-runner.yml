@@ -1,0 +1,88 @@
+name: Test container runner
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock binaries (aws, docker, curl, sudo)
+        run: |
+          set -euo pipefail
+          MOCK="$RUNNER_TEMP/mockbin"
+          LOG="$RUNNER_TEMP/mock.log"
+          mkdir -p "$MOCK"
+          : > "$LOG"
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+
+          cat > "$MOCK/curl" <<EOF
+          #!/bin/bash
+          case "\$*" in
+            *169.254.169.254*) echo "mock-value"; exit 0 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+
+          cat > "$MOCK/aws" <<EOF
+          #!/bin/bash
+          echo "aws \$*" >> "$LOG"
+          case "\$1 \$2" in
+            "sts get-caller-identity")
+              printf '{\n    "UserId": "AIDAEXAMPLE",\n    "Account": "999988887777",\n    "Arn": "arn:aws:iam::999988887777:user/test"\n}\n' ;;
+            "ecr get-login-password") echo "mock-password" ;;
+          esac
+          exit 0
+          EOF
+
+          cat > "$MOCK/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG"
+          [ "\$1" = "login" ] && cat > /dev/null
+          exit 0
+          EOF
+
+          cat > "$MOCK/sudo" <<EOF
+          #!/bin/bash
+          exec "\$@"
+          EOF
+
+          chmod +x "$MOCK"/*
+          echo "$MOCK" >> "$GITHUB_PATH"
+      - name: Mark as container runner
+        run: |
+          touch /.incontainer 2>/dev/null || sudo touch /.incontainer
+          ls -la /.incontainer
+      - id: action
+        uses: .
+      - name: Assert environment variables exported
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          [ "$RUNNER_ARTIFACT_DIR" = "$RUNNER_TEMP/artifacts" ] && [ -d "$RUNNER_ARTIFACT_DIR" ] || { echo "FAIL: RUNNER_ARTIFACT_DIR"; exit 1; }
+          [ "$RUNNER_TEST_RESULTS_DIR" = "$RUNNER_TEMP/test-results" ] && [ -d "$RUNNER_TEST_RESULTS_DIR" ] || { echo "FAIL: RUNNER_TEST_RESULTS_DIR"; exit 1; }
+          [ "$RUNNER_DOCS_DIR" = "$RUNNER_TEMP/docs" ] && [ -d "$RUNNER_DOCS_DIR" ] || { echo "FAIL: RUNNER_DOCS_DIR"; exit 1; }
+          echo "PASS"
+      - name: Assert ECR login done but host docker cleanup skipped
+        run: |
+          LOG="$RUNNER_TEMP/mock.log"
+          cat "$LOG"
+          grep -q '^docker login --username AWS --password-stdin 999988887777.dkr.ecr.us-east-1.amazonaws.com' "$LOG" || { echo "FAIL: docker login wrong"; exit 1; }
+          if grep -q '^docker system prune' "$LOG"; then
+            echo "FAIL: docker prune should be skipped in container runner"
+            exit 1
+          fi
+          if grep -q '^docker version' "$LOG"; then
+            echo "FAIL: docker start step should be skipped in container runner"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert GPU_FLAG not set (no /dev/nvidiaX)
+        run: |
+          if compgen -G "/dev/nvidia[0-9]" > /dev/null; then
+            echo "Host has NVIDIA devices; skipping assertion"
+            exit 0
+          fi
+          if [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG should not be set, got '$GPU_FLAG'"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,44 @@
+name: Test checkout of tag with full history
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: v4.0.0
+          fetch-depth: 0
+          persist-credentials: false
+          path: tag-target
+      - name: Assert tag checked out
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          cd "$GITHUB_WORKSPACE/tag-target"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          TAG_SHA="$(git rev-parse 'v4.0.0^{commit}')"
+          echo "commit output: $COMMIT"
+          echo "HEAD: $HEAD_SHA tag: $TAG_SHA"
+          if [ "$HEAD_SHA" != "$TAG_SHA" ]; then
+            echo "FAIL: HEAD is not at tag v4.0.0"
+            exit 1
+          fi
+          if [ "$COMMIT" != "$HEAD_SHA" ]; then
+            echo "FAIL: commit output mismatch"
+            exit 1
+          fi
+          COUNT="$(git rev-list --count HEAD)"
+          echo "history count: $COUNT"
+          if [ "$COUNT" -le 1 ]; then
+            echo "FAIL: expected full history"
+            exit 1
+          fi
+          if git config --local --get-regexp 'http\..*extraheader' >/dev/null 2>&1; then
+            echo "FAIL: credentials persisted despite persist-credentials=false"
+            exit 1
+          fi
+          echo "PASS"

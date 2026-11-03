@@ -1,0 +1,63 @@
+name: Test basic usage (no S3 upload)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare dummy binaries and recording check_s3.py stub
+        run: |
+          set -e
+          echo "fake clang-tidy" > clang-tidy
+          echo "fake clang-format" > clang-format
+          mkdir -p tools/clang-tidy-checks
+          if [ -f tools/clang-tidy-checks/check_s3.py ]; then
+            cp tools/clang-tidy-checks/check_s3.py /tmp/check_s3.py.bak
+          fi
+          rm -f /tmp/check_s3_calls.log
+          cat > tools/clang-tidy-checks/check_s3.py <<'EOF'
+          import sys
+          with open("/tmp/check_s3_calls.log", "a") as f:
+              f.write(" ".join(sys.argv[1:]) + "\n")
+          EOF
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          platform: linux64
+          version: "17.0.6"
+      - name: Assert check_s3.py called with expected arguments
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "--- recorded calls ---"
+          cat /tmp/check_s3_calls.log || { echo "FAIL: check_s3.py was never called"; exit 1; }
+          if ! grep -qx -- "--s3-key linux64/17.0.6/clang-tidy --local-file clang-tidy" /tmp/check_s3_calls.log; then
+            echo "FAIL: missing clang-tidy check call"
+            exit 1
+          fi
+          if ! grep -qx -- "--s3-key linux64/17.0.6/clang-format --local-file clang-format" /tmp/check_s3_calls.log; then
+            echo "FAIL: missing clang-format check call"
+            exit 1
+          fi
+          if [ "$(wc -l < /tmp/check_s3_calls.log)" -ne 2 ]; then
+            echo "FAIL: expected exactly 2 calls"
+            exit 1
+          fi
+          if [ "$OUTCOME" != "success" ] && [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+          # failure is tolerated only because actions/upload-artifact needs an artifact server under act
+          echo "PASS"
+      - name: Restore check_s3.py
+        if: always()
+        run: |
+          if [ -f /tmp/check_s3.py.bak ]; then
+            cp /tmp/check_s3.py.bak tools/clang-tidy-checks/check_s3.py
+          else
+            rm -f tools/clang-tidy-checks/check_s3.py
+          fi
+          rm -f clang-tidy clang-format

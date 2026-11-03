@@ -1,0 +1,76 @@
+name: Test setup-windows with cuda-version cpu
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fakes for Windows-only tools and EC2 metadata
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$FAKEBIN"
+          # Fake powershell: the runner is Linux, so just log and succeed
+          cat > "$FAKEBIN/powershell" <<'EOF'
+          #!/bin/sh
+          echo "fake powershell invoked: $*"
+          exit 0
+          EOF
+          cp "$FAKEBIN/powershell" "$FAKEBIN/pwsh"
+          # Fake cygpath: identity conversion of the last argument
+          cat > "$FAKEBIN/cygpath" <<'EOF'
+          #!/bin/sh
+          for a in "$@"; do last="$a"; done
+          echo "$last"
+          EOF
+          # Fake curl: answer EC2 metadata requests quickly, honor -o
+          cat > "$FAKEBIN/curl" <<'EOF'
+          #!/bin/sh
+          out=""; prev=""; url=""
+          for arg in "$@"; do
+            case "$prev" in -o|--output) out="$arg" ;; esac
+            case "$arg" in http*) url="$arg" ;; esac
+            prev="$arg"
+          done
+          case "$url" in
+            *169.254.169.254*)
+              case "$url" in
+                */api/token) payload="fake-token-value" ;;
+                *) payload="fake-${url##*/}" ;;
+              esac
+              if [ -n "$out" ]; then printf '%s' "$payload" > "$out"; else printf '%s' "$payload"; fi
+              exit 0
+              ;;
+          esac
+          exec /usr/bin/curl "$@"
+          EOF
+          chmod +x "$FAKEBIN"/*
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: cpu
+      - name: Assert git global config was set
+        run: |
+          for key in core.longpaths core.symlinks core.fsmonitor; do
+            echo "$key=$(git config --global --get $key || true)"
+          done
+          [ "$(git config --global --get core.longpaths)" = "true" ] || { echo "FAIL: core.longpaths"; exit 1; }
+          [ "$(git config --global --get core.symlinks)" = "true" ] || { echo "FAIL: core.symlinks"; exit 1; }
+          [ "$(git config --global --get core.fsmonitor)" = "false" ] || { echo "FAIL: core.fsmonitor"; exit 1; }
+          echo "PASS"
+      - name: Assert runner env vars and directories
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "${RUNNER_TEMP}/artifacts" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR expected ${RUNNER_TEMP}/artifacts"
+            exit 1
+          fi
+          if [ "$RUNNER_TEST_RESULTS_DIR" != "${RUNNER_TEMP}/test-results" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR expected ${RUNNER_TEMP}/test-results"
+            exit 1
+          fi
+          [ -d "$RUNNER_ARTIFACT_DIR" ] || { echo "FAIL: artifact dir missing"; exit 1; }
+          [ -d "$RUNNER_TEST_RESULTS_DIR" ] || { echo "FAIL: test-results dir missing"; exit 1; }
+          echo "PASS"
