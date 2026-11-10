@@ -1,0 +1,368 @@
+from __future__ import annotations
+
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, NoReturn, cast
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+
+from greenlight import drci_poke
+from greenlight.constants import DRCI_ENDPOINT
+from greenlight.guards import IterationTimeout
+
+if TYPE_CHECKING:
+    from greenlight.config import Config
+
+
+class _Recorder:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+
+class _FakeSleep:
+    def __init__(self, rec: _Recorder) -> None:
+        self._rec = rec
+        self.slept: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        self._rec.events.append(f"sleep:{seconds}")
+        self.slept.append(seconds)
+
+
+class _FakePost:
+    def __init__(self, rec: _Recorder, status: int = 200) -> None:
+        self._rec = rec
+        self._status = status
+        self.calls: list[tuple[str, bytes, dict[str, str]]] = []
+
+    def __call__(self, url: str, body: bytes, headers: dict[str, str]) -> int:
+        self._rec.events.append("post")
+        self.calls.append((url, body, headers))
+        return self._status
+
+
+def _boom_sleep(seconds: float) -> NoReturn:
+    raise AssertionError("sleep should not be called")
+
+
+def _boom_post(url: str, body: bytes, headers: dict[str, str]) -> NoReturn:
+    raise AssertionError("post should not be called")
+
+
+def _query(url: str) -> dict[str, list[str]]:
+    return parse_qs(urlparse(url).query)
+
+
+def _form(body: bytes) -> dict[str, list[str]]:
+    return parse_qs(body.decode("utf-8"))
+
+
+@pytest.fixture
+def poke_config(make_config):
+    def _make(**overrides):
+        base = {"drci_token": "drci-key", "drci_poke_delay_seconds": 0.0}
+        return make_config(**{**base, **overrides})
+
+    return _make
+
+
+def test_poke_sends_pr_number_as_query_parameter(poke_config):
+    rec = _Recorder()
+    post = _FakePost(rec)
+
+    drci_poke.poke("pytorch/pytorch", 1234, poke_config(), sleep=_FakeSleep(rec), post=post)
+
+    url, _, _ = post.calls[0]
+    # prNumber in the body instead would make the endpoint sweep the whole repo (~900s).
+    assert url.startswith(f"{DRCI_ENDPOINT}?")
+    assert _query(url) == {"prNumber": ["1234"]}
+
+
+def test_poke_sends_bare_repo_name_and_org_in_form_body(poke_config):
+    rec = _Recorder()
+    post = _FakePost(rec)
+
+    drci_poke.poke("meta-pytorch/torchcodec", 7, poke_config(), sleep=_FakeSleep(rec), post=post)
+
+    _, body, headers = post.calls[0]
+    assert _form(body) == {"repo": ["torchcodec"], "org": ["meta-pytorch"]}
+    assert b"owner" not in body
+    assert headers["Content-Type"] == "application/x-www-form-urlencoded"
+    # The body must never carry the prNumber; it belongs in the query string.
+    assert "prNumber" not in _form(body)
+
+
+def test_poke_sends_raw_authorization_without_bearer_prefix(poke_config):
+    rec = _Recorder()
+    post = _FakePost(rec)
+
+    drci_poke.poke("pytorch/pytorch", 1, poke_config(drci_token="drci-key"), sleep=_FakeSleep(rec), post=post)
+
+    _, _, headers = post.calls[0]
+    assert headers["Authorization"] == "drci-key"
+    assert not headers["Authorization"].startswith("Bearer")
+
+
+def test_poke_adds_internal_bot_header_when_configured(poke_config):
+    rec = _Recorder()
+    post = _FakePost(rec)
+
+    drci_poke.poke("pytorch/pytorch", 1, poke_config(drci_internal_token="hud-key"), sleep=_FakeSleep(rec), post=post)
+
+    _, _, headers = post.calls[0]
+    assert headers["x-hud-internal-bot"] == "hud-key"
+
+
+def test_poke_omits_internal_bot_header_when_unset(poke_config):
+    rec = _Recorder()
+    post = _FakePost(rec)
+
+    drci_poke.poke("pytorch/pytorch", 1, poke_config(drci_internal_token=None), sleep=_FakeSleep(rec), post=post)
+
+    _, _, headers = post.calls[0]
+    assert "x-hud-internal-bot" not in headers
+
+
+def test_poke_sleeps_the_configured_delay_before_posting(poke_config):
+    rec = _Recorder()
+    sleep = _FakeSleep(rec)
+    post = _FakePost(rec)
+
+    drci_poke.poke("pytorch/pytorch", 1, poke_config(drci_poke_delay_seconds=12.5), sleep=sleep, post=post)
+
+    # The wait exists to let the just-uploaded state row reach ClickHouse, so it must precede the POST.
+    assert rec.events == ["sleep:12.5", "post"]
+    assert sleep.slept == [12.5]
+
+
+def test_poke_with_zero_delay_posts_without_sleeping(poke_config):
+    rec = _Recorder()
+    post = _FakePost(rec)
+
+    drci_poke.poke("pytorch/pytorch", 1, poke_config(drci_poke_delay_seconds=0.0), sleep=_boom_sleep, post=post)
+
+    assert rec.events == ["post"]
+
+
+def test_poke_without_token_skips_the_request(poke_config, caplog):
+    with caplog.at_level(logging.WARNING, logger="greenlight"):
+        drci_poke.poke("pytorch/pytorch", 1, poke_config(drci_token=None), sleep=_boom_sleep, post=_boom_post)
+
+    assert any("no Dr. CI token configured" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("repo", ["pytorch", "", "/pytorch", "pytorch/"])
+def test_poke_rejects_malformed_repo_without_requesting(repo, poke_config, caplog):
+    with caplog.at_level(logging.ERROR, logger="greenlight"):
+        drci_poke.poke(repo, 1, poke_config(), sleep=_boom_sleep, post=_boom_post)
+
+    assert any("is not in owner/name form" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("status", [200, 201, 204, 299])
+def test_poke_logs_success_for_2xx(status, poke_config, caplog):
+    rec = _Recorder()
+
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        drci_poke.poke("pytorch/pytorch", 5, poke_config(), sleep=_FakeSleep(rec), post=_FakePost(rec, status))
+
+    assert any(f"poked Dr. CI for pytorch/pytorch#5 (HTTP {status})" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("status", [300, 400, 401, 403, 429, 500, 502, 503])
+def test_poke_swallows_non_2xx_and_logs_the_code(status, poke_config, caplog):
+    rec = _Recorder()
+
+    with caplog.at_level(logging.ERROR, logger="greenlight"):
+        drci_poke.poke("pytorch/pytorch", 5, poke_config(), sleep=_FakeSleep(rec), post=_FakePost(rec, status))
+
+    # A poke is best-effort: whatever the endpoint answers, log the code and never raise.
+    assert any(f"returned HTTP {status}" in record.getMessage() for record in caplog.records)
+
+
+def test_poke_swallows_transport_error(poke_config, caplog):
+    def exploding_post(url: str, body: bytes, headers: dict[str, str]) -> NoReturn:
+        raise OSError("connection reset")
+
+    with caplog.at_level(logging.ERROR, logger="greenlight"):
+        drci_poke.poke("pytorch/pytorch", 9, poke_config(), sleep=_boom_sleep, post=exploding_post)
+
+    assert any("Dr. CI poke for pytorch/pytorch#9 failed" in record.getMessage() for record in caplog.records)
+    assert any(record.exc_info is not None for record in caplog.records)
+
+
+def test_poke_swallows_sleep_failure_without_posting(poke_config, caplog):
+    rec = _Recorder()
+    post = _FakePost(rec)
+
+    def exploding_sleep(seconds: float) -> NoReturn:
+        raise RuntimeError("interrupted")
+
+    with caplog.at_level(logging.ERROR, logger="greenlight"):
+        drci_poke.poke("pytorch/pytorch", 9, poke_config(drci_poke_delay_seconds=1.0), sleep=exploding_sleep, post=post)
+
+    assert post.calls == []
+    assert any("Dr. CI poke for pytorch/pytorch#9 failed" in record.getMessage() for record in caplog.records)
+
+
+def test_poke_propagates_iteration_timeout_from_the_post(poke_config):
+    def timing_out_post(url: str, body: bytes, headers: dict[str, str]) -> NoReturn:
+        raise IterationTimeout("iteration exceeded")
+
+    # IterationTimeout is the caller's per-iteration watchdog signal, not a poke failure: SIGALRM is
+    # one-shot, so swallowing it would strand the scan past its deadline with the poke unretried.
+    with pytest.raises(IterationTimeout):
+        drci_poke.poke("pytorch/pytorch", 9, poke_config(), sleep=_boom_sleep, post=timing_out_post)
+
+
+def test_poke_propagates_iteration_timeout_from_the_sleep(poke_config):
+    rec = _Recorder()
+    post = _FakePost(rec)
+
+    def timing_out_sleep(seconds: float) -> NoReturn:
+        raise IterationTimeout("iteration exceeded")
+
+    with pytest.raises(IterationTimeout):
+        drci_poke.poke(
+            "pytorch/pytorch", 9, poke_config(drci_poke_delay_seconds=1.0), sleep=timing_out_sleep, post=post
+        )
+
+    assert post.calls == []
+
+
+class _FakeResponse:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+
+class _FakePoolManager:
+    """Structural stand-in for urllib3.PoolManager recording how it was built and called."""
+
+    def __init__(self, *, timeout: object, retries: object) -> None:
+        self.timeout = timeout
+        self.retries = retries
+        self.requests: list[tuple[str, str, bytes, dict[str, str]]] = []
+        self.cleared = 0
+
+    def __enter__(self) -> _FakePoolManager:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.cleared += 1
+
+    def request(self, method: str, url: str, *, body: bytes, headers: dict[str, str]) -> _FakeResponse:
+        self.requests.append((method, url, body, headers))
+        return _FakeResponse(207)
+
+
+@pytest.fixture
+def fake_pool_managers(monkeypatch):
+    import urllib3
+
+    built: list[_FakePoolManager] = []
+
+    def factory(**kwargs: object) -> _FakePoolManager:
+        manager = _FakePoolManager(**kwargs)
+        built.append(manager)
+        return manager
+
+    monkeypatch.setattr(urllib3, "PoolManager", factory)
+    return built
+
+
+def test_default_post_issues_a_bounded_untried_post(fake_pool_managers):
+    import urllib3
+
+    status = drci_poke._default_post("https://hud.example/api?prNumber=3", b"repo=pytorch&org=pytorch", {"A": "b"})
+
+    assert status == 207
+    manager = fake_pool_managers[0]
+    assert manager.requests == [("POST", "https://hud.example/api?prNumber=3", b"repo=pytorch&org=pytorch", {"A": "b"})]
+    # An unbounded or retrying request could outlast the calling job; both must stay pinned.
+    assert manager.retries is False
+    assert isinstance(manager.timeout, urllib3.Timeout)
+    assert manager.timeout.connect_timeout == drci_poke._CONNECT_TIMEOUT_SECONDS
+    assert manager.timeout.read_timeout == drci_poke._READ_TIMEOUT_SECONDS
+    assert manager.cleared == 1
+
+
+def test_default_post_timeouts_stay_well_under_a_ci_job_budget():
+    # The poke runs inside a 15-minute job; the whole request must cost a small slice of it.
+    assert drci_poke._CONNECT_TIMEOUT_SECONDS + drci_poke._READ_TIMEOUT_SECONDS < 60.0
+
+
+def test_poke_default_seams_are_real_sleep_and_post():
+    import inspect
+    import time
+
+    defaults = inspect.signature(drci_poke.poke).parameters
+    assert defaults["sleep"].default is time.sleep
+    assert defaults["post"].default is drci_poke._default_post
+
+
+class _RefusingPool:
+    """Stands in for the poke pool when ``submit`` cannot take the work and raises instead."""
+
+    def __init__(self, error: BaseException) -> None:
+        self._error = error
+
+    def submit(self, *_args: object, **_kwargs: object) -> NoReturn:
+        raise self._error
+
+
+def _boom_poke(repo: str, pr_number: int, config: Config) -> NoReturn:
+    raise AssertionError("poke should not be called")
+
+
+def test_poke_submitter_logs_a_refused_submit_and_returns(poke_config, caplog):
+    poked: list[int] = []
+
+    def record_poke(repo: str, pr_number: int, config: Config) -> None:
+        poked.append(pr_number)
+
+    shut_down = RuntimeError("cannot schedule new futures after shutdown")
+    submit = drci_poke.poke_submitter(
+        cast("ThreadPoolExecutor", _RefusingPool(shut_down)), "pytorch/pytorch", record_poke, poke_config()
+    )
+
+    with caplog.at_level(logging.ERROR, logger="greenlight"):
+        submit(1)
+        submit(2)
+
+    # Both callers invoke this seam outside their own try blocks, which only holds because the poke
+    # swallows everything. Handing it to a pool does not: submit raises on a shut-down executor or a
+    # thread that will not start, and letting that escape would halt the scan mid-dispatch-loop.
+    assert poked == []
+    assert "failed to schedule Dr. CI poke for PR #1" in caplog.text
+    assert "failed to schedule Dr. CI poke for PR #2" in caplog.text
+
+
+def test_poke_submitter_lets_the_iteration_timeout_through(poke_config):
+    submit = drci_poke.poke_submitter(
+        cast("ThreadPoolExecutor", _RefusingPool(IterationTimeout("deadline"))),
+        "pytorch/pytorch",
+        _boom_poke,
+        poke_config(),
+    )
+
+    # The soft deadline arrives as SIGALRM raised on whatever the main thread is running, submit
+    # included, and IterationTimeout subclasses TimeoutError -> OSError -> Exception. Logged as a
+    # scheduling failure it would be indistinguishable from a full pool, and the one-shot timer would
+    # already be spent -- the rest of the pass would run with no soft deadline at all.
+    with pytest.raises(IterationTimeout):
+        submit(1)
+
+
+def test_poke_submitter_logs_a_failure_raised_inside_the_pool(poke_config, caplog):
+    def exploding_poke(repo: str, pr_number: int, config: Config) -> NoReturn:
+        raise RuntimeError(f"drci unreachable for #{pr_number}")
+
+    with caplog.at_level(logging.ERROR, logger="greenlight"), ThreadPoolExecutor(max_workers=1) as pool:
+        drci_poke.poke_submitter(pool, "pytorch/pytorch", exploding_poke, poke_config())(1)
+
+    # A future parks an unretrieved exception silently forever, so the outcome is read back in a done
+    # callback -- off-thread, the poke's own logging is the only other thing standing between a
+    # failure and total silence. It stays out of the scan's end-of-pass error aggregation either way:
+    # the poke is cosmetic and must never turn a scan red over a comment refresh.
+    assert "Dr. CI poke for PR #1 failed: drci unreachable for #1" in caplog.text

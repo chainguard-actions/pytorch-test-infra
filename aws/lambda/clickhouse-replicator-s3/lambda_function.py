@@ -1,0 +1,1347 @@
+import json
+import os
+import re
+import time
+
+# `import urllib` alone does not bind the `parse` submodule. encode_url_component
+# works today only because clickhouse_connect imports urllib.parse first.
+import urllib.parse
+from collections import defaultdict
+from enum import Enum
+from functools import lru_cache
+from typing import Any, Dict, List, Optional
+from warnings import warn
+
+import clickhouse_connect
+
+
+CLICKHOUSE_ENDPOINT = os.getenv("CLICKHOUSE_ENDPOINT", "")
+CLICKHOUSE_USERNAME = os.getenv("CLICKHOUSE_USERNAME", "default")
+CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
+
+
+class EventType(Enum):
+    PUT = "ObjectCreated"
+    REMOVE = "ObjectRemoved"
+
+
+@lru_cache(maxsize=1)
+def get_clickhouse_client() -> Any:
+    return clickhouse_connect.get_client(
+        host=CLICKHOUSE_ENDPOINT,
+        user=CLICKHOUSE_USERNAME,
+        password=CLICKHOUSE_PASSWORD,
+        secure=True,
+    )
+
+
+def lambda_handler(event: Any, context: Any) -> None:
+    # https://clickhouse.com/docs/en/integrations/python
+    counts = defaultdict(int)
+    for record in event["Records"]:
+        event_name = record.get("eventName", "")
+        try:
+            if event_name.startswith(EventType.PUT.value):
+                upsert_document(record)
+            elif event_name.startswith(EventType.REMOVE.value):
+                remove_document(record)
+            else:
+                warn(f"Unrecognized event type {event_name} in {json.dumps(record)}")
+
+            counts[event_name] += 1
+        except Exception as error:
+            warn(f"Failed to process {json.dumps(record)}: {error}")
+
+    print(f"Finish processing {json.dumps(counts)}")
+
+
+def encode_url_component(url):
+    return urllib.parse.quote(url)
+
+
+def handle_test_run_s3_small(table, bucket, key) -> List[Dict[str, Any]]:
+    def clean_up_query(query):
+        return " ".join([line.strip() for line in query.split("\n")])
+
+    def get_sys_err_out_parser(name):
+        # system-err and system-out generally have either the format:
+        # Tuple(text String) or Array(Tuple(text String))
+        # This function returns a query that will parse out the text field into an array of strings
+        return f"""
+        if(
+            JSONArrayLength(`{name}`) is null,
+            if(
+                JSONHas(`{name}`, 'text'),
+                array(JSONExtractString(`{name}`, 'text')),
+                [ ]
+            ),
+            JSONExtractArrayRaw(JSON_QUERY(`{name}`, '$[*].text'))
+        ) as `{name}`
+        """
+
+    def get_skipped_failure_parser_helper(name, type, field_to_check_for_existence):
+        # skipped and failure generally have either the format:
+        # Tuple(stuff) or Array(Tuple(stuff)).
+        # The stuff varies. The type input should be the string `Tuple(stuff)`
+        # The field_to_check_for_existence is the field that is checked to see
+        # if the skip/rerun exists or if it should be an empty array.  It is a
+        # dictionary key in the tuple
+        return f"""
+        if(
+            JSONArrayLength({name}) is null,
+            if(
+                JSONHas({name}, '{field_to_check_for_existence}'),
+                array(
+                    JSONExtract(
+                        {name},
+                        '{type}'
+                    )
+                ),
+                [ ]
+            ),
+            JSONExtract(
+                {name},
+                'Array({type})'
+            )
+        ) as {name}
+        """
+
+    # Cannot use general_adapter due to custom field for now()::DateTime64(9)
+    # time_inserted
+    # This feed has a best-effort materialized view. A failure while writing to
+    # that view must not fail the primary all_test_runs insert.
+    query = f"""
+    insert into {table} settings materialized_views_ignore_errors=1
+    select
+        classname,
+        duration,
+        {get_skipped_failure_parser_helper("error", "Tuple(type String, message String, text String)", "message")},
+        {get_skipped_failure_parser_helper("failure", "Tuple(type String, message String, text String)", "message")},
+        file,
+        invoking_file,
+        job_id,
+        line::Int64,
+        name,
+        {get_skipped_failure_parser_helper("rerun", "Tuple(message String, text String)", "message")},
+        result,
+        {get_skipped_failure_parser_helper("skipped", "Tuple(type String, message String, text String)", "message")},
+        status,
+        time,
+        now()::DateTime64(9) as time_inserted,
+        workflow_id,
+        workflow_run_attempt,
+        ('{bucket}', '{key}')
+    from
+        s3(
+            'https://{bucket}.s3.amazonaws.com/{encode_url_component(key)}',
+            'JSONEachRow',
+            '
+            `classname` String,
+            `duration` Float32,
+            `error` String,
+            `failure` String,
+            `file` String,
+            `invoking_file` String,
+            `job_id` Int64,
+            `line` Float32,
+            `name` String,
+            `properties` Tuple(property Tuple(name String, value String)),
+            `rerun` String,
+            `result` String,
+            `skipped` String,
+            `status` String,
+            `system-err` String,
+            `system-out` String,
+            `time` Float32,
+            `type_param` String,
+            `value_param` String,
+            `workflow_id` Int64,
+            `workflow_run_attempt` Int32',
+            'gzip'
+        )
+    """
+    query = clean_up_query(query)
+    try:
+        get_clickhouse_client().query(query)
+    except Exception as e:
+        log_failure_to_clickhouse(table, bucket, key, e)
+
+
+def handle_test_run_s3(table, bucket, key) -> List[Dict[str, Any]]:
+    def clean_up_query(query):
+        return " ".join([line.strip() for line in query.split("\n")])
+
+    def get_sys_err_out_parser(name):
+        # system-err and system-out generally have either the format:
+        # Tuple(text String) or Array(Tuple(text String))
+        # This function returns a query that will parse out the text field into an array of strings
+        return f"""
+        if(
+            JSONArrayLength(`{name}`) is null,
+            if(
+                JSONHas(`{name}`, 'text'),
+                array(JSONExtractString(`{name}`, 'text')),
+                [ ]
+            ),
+            JSONExtractArrayRaw(JSON_QUERY(`{name}`, '$[*].text'))
+        ) as `{name}`
+        """
+
+    def get_skipped_failure_parser_helper(name, type, field_to_check_for_existence):
+        # skipped and failure generally have either the format:
+        # Tuple(stuff) or Array(Tuple(stuff)).
+        # The stuff varies. The type input should be the string `Tuple(stuff)`
+        # The field_to_check_for_existence is the field that is checked to see
+        # if the skip/rerun exists or if it should be an empty array.  It is a
+        # dictionary key in the tuple
+        return f"""
+        if(
+            JSONArrayLength({name}) is null,
+            if(
+                JSONHas({name}, '{field_to_check_for_existence}'),
+                array(
+                    JSONExtract(
+                        {name},
+                        '{type}'
+                    )
+                ),
+                [ ]
+            ),
+            JSONExtract(
+                {name},
+                'Array({type})'
+            )
+        ) as {name}
+        """
+
+    # Cannot use general_adapter due to custom field for now()::DateTime64(9)
+    # time_inserted
+    query = f"""
+    insert into {table}
+    select
+        classname,
+        duration,
+        {get_skipped_failure_parser_helper("error", "Tuple(type String, message String, text String)", "message")},
+        {get_skipped_failure_parser_helper("failure", "Tuple(type String, message String, text String)", "message")},
+        file,
+        invoking_file,
+        job_id,
+        line::Int64,
+        name,
+        properties,
+        {get_skipped_failure_parser_helper("rerun", "Tuple(message String, text String)", "message")},
+        result,
+        {get_skipped_failure_parser_helper("skipped", "Tuple(type String, message String, text String)", "message")},
+        status,
+        {get_sys_err_out_parser("system-err")},
+        {get_sys_err_out_parser("system-out")},
+        time,
+        now()::DateTime64(9) as time_inserted,
+        type_param,
+        value_param,
+        workflow_id,
+        workflow_run_attempt,
+        ('{bucket}', '{key}')
+    from
+        s3(
+            'https://{bucket}.s3.amazonaws.com/{encode_url_component(key)}',
+            'JSONEachRow',
+            '
+            `classname` String,
+            `duration` Float32,
+            `error` String,
+            `failure` String,
+            `file` String,
+            `invoking_file` String,
+            `job_id` Int64,
+            `line` Float32,
+            `name` String,
+            `properties` Tuple(property Tuple(name String, value String)),
+            `rerun` String,
+            `result` String,
+            `skipped` String,
+            `status` String,
+            `system-err` String,
+            `system-out` String,
+            `time` Float32,
+            `type_param` String,
+            `value_param` String,
+            `workflow_id` Int64,
+            `workflow_run_attempt` Int32',
+            'gzip'
+        )
+    """
+    query = clean_up_query(query)
+    try:
+        get_clickhouse_client().query(query)
+    except Exception as e:
+        log_failure_to_clickhouse(table, bucket, key, e)
+
+
+def rerun_disabled_tests_adapter(table, bucket, key):
+    schema = """
+    `classname` String,
+    `filename` String,
+    `flaky` Bool,
+    `name` String,
+    `num_green` Int64,
+    `num_red` Int64,
+    `workflow_id` Int64,
+    `workflow_run_attempt` Int64
+    """
+
+    general_adapter(table, bucket, key, schema, ["gzip"], "JSONEachRow")
+
+
+def handle_test_run_summary(table, bucket, key) -> None:
+    schema = """
+    `classname` String,
+    `errors` Int64,
+    `failures` Int64,
+    `file` String,
+    `invoking_file` String,
+    `job_id` Int64,
+    `skipped` Int64,
+    `successes` Int64,
+    `tests` Int64,
+    `time` Float32,
+    `workflow_id` Int64,
+    `workflow_run_attempt` Int64
+    """
+    url = f"https://{bucket}.s3.amazonaws.com/{encode_url_component(key)}"
+
+    # Cannot use general_adapter due to custom field for now()::DateTime64(9)
+    def get_insert_query(compression):
+        return f"""
+        insert into {table} SETTINGS async_insert=1, wait_for_async_insert=1
+        select *, ('{bucket}', '{key}'), now()::DateTime64(9)
+        from s3('{url}', 'JSONEachRow', '{schema}', '{compression}')
+        """
+
+    try:
+        get_clickhouse_client().query(get_insert_query("gzip"))
+    except Exception as e:
+        log_failure_to_clickhouse(table, bucket, key, e)
+
+
+# Every table this lambda serves records which S3 object a row came from in a
+# tuple column. Three of them predate the `_meta` spelling and call theirs
+# `meta`; a positional insert matched by position and never had to know, so
+# naming the columns is what surfaces the difference. Checked against
+# system.columns on 2026-09-10: of the 21 tables general_adapter serves, 18 use
+# `_meta`, these 3 use `meta`, and none has both.
+DEFAULT_META_COLUMN = "`_meta`"
+META_COLUMN_BY_TABLE = {
+    "default.merge_bases": "`meta`",
+    "default.queue_times_historical": "`meta`",
+    "default.rerun_disabled_tests": "`meta`",
+}
+
+
+def meta_column(table) -> str:
+    return META_COLUMN_BY_TABLE.get(table, DEFAULT_META_COLUMN)
+
+
+# The only column declaration flat_schema_columns is willing to read: one per
+# line, a backtick-quoted name, then a type built from identifiers, digits and
+# parentheses alone. Forbidding spaces and commas INSIDE those parentheses is
+# the real guard, and it is structural rather than a spelling check: every
+# ClickHouse construct that carries FIELD NAMES -- Tuple, Map, Nested -- needs
+# one, so all of them are refused, however they are spelled or wrapped across
+# lines. Valid-but-unsupported shapes go the same way (Enum8('a' = 1), and any
+# second column sharing a line); refusing is the safe direction and
+# MERGES_SCHEMA uses none of them.
+FLAT_COLUMN_DECLARATION = re.compile(
+    r"`([A-Za-z_][A-Za-z0-9_]*)`\s+[A-Za-z0-9_]+(?:\([A-Za-z0-9_()]*\))?,?"
+)
+
+
+def flat_schema_columns(schema) -> List[str]:
+    """Backtick-quoted column names from a FLAT structure string, in order.
+
+    Flat is defined by FLAT_COLUMN_DECLARATION above. The construct that makes
+    it necessary is a nested tuple: its inner fields occupy their own lines and
+    would each be counted as a column, though `select *` produces a single
+    expression for the whole tuple. `handle_test_run_s3`'s `properties` field
+    is exactly that shape. Hence refusing rather than guessing -- a name that
+    is not a column fails every insert for that table, and a wrong ORDER does
+    not fail at all, it writes into the wrong column.
+
+    Only `merges_adapter` uses this. Doing it for every table this lambda
+    serves needs a real parser -- split on commas at paren depth zero, outside
+    quotes -- which is what pytorch/test-infra#8716 is for.
+    """
+    columns = []
+    for line in schema.strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        match = FLAT_COLUMN_DECLARATION.fullmatch(line)
+        if not match:
+            raise ValueError(
+                f"schema is not flat; expected one `name` Type per line, got: {line!r}"
+            )
+        columns.append(f"`{match.group(1)}`")
+    return columns
+
+
+MERGES_SCHEMA = """
+    `_id` String,
+    `ai_not_related_checks` Array(Array(String)),
+    `author` String,
+    `broken_trunk_checks` Array(Array(String)),
+    `comment_id` Int64,
+    `dry_run` Bool,
+    `error` String,
+    `failed_checks` Array(Array(String)),
+    `flaky_checks` Array(Array(String)),
+    `ignore_current` Bool,
+    `ignore_current_checks` Array(Array(String)),
+    `is_failed` Bool,
+    `last_commit_sha` String,
+    `merge_base_sha` String,
+    `merge_commit_sha` String,
+    `owner` String,
+    `pending_checks` Array(Array(String)),
+    `pr_num` Int64,
+    `project` String,
+    `skip_mandatory_checks` Bool,
+    `unstable_checks` Array(Array(String))
+    """
+
+
+def merges_adapter(table, bucket, key) -> None:
+    # Named columns, so ALTER a column into default.merges before declaring it
+    # here: an omitted column takes its default, a named column the table lacks
+    # fails the insert. The derived names are pinned in
+    # aws/lambda/tests/test_clickhouse_replicator_s3.py, so a derivation bug
+    # shows up as a test failure rather than as data in the wrong column.
+    general_adapter(
+        table,
+        bucket,
+        key,
+        MERGES_SCHEMA,
+        ["none"],
+        "JSONEachRow",
+        use_named_columns=True,
+    )
+
+
+def merge_bases_adapter(table, bucket, key) -> None:
+    schema = """
+    `changed_files` Array(String),
+    `merge_base` String,
+    `merge_base_commit_date` DateTime64(3),
+    `repo` String,
+    `sha` String
+    """
+
+    general_adapter(table, bucket, key, schema, ["gzip", "none"], "JSONEachRow")
+
+
+def queue_times_historical_adapter(table, bucket, key) -> None:
+    schema = """
+    `avg_queue_s` Int64,
+    `machine_type` String,
+    `count` Int64,
+    `time` DateTime64(9)
+    """
+    general_adapter(table, bucket, key, schema, ["gzip", "none"], "JSONEachRow")
+
+
+def external_contribution_stats_adapter(table, bucket, key) -> None:
+    schema = """
+    `date` String,
+    `pr_count` Int64,
+    `user_count` Int64,
+    `users` Array(String)
+    """
+    general_adapter(table, bucket, key, schema, ["gzip"], "JSONEachRow")
+
+
+def log_failure_to_clickhouse(table, bucket, key, error) -> None:
+    error = {
+        "table": table,
+        "bucket": bucket,
+        "key": key,
+        "reason": str(error),
+    }
+    get_clickhouse_client().query(
+        f"insert into errors.gen_errors format JSONEachRow {json.dumps(error)}"
+    )
+
+
+def general_adapter(
+    table, bucket, key, schema, compressions, format, use_named_columns=False
+) -> None:
+    """Copy one S3 object into `table`.
+
+    The insert is positional by default: `select *` yields exactly the fields
+    `schema` declares, so the destination must have precisely those columns, in
+    that order, with the meta tuple last. That makes adding a column to the
+    table a breaking change until `schema` is updated to match, and the two
+    cannot be changed at the same instant.
+
+    Set `use_named_columns` to name the destination columns instead. They are
+    read out of `schema`, which already lists them, plus `meta_column(table)`
+    for the tuple this SELECT appends. Column ORDER and COUNT on the table then
+    stop mattering, and any column not named takes its default, so a new column
+    can be ALTERed in before the code that populates it.
+
+    Two things to check before opting a NEW table in, neither of which this
+    function can see:
+
+    - `schema` must satisfy FLAT_COLUMN_DECLARATION. Most schemas in this file
+      do not -- anything with a Tuple or a Map is refused -- so check rather
+      than assume. `flat_schema_columns` raises rather than guess.
+    - The destination's provenance tuple must be named as META_COLUMN_BY_TABLE
+      says. That map is a dated snapshot, not a live lookup, and its fallback
+      is `_meta`, so a table that uses `meta` and is missing from it would get
+      a name the table does not have and fail every insert.
+    """
+    url = f"https://{bucket}.s3.amazonaws.com/{encode_url_component(key)}"
+    target = table
+    if use_named_columns:
+        columns = flat_schema_columns(schema) + [meta_column(table)]
+        target = f"{table} ({', '.join(columns)})"
+
+    def get_insert_query(compression):
+        return f"""
+        insert into {target}
+        select *, ('{bucket}', '{key}') as _meta
+        from s3('{url}', '{format}', '{schema}', '{compression}',
+            extra_credentials(
+                role_arn = 'arn:aws:iam::308535385114:role/clickhouse_role'
+            )
+        )
+        """
+
+    try:
+        exceptions = []
+        for compression in compressions:
+            try:
+                get_clickhouse_client().query(get_insert_query(compression))
+                return
+            except Exception as e:
+                exceptions.append(e)
+        raise Exception(
+            f"Failed to insert into {table} with {[str(x) for x in exceptions]}"
+        )
+    except Exception as e:
+        log_failure_to_clickhouse(table, bucket, key, e)
+
+
+def external_aggregated_test_metrics_adapter(table, bucket, key) -> None:
+    schema = """
+    `avg_duration_in_second` Int64,
+    `avg_skipped` Int64,
+    `avg_tests` Int64,
+    `base_name` String,
+    `date` DateTime64(3),
+    `job_name` String,
+    `max_errors` Int64,
+    `max_failures` Int64,
+    `occurences` Int64,
+    `oncalls` Array(String),
+    `sum_duration_in_second` Int64,
+    `sum_skipped` Int64,
+    `sum_tests` Int64,
+    `test_class` String,
+    `test_config` String,
+    `test_file` String,
+    `workflow_id` Int64,
+    `workflow_name` String,
+    `workflow_run_attempt` Int64
+    """
+    general_adapter(table, bucket, key, schema, ["gzip"], "JSONEachRow")
+
+
+def torchao_perf_stats_adapter(table, bucket, key) -> None:
+    schema = """
+    `CachingAutotuner.benchmark_all_configs` String,
+    `GraphLowering.compile_to_module` String,
+    `GraphLowering.run` String,
+    `OutputGraph.call_user_compiler` String,
+    `Scheduler.__init__` String,
+    `Scheduler.codegen` String,
+    `WrapperCodeGen.generate` String,
+    `_compile.<locals>.compile_inner` String,
+    `_compile.compile_inner` String,
+    `abs_latency` String,
+    `accuracy` String,
+    `autograd_captures` String,
+    `autograd_compiles` String,
+    `batch_size` String,
+    `calls_captured` String,
+    `compilation_latency` String,
+    `compile_fx.<locals>.bw_compiler` String,
+    `compile_fx.<locals>.fw_compiler_base` String,
+    `compile_fx_inner` String,
+    `compression_ratio` String,
+    `create_aot_dispatcher_function` String,
+    `cudagraph_skips` String,
+    `dev` String,
+    `dynamo_peak_mem` String,
+    `eager_peak_mem` String,
+    `filename` String,
+    `graph_breaks` String,
+    `head_branch` String,
+    `head_repo` String,
+    `head_sha` String,
+    `job_id` String,
+    `name` String,
+    `run_attempt` String,
+    `runner` String,
+    `speedup` String,
+    `test_name` String,
+    `unique_graph_breaks` String,
+    `unique_graphs` String,
+    `workflow_id` String
+    """
+    general_adapter(table, bucket, key, schema, ["none"], "CSV")
+
+
+def oss_ci_benchmark_v3_adapter(table, bucket, key) -> None:
+    schema = """
+    `timestamp` UInt64,
+    `schema_version` String,
+    `name` String,
+    `repo` String,
+    `head_branch` String,
+    `head_sha` String,
+    `workflow_id` UInt64,
+    `run_attempt` UInt32,
+    `job_id` UInt64,
+    `servicelab_experiment_id` UInt64,
+    `servicelab_trial_id` UInt64,
+    `runners` Array(
+        Tuple(
+            name String,
+            type String,
+            cpu_info String,
+            cpu_count UInt32,
+            mem_info String,
+            avail_mem_in_gb UInt32,
+            gpu_info String,
+            gpu_count UInt32,
+            gpu_mem_info String,
+            avail_gpu_mem_in_gb UInt32,
+            extra_info Map(String, String)
+        )
+    ),
+    `benchmark` Tuple(
+        name String,
+        mode String,
+        dtype String,
+        extra_info Map(String, String)
+    ),
+    `model` Tuple (
+        name String,
+        type String,
+        backend String,
+        origins Array(String),
+        extra_info Map(String, String)
+    ),
+    `inputs` Map(
+        String,
+        Tuple(dtype String, extra_info Map(String, String))
+    ),
+    `dependencies` Map(
+        String,
+        Tuple(
+            `repo` String,
+            `branch` String,
+            `sha` String,
+            `version` String,
+            extra_info Map(String, String)
+        )
+    ),
+    `metric` Tuple(
+        name String,
+        benchmark_values Array(Float32),
+        target_value Float32,
+        extra_info Map(String, String)
+    )
+    """
+    general_adapter(table, bucket, key, schema, ["gzip", "none"], "JSONEachRow")
+
+
+def oss_ci_util_metadata_adapter(table, bucket, key):
+    schema = """
+        `created_at` DateTime64(0),
+        `repo` String,
+        `workflow_id` UInt64,
+        `run_attempt` UInt32,
+        `job_id` UInt64,
+        `workflow_name` String,
+        `job_name` String,
+        `usage_collect_interval` Float32,
+        `data_model_version` String,
+        `gpu_count` UInt32,
+        `cpu_count` UInt32,
+        `gpu_type` String,
+        `start_at` DateTime64(0),
+        `end_at` DateTime64(0),
+        `segments` Array(Tuple(
+                `level` String,
+                `name` String,
+                `start_at` DateTime64(0),
+                `end_at` DateTime64(0),
+                `extra_info` Map(String, String)
+                )),
+        `tags` Array(String)
+    """
+    general_adapter(table, bucket, key, schema, ["gzip", "none"], "JSONEachRow")
+
+
+def oss_ci_util_time_series_adapter(table, bucket, key):
+    schema = """
+        `created_at` DateTime64(0),
+        `type` String,
+        `tags` Array(String),
+        `time_stamp` DateTime64(0),
+        `repo` String,
+        `workflow_id` UInt64,
+        `run_attempt` UInt32,
+        `job_id` UInt64,
+        `workflow_name` String,
+        `job_name` String,
+        `json_data` String
+     """
+    general_adapter(table, bucket, key, schema, ["gzip", "none"], "JSONEachRow")
+
+
+def torchbench_userbenchmark_adapter(table, bucket, key):
+    schema = """
+    `environ` String,
+    `metrics` String,
+    `name` String
+    """
+
+    general_adapter(table, bucket, key, schema, ["none"], "JSONEachRow")
+
+
+def ossci_uploaded_metrics_adapter(table, bucket, key):
+    schema = """
+    `repo` String,
+    `workflow` String,
+    `build_environment` String,
+    `job` String,
+    `test_config` String,
+    `pr_number` Int64,
+    `run_id` Int64,
+    `run_number` Int64,
+    `run_attempt` Int64,
+    `job_id` Int64,
+    `job_name` String,
+    `metric_name` String,
+    `calling_file` String,
+    `calling_module` String,
+    `calling_function` String,
+    `timestamp` DateTime64(9),
+    `info` String
+    """
+    general_adapter(table, bucket, key, schema, ["gzip"], "JSONEachRow")
+
+
+def stable_pushes_adapter(table, bucket, key):
+    schema = """
+    `sha` String,
+    `repository` String,
+    `timestamp` DateTime
+    """
+    general_adapter(table, bucket, key, schema, ["none"], "JSONEachRow")
+
+
+def disabled_tests_historical_adapter(table, bucket, key):
+    schema = """
+    `day` Date,
+    `timestamp` DateTime,
+    `name` String,
+    `issueNumber` Int32,
+    `platforms` Array(String)
+    """
+    general_adapter(table, bucket, key, schema, ["none"], "JSONEachRow")
+
+
+def cloudwatch_metrics_adapter(table, bucket, key):
+    schema = """
+    `metric_stream_name` LowCardinality(String),
+    `account_id` LowCardinality(String),
+    `region` LowCardinality(String),
+    `namespace` LowCardinality(String),
+    `metric_name` LowCardinality(String),
+    `dimensions` Map(String, String),
+    `timestamp` DateTime64,
+    `value` Tuple(
+        max Float32,
+        min Float32,
+        sum Float32,
+        count Float32),
+    `unit` LowCardinality(String)
+    """
+    general_adapter(table, bucket, key, schema, ["none"], "JSONEachRow")
+
+
+def claude_code_usage_adapter(table, bucket, key):
+    schema = """
+    `repo` String,
+    `run_id` Int64,
+    `run_attempt` Int32,
+    `actor` String,
+    `event_name` String,
+    `pr_number` Int64,
+    `timestamp` DateTime64(3),
+    `duration_ms` Int64,
+    `num_turns` Int32,
+    `total_cost_usd` Float64,
+    `input_tokens` Int64,
+    `output_tokens` Int64,
+    `cache_read_input_tokens` Int64,
+    `cache_creation_input_tokens` Int64,
+    `model` String
+    """
+    general_adapter(table, bucket, key, schema, ["none"], "JSONEachRow")
+
+
+def autorevert_advisor_verdicts_adapter(table, bucket, key):
+    schema = """
+    `repo` String,
+    `run_id` Int64,
+    `run_attempt` Int32,
+    `timestamp` DateTime64(3),
+    `suspect_commit` FixedString(40),
+    `pr_number` Int64,
+    `signal_key` String,
+    `signal_source` String,
+    `workflow_name` String,
+    `verdict` String,
+    `confidence` Float32,
+    `summary` String,
+    `causal_reasoning` String
+    """
+    general_adapter(table, bucket, key, schema, ["none"], "JSONEachRow")
+
+
+def runner_fleet_count_adapter(table, bucket, key):
+    # Column order must match clickhouse_db_schema/misc.runner_fleet_count/
+    # schema.sql (minus `_meta`, which general_adapter appends via `SELECT *,
+    # (bucket, key)`). JSONEachRow maps by field name.
+    # NB: no timezone literal here -- general_adapter wraps this schema in single
+    # quotes, so an inner 'UTC' would break the s3() SQL. Timestamps are UTC
+    # wall-clock strings; the table column carries the UTC tz.
+    schema = """
+    `time_stamp` DateTime64(0),
+    `org` String,
+    `label` String,
+    `total_count` UInt32,
+    `online_count` UInt32,
+    `busy_count` UInt32
+    """
+    general_adapter(table, bucket, key, schema, ["gzip", "none"], "JSONEachRow")
+
+
+def greenlight_pr_state_adapter(table, bucket, key):
+    # Column order must match the misc.greenlight_pr_state table's ordinary
+    # columns (minus `_meta`, which general_adapter appends via `SELECT *,
+    # (bucket, key)`). JSONEachRow maps by field name. LowCardinality(String)
+    # table columns are read as plain String here; ClickHouse widens on insert.
+    # NB: no timezone literal here -- general_adapter wraps this schema in single
+    # quotes, so an inner 'UTC' would break the s3() SQL. `version` is a UTC
+    # wall-clock string with millisecond precision.
+    schema = """
+    `repo` String,
+    `pr_number` Int64,
+    `head_sha` String,
+    `status` String,
+    `reason` String,
+    `eval_hash` String,
+    `message` String,
+    `eval_job` String,
+    `agent_job` String,
+    `version` DateTime64(3),
+    `run_id` Int64,
+    `emit_id` String,
+    `shadow` Bool
+    """
+    general_adapter(table, bucket, key, schema, ["gzip", "none"], "JSONEachRow")
+
+
+def pr_review_verdicts_adapter(table, bucket, key):
+    # Order must match misc.pr_review_verdicts: general_adapter inserts
+    # positionally. `verdict` is null on started rows and on any terminal row
+    # without a verdict.
+    schema = """
+        `schema_version` UInt16,
+        `phase` String,
+        `harness` String,
+        `harness_version` String,
+        `repo` String,
+        `pr_number` Int64,
+        `head_sha` String,
+        `base_sha` String,
+        `is_fork` Bool,
+        `trigger_event` String,
+        `trigger_label` String,
+        `trigger_run_id` Int64,
+        `review_run_id` Int64,
+        `review_run_attempt` Int32,
+        `prompt_hash` String,
+        `trusted_sha` String,
+        `timestamp` DateTime64(3),
+        `status` String,
+        `verdict` Nullable(String),
+        `summary` String,
+        `findings_count` Int32,
+        `findings_dropped` Int32,
+        `failure_detail` String,
+        `reasoning_uri` String,
+        `duration_ms` Int64,
+        `num_turns` Int32,
+        `total_cost_usd` Float64,
+        `input_tokens` Int64,
+        `output_tokens` Int64,
+        `cache_read_input_tokens` Int64,
+        `cache_creation_input_tokens` Int64,
+        `model` String,
+        `extra` Map(String, String)
+    """
+    general_adapter(table, bucket, key, schema, ["none"], "JSONEachRow")
+
+
+def pr_review_eval_targets_adapter(table, bucket, key):
+    # Order must match misc.pr_review_eval_targets: general_adapter inserts
+    # positionally.
+    schema = """
+        `schema_version` UInt16,
+        `timestamp` DateTime64(3),
+        `run_id` Int64,
+        `run_attempt` Int32,
+        `run_url` String,
+        `trigger_event` String,
+        `dataset` String,
+        `dataset_sha` String,
+        `ref_label` String,
+        `ref_sha` String,
+        `model` String,
+        `case_id` String,
+        `pr_number` Int64,
+        `rep` UInt16,
+        `job_status` String,
+        `target_id` String,
+        `target_type` String,
+        `labeler` String,
+        `found` Bool,
+        `blocking` Bool,
+        `severity` String,
+        `judge_reason` String
+    """
+    general_adapter(table, bucket, key, schema, ["none"], "JSONEachRow")
+
+
+def pr_review_finding_reactions_adapter(table, bucket, key):
+    # Order must match misc.pr_review_finding_reactions: general_adapter
+    # inserts positionally. `reactors` arrives as [login, content, reacted_at]
+    # arrays.
+    schema = """
+        `schema_version` UInt16,
+        `observed_at` DateTime64(3),
+        `repo` String,
+        `pr_number` Int64,
+        `pr_author` String,
+        `comment_id` Int64,
+        `review_id` Int64,
+        `comment_url` String,
+        `path` String,
+        `finding_created_at` DateTime64(3),
+        `blocking` Bool,
+        `thumbs_up` UInt32,
+        `thumbs_down` UInt32,
+        `other_reactions` UInt32,
+        `reactors` Array(Tuple(String, String, DateTime64(3)))
+    """
+    general_adapter(table, bucket, key, schema, ["none"], "JSONEachRow")
+
+
+# Test run reports (pytorch/pytorch torch/testing/_internal/torchci/README.md):
+# each test process writes one JSONL report, and each test job uploads its
+# reports when it ends, one object each, to
+# torchci-reports/<org>/<repo>/<run id>/<job id>/<file>-<report uuid>.report.jsonl.
+# Matched by pattern rather than by a SUPPORTED_PATHS prefix, so the name is
+# restricted to characters that are safe to put in a SQL string literal.
+TEST_RUN_REPORTS_KEY = re.compile(
+    r"^torchci-reports/[\w.-]+/[\w.-]+/(\d+)/\d+/[\w.-]+\.report\.jsonl$"
+)
+# The database of the tests, environments, env_vars and runs tables the reports
+# are ingested into.
+TEST_RUN_REPORTS_DATABASE = "ci"
+TEST_RUN_REPORTS_TABLE = f"{TEST_RUN_REPORTS_DATABASE}.runs"
+# off: the reports are not routed. dry: each report is read and parsed, and the
+# rows every statement would insert are counted and printed; nothing is written
+# (failures still go to errors.gen_errors). on: ingest. TEST_RUN_REPORTS_MODE
+# on the function overrides this default.
+TEST_RUN_REPORTS_MODE = "on"
+# The percent of workflow runs whose reports are routed, picked by run id so
+# that the reports of a run's jobs, in every attempt, are all routed or none are.
+# TEST_RUN_REPORTS_SAMPLE_PERCENT on the function overrides this default.
+TEST_RUN_REPORTS_SAMPLE_PERCENT = 100
+# 1.0 is the first stable report format; 0.x reports are not ingested.
+TEST_RUN_REPORTS_SCHEMA_VERSIONS = "('1.0')"
+# Part of the deduplication token: bump it to ingest the same reports again
+# after a fix.
+TEST_RUN_REPORTS_INGEST_VERSION = 1
+TEST_RUN_REPORTS_OUTCOMES = (
+    "('passed', 'failed', 'error', 'skipped', 'xfailed', 'xpassed', 'crashed', "
+    "'timed_out')"
+)
+TEST_RUN_REPORTS_ENVIRONMENT = [
+    "os",
+    "os_version",
+    "cpu_architecture",
+    "cpu_capability",
+    "python_version",
+    "cc_compiler",
+    "cc_compiler_version",
+    "accelerator",
+    "accelerator_version",
+    "device_name",
+]
+
+# The catalogs whose id DEFAULT fills each of runs' id columns.
+TEST_RUN_REPORTS_IDS = {
+    "tests": "tests_id",
+    "environments": "environments_id",
+    "env_vars": "env_vars_id",
+}
+
+# One row per run line, carrying the report line. The report is read once: its
+# report line is picked out, then its run lines are unfolded. The ids are the
+# catalogs' own id DEFAULTs, read when the report is ingested and evaluated over
+# the columns of the same names, so runs gets the ids the catalogs compute and a
+# change to them needs no change here.
+TEST_RUN_REPORTS_ROWS = """
+WITH
+    files AS (
+        SELECT
+            anyIf(line, JSONExtractString(line, 'type') = 'report') AS report_line,
+            groupArrayIf(line, JSONExtractString(line, 'type') = 'run') AS run_lines
+        FROM s3('{source}', 'LineAsString')
+        -- a line cut off by a killed test process is skipped
+        WHERE isValidJSON(line)
+    ),
+    report_rows AS (
+        SELECT
+            JSONExtractString(report_line, 'repo') AS repo,
+            JSONExtractInt(report_line, 'github_workflow_job_id') AS github_workflow_job_id,
+            -- the zero UUID when the report does not give a valid one
+            toUUIDOrZero(JSONExtractString(report_line, 'report_uuid')) AS report_uuid,
+            {environment},
+            toUInt8(JSONExtractUInt(report_line, 'environment', 'device_count')) AS device_count,
+            -- the report's flags list every registered flag and setting; the
+            -- env_vars table keeps those that are set, so off ('0') and unset ('')
+            -- ones are dropped
+            mapFilter((k, v) -> v NOT IN ('0', ''),
+                JSONExtract(report_line, 'flags', 'Map(String, String)')) AS env_vars,
+            -- a missing or invalid one fails the insert, so a producer bug is
+            -- logged, not hidden
+            toUUID(JSONExtractString(line, 'id')) AS id,
+            JSONExtractString(line, 'file') AS file,
+            JSONExtractString(line, 'suite') AS suite,
+            JSONExtractString(line, 'case_name') AS case_name,
+            JSONExtractString(line, 'declared_case_name') AS declared_case_name,
+            toUInt16(JSONExtractUInt(line, 'rerun_number')) AS rerun_number,
+            if(JSONExtractString(line, 'outcome') IN {outcomes},
+                JSONExtractString(line, 'outcome'), 'unknown') AS outcome,
+            leftUTF8(JSONExtractString(line, 'outcome_summary'), 256) AS outcome_summary,
+            fromUnixTimestamp64Milli(JSONExtractInt(line, 'started_at'), 'UTC') AS started_at,
+            fromUnixTimestamp64Milli(JSONExtractInt(line, 'ended_at'), 'UTC') AS ended_at,
+            -- as the run line says, or unknown when it does not say; any other
+            -- value fails the insert, so a producer bug is logged, not hidden
+            if(JSONHas(line, 'language'), JSONExtractString(line, 'language'),
+                'unknown') AS language,
+            {tests_id} AS tests_id,
+            {environments_id} AS environments_id,
+            {env_vars_id} AS env_vars_id
+        FROM files
+        ARRAY JOIN run_lines AS line
+        WHERE JSONExtractString(report_line, 'schema_version') IN {versions}
+          AND repo != ''
+          AND github_workflow_job_id != 0
+    )
+"""
+
+# (table, columns, select), in order: the catalogs get rows only for ids they
+# lack (read with FINAL, as their schema requires), so first_seen_at stays the
+# first sighting and a repeat inserts nothing; runs then gets every run, and its
+# deduplication token makes a repeat of the same report a no-op. Holding all of
+# tests' ids for every report is costly, and grows with the catalog, so its
+# lookup holds only the report's own ids.
+TEST_RUN_REPORTS_STATEMENTS = [
+    (
+        "tests",
+        "repo, file, suite, case_name, declared_case_name, language",
+        """
+        select repo, file, suite, case_name, declared_case_name, language
+        from report_rows
+        where tests_id not in (
+            select id from {database}.tests final
+            where id in (select tests_id from report_rows)
+        )
+        limit 1 by tests_id
+        """,
+    ),
+    (
+        "environments",
+        "{environment_columns}, device_count",
+        """
+        select {environment_columns}, device_count
+        from report_rows
+        where environments_id not in (select id from {database}.environments final)
+        limit 1 by environments_id
+        """,
+    ),
+    (
+        "env_vars",
+        "env_vars",
+        """
+        select env_vars
+        from report_rows
+        where env_vars_id not in (select id from {database}.env_vars final)
+        limit 1 by env_vars_id
+        """,
+    ),
+    (
+        "runs",
+        "tests_id, environments_id, env_vars_id, github_workflow_job_id, report_uuid, "
+        "id, rerun_number, outcome, outcome_summary, started_at, ended_at",
+        """
+        select tests_id, environments_id, env_vars_id, github_workflow_job_id,
+               report_uuid, id, rerun_number, outcome, outcome_summary,
+               started_at, ended_at
+        from report_rows
+        """,
+    ),
+]
+
+
+def test_run_reports_mode() -> str:
+    return os.getenv("TEST_RUN_REPORTS_MODE", TEST_RUN_REPORTS_MODE)
+
+
+def test_run_reports_sampled(run_id: str) -> bool:
+    percent = os.getenv(
+        "TEST_RUN_REPORTS_SAMPLE_PERCENT", TEST_RUN_REPORTS_SAMPLE_PERCENT
+    )
+    return int(run_id) % 100 < int(percent)
+
+
+def test_run_reports_id_defaults(database) -> dict:
+    """The id DEFAULT expression of each catalog in `database`, keyed by the runs
+    column it fills."""
+    tables = ", ".join(f"'{table}'" for table in TEST_RUN_REPORTS_IDS)
+    defaults = dict(
+        get_clickhouse_client()
+        .query(
+            "select table, default_expression from system.columns "
+            f"where database = '{database}' and table in ({tables}) "
+            "and name = 'id' and default_kind = 'DEFAULT'"
+        )
+        .result_rows
+    )
+    missing = [table for table in TEST_RUN_REPORTS_IDS if table not in defaults]
+    if missing:
+        raise RuntimeError(f"no id DEFAULT in {database}: {', '.join(missing)}")
+    return {column: defaults[table] for table, column in TEST_RUN_REPORTS_IDS.items()}
+
+
+def test_run_reports_adapter(table, bucket, key) -> None:
+    """Ingest one test run report into the tests, environments, env_vars and runs
+    tables of TEST_RUN_REPORTS_DATABASE (or, in dry mode, count what would be
+    inserted). ClickHouse reads the report itself, and runs' ids come from the
+    catalogs' id DEFAULTs, so this holds no id logic. One attempt: the first
+    failure is logged and nothing after it runs. The catalogs only get ids they
+    lack and runs carries a deduplication token, so the same report again
+    inserts nothing while the earlier runs insert is within ClickHouse's insert
+    deduplication window (an hour by default); a later repeat adds a second copy
+    of the report's runs until merges collapse it."""
+    database = TEST_RUN_REPORTS_DATABASE
+    dry = test_run_reports_mode() == "dry"
+    suffix = " (dry run)" if dry else ""
+    try:
+        ids = test_run_reports_id_defaults(database)
+    except Exception as e:
+        log_failure_to_clickhouse(f"{database}.runs ids{suffix}", bucket, key, e)
+        return
+    url = f"https://{bucket}.s3.amazonaws.com/{encode_url_component(key)}"
+    environment_columns = ", ".join(TEST_RUN_REPORTS_ENVIRONMENT)
+    rows = TEST_RUN_REPORTS_ROWS.format(
+        source=url,
+        environment=",\n            ".join(
+            f"JSONExtractString(report_line, 'environment', '{name}') AS {name}"
+            for name in TEST_RUN_REPORTS_ENVIRONMENT
+        ),
+        outcomes=TEST_RUN_REPORTS_OUTCOMES,
+        versions=TEST_RUN_REPORTS_SCHEMA_VERSIONS,
+        **ids,
+    )
+    for target, columns, select in TEST_RUN_REPORTS_STATEMENTS:
+        select = select.format(
+            database=database, environment_columns=environment_columns
+        )
+        if dry:
+            query = f"select count() from ({rows} {select})"
+        else:
+            columns = columns.format(environment_columns=environment_columns)
+            settings = ""
+            if target == "runs":
+                token = f"{key}:ingest-v{TEST_RUN_REPORTS_INGEST_VERSION}"
+                settings = f" settings insert_deduplication_token = '{token}'"
+            query = (
+                f"insert into {database}.{target} ({columns}){settings} {rows} {select}"
+            )
+        started = time.time()
+        try:
+            result = get_clickhouse_client().query(query)
+        except Exception as e:
+            log_failure_to_clickhouse(f"{database}.{target}{suffix}", bucket, key, e)
+            return
+        if dry:
+            print(
+                f"test run reports dry run: {target}: {result.result_rows[0][0]} rows "
+                f"in {time.time() - started:.1f}s, {key}"
+            )
+
+
+SUPPORTED_PATHS = {
+    "merges": "default.merges",
+    "queue_times_historical": "default.queue_times_historical",
+    "test_run": "default.test_run_s3",
+    "test_run_summary": "default.test_run_summary",
+    "merge_bases": "default.merge_bases",
+    "failed_test_runs": "default.failed_test_runs",
+    "rerun_disabled_tests": "default.rerun_disabled_tests",
+    "external_contribution_counts": "misc.external_contribution_stats",
+    "test_data_aggregates": "misc.aggregated_test_metrics",
+    "torchbench-csv/torchao": "benchmark.inductor_torchao_perf_stats",
+    "torchbench-userbenchmark": "benchmark.torchbench_userbenchmark",
+    "ossci_uploaded_metrics": "misc.ossci_uploaded_metrics",
+    "stable_pushes": "misc.stable_pushes",
+    "v3": "benchmark.oss_ci_benchmark_v3",
+    "debug_util_metadata": "fortesting.oss_ci_utilization_metadata",
+    "debug_util_timeseries": "fortesting.oss_ci_time_series",
+    "util_metadata": "misc.oss_ci_utilization_metadata",
+    "util_timeseries": "misc.oss_ci_time_series",
+    "disabled_tests_historical": "misc.disabled_tests_historical",
+    "claude_code_usage": "misc.claude_code_usage",
+    "autorevert_advisor_verdicts": "misc.autorevert_advisor_verdicts",
+    "pr_review_verdicts": "misc.pr_review_verdicts",
+    "pr_review_eval_targets": "misc.pr_review_eval_targets",
+    "pr_review_finding_reactions": "misc.pr_review_finding_reactions",
+    # fbossci-cloudwatch-metrics bucket
+    "ghci-related": "infra_metrics.cloudwatch_metrics",
+    "test_jsons_while_running": "tests.all_test_runs",
+    "runner_fleet_count": "misc.runner_fleet_count",
+    "greenlight_pr_state": "misc.greenlight_pr_state",
+}
+
+OBJECT_CONVERTER = {
+    "default.merges": merges_adapter,
+    "default.test_run_s3": handle_test_run_s3,
+    "default.failed_test_runs": handle_test_run_s3,
+    "tests.all_test_runs": handle_test_run_s3_small,
+    "default.test_run_summary": handle_test_run_summary,
+    "default.merge_bases": merge_bases_adapter,
+    "default.rerun_disabled_tests": rerun_disabled_tests_adapter,
+    "default.queue_times_historical": queue_times_historical_adapter,
+    "misc.external_contribution_stats": external_contribution_stats_adapter,
+    "misc.aggregated_test_metrics": external_aggregated_test_metrics_adapter,
+    "benchmark.inductor_torchao_perf_stats": torchao_perf_stats_adapter,
+    "benchmark.torchbench_userbenchmark": torchbench_userbenchmark_adapter,
+    "misc.ossci_uploaded_metrics": ossci_uploaded_metrics_adapter,
+    "misc.stable_pushes": stable_pushes_adapter,
+    "benchmark.oss_ci_benchmark_v3": oss_ci_benchmark_v3_adapter,
+    "fortesting.oss_ci_utilization_metadata": oss_ci_util_metadata_adapter,
+    "fortesting.oss_ci_time_series": oss_ci_util_time_series_adapter,
+    "misc.oss_ci_utilization_metadata": oss_ci_util_metadata_adapter,
+    "misc.oss_ci_time_series": oss_ci_util_time_series_adapter,
+    "misc.disabled_tests_historical": disabled_tests_historical_adapter,
+    "misc.claude_code_usage": claude_code_usage_adapter,
+    "misc.autorevert_advisor_verdicts": autorevert_advisor_verdicts_adapter,
+    "misc.pr_review_verdicts": pr_review_verdicts_adapter,
+    "misc.pr_review_eval_targets": pr_review_eval_targets_adapter,
+    "misc.pr_review_finding_reactions": pr_review_finding_reactions_adapter,
+    "infra_metrics.cloudwatch_metrics": cloudwatch_metrics_adapter,
+    "misc.runner_fleet_count": runner_fleet_count_adapter,
+    "misc.greenlight_pr_state": greenlight_pr_state_adapter,
+    TEST_RUN_REPORTS_TABLE: test_run_reports_adapter,
+}
+
+
+def extract_clickhouse_table_name(bucket, key) -> Optional[str]:
+    """
+    Extract the clickhouse table name from the source ARN. This will be used later as
+    the index name
+    """
+    if key is None:
+        return None
+
+    report = TEST_RUN_REPORTS_KEY.match(key)
+    if (
+        report
+        and bucket == "gha-artifacts"
+        and test_run_reports_mode() in ("dry", "on")
+        and test_run_reports_sampled(report[1])
+    ):
+        return TEST_RUN_REPORTS_TABLE
+
+    for path, table in SUPPORTED_PATHS.items():
+        if key.startswith(f"{path}/"):
+            return table
+
+    return None
+
+
+def extract_bucket(record: Any) -> Optional[str]:
+    return record.get("s3", {}).get("bucket", {}).get("name")
+
+
+def extract_key(record: Any) -> Optional[str]:
+    return record.get("s3", {}).get("object", {}).get("key")
+
+
+def upsert_document(record: Any) -> None:
+    """
+    Insert a new doc or modify an existing document. Note that ClickHouse doesn't really
+    update the document in place, but rather adding a new record for the update
+    """
+    bucket, key = extract_bucket(record), extract_key(record)
+    print(f"bucket: {bucket}, key: {key}")
+    if not bucket or not key:
+        return
+
+    table = extract_clickhouse_table_name(bucket, key)
+    if not table:
+        return
+    print(f"table: {table}")
+
+    OBJECT_CONVERTER[table](table, bucket, key)
+
+
+def remove_document(record: Any) -> None:
+    """
+    Remove a document. This is here for completeness as we don't remove records like ever
+    """
+    bucket, key = extract_bucket(record), extract_key(record)
+    if not bucket or not key:
+        return
+
+    table = extract_clickhouse_table_name(bucket, key)
+    if not table:
+        return
+
+    print(f"DELETING {key} FROM {table} (not implemented)")
+
+    # parameters = {"id": key}
+    # get_clickhouse_client().query(
+    #     f"DELETE FROM `{table}` WHERE dynamoKey = %(id)s", parameters=parameters
+    # )

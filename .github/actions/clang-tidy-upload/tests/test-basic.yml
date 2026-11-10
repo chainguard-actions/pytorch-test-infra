@@ -1,0 +1,47 @@
+name: Test basic sanity check (no s3 upload)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CHECK_S3_LOG: ${{ github.workspace }}/check_s3.log
+      CHECK_S3_EXIT: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare stub check script and binaries
+        run: |
+          mkdir -p tools/clang-tidy-checks
+          cp tests/fixtures/check_s3.py tools/clang-tidy-checks/check_s3.py
+          rm -f "$CHECK_S3_LOG"
+          printf '#!/bin/sh\necho clang-tidy\n' > clang-tidy
+          printf '#!/bin/sh\necho clang-format\n' > clang-format
+          chmod +x clang-tidy clang-format
+      - id: action
+        uses: .
+        # The GHA artifact upload steps need an artifact runtime that may not be
+        # available under act; the sanity-check behavior is asserted strictly below.
+        continue-on-error: true
+        with:
+          platform: linux64
+          version: "17.0.6"
+      - name: Assert check_s3 was called for both binaries
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat "$CHECK_S3_LOG" || { echo "FAIL: check_s3 never ran"; exit 1; }
+          expected="linux64/17.0.6/clang-tidy clang-tidy exists=True
+          linux64/17.0.6/clang-format clang-format exists=True"
+          expected="$(echo "$expected" | sed 's/^ *//')"
+          actual="$(cat "$CHECK_S3_LOG")"
+          if [ "$actual" != "$expected" ]; then
+            echo "FAIL: unexpected invocations"
+            echo "expected:"; echo "$expected"
+            exit 1
+          fi
+          if [ "$OUTCOME" != "success" ] && [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+          echo "PASS"
