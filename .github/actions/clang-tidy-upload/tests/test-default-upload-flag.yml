@@ -1,0 +1,41 @@
+name: Test default upload-to-s3 skips S3 steps
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CHECK_S3_LOG: /tmp/check_s3_default.log
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare stub script and binaries
+        run: |
+          mkdir -p tools/clang-tidy-checks
+          cp tests/fixtures/check_s3_stub.py tools/clang-tidy-checks/check_s3.py
+          echo "fake clang-tidy" > clang-tidy
+          echo "fake clang-format" > clang-format
+          rm -f "$CHECK_S3_LOG"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          platform: linux-aarch64
+          version: "18.1.0"
+      - name: Assert both checks ran and no AWS credentials were configured
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "--- log ---"; cat "$CHECK_S3_LOG" || true
+          [ "$(wc -l < "$CHECK_S3_LOG")" -eq 2 ] || { echo "FAIL: expected exactly 2 checks"; exit 1; }
+          grep -qx "linux-aarch64/18.1.0/clang-tidy clang-tidy" "$CHECK_S3_LOG" || { echo "FAIL: clang-tidy check missing"; exit 1; }
+          grep -qx "linux-aarch64/18.1.0/clang-format clang-format" "$CHECK_S3_LOG" || { echo "FAIL: clang-format check missing"; exit 1; }
+          if [ -n "$AWS_ACCESS_KEY_ID" ]; then
+            echo "FAIL: AWS credentials step should have been skipped"
+            exit 1
+          fi
+          if [ "$OUTCOME" != "success" ] && [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+          echo "PASS"
