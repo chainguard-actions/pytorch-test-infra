@@ -1,0 +1,38 @@
+name: Test basic script run without cache
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env file and script
+        run: |
+          mkdir -p "$RUNNER_TEMP/ci"
+          cat > "$RUNNER_TEMP/ci/build_env.sh" <<'EOF'
+          export CONDA_RUN=""
+          export MY_BUILD_VAR="from-env-file"
+          EOF
+          cat > "$RUNNER_TEMP/ci/script.sh" <<'EOF'
+          echo "script running with MY_BUILD_VAR=${MY_BUILD_VAR}"
+          echo "${MY_BUILD_VAR}" > "${GITHUB_WORKSPACE}/basic-marker.txt"
+          EOF
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/ci/build_env.sh" >> "$GITHUB_ENV"
+          echo "SCRIPT_PATH=$RUNNER_TEMP/ci/script.sh" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          script: ${{ env.SCRIPT_PATH }}
+      - name: Assert script ran and env file was sourced
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/basic-marker.txt" ]; then
+            echo "FAIL: marker file not created"
+            exit 1
+          fi
+          ACTUAL="$(cat "$GITHUB_WORKSPACE/basic-marker.txt")"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "from-env-file" ]; then
+            echo "FAIL: expected 'from-env-file'"
+            exit 1
+          fi
+          echo "PASS"

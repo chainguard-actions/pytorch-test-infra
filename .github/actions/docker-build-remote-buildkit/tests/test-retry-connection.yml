@@ -1,0 +1,46 @@
+name: Test retry on connection-phase failure
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker that fails to connect twice
+        run: |
+          mkdir -p /tmp/fake-docker/bin
+          rm -f /tmp/fake-docker/calls.log /tmp/fake-docker/count
+          cat > /tmp/fake-docker/bin/docker <<'EOF'
+          #!/usr/bin/env bash
+          D=/tmp/fake-docker
+          { printf 'CALL'; printf ' [%s]' "$@"; printf '\n'; } >> "$D/calls.log"
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            n=$(cat "$D/count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$D/count"
+            if [ "$n" -lt 3 ]; then
+              echo "ERROR: failed to dial gRPC: connection refused" >&2
+              exit 1
+            fi
+            echo "#1 [internal] load build definition from Dockerfile"
+            exit 0
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fake-docker/bin/docker
+          echo /tmp/fake-docker/bin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: ghcr.io/example/retry:1
+          connect-attempts: '5'
+          connect-delay: '0'
+      - name: Assert retried until success
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: $IMAGE"
+          cat /tmp/fake-docker/calls.log
+          COUNT="$(cat /tmp/fake-docker/count)"
+          echo "build attempts: $COUNT"
+          [ "$COUNT" = "3" ] || { echo "FAIL: expected 3 build attempts"; exit 1; }
+          [ "$IMAGE" = "ghcr.io/example/retry:1" ] || { echo "FAIL: image output"; exit 1; }
+          echo "PASS"

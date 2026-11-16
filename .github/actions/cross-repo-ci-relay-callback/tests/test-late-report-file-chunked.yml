@@ -1,0 +1,53 @@
+name: Test late report file chunked
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          rm -rf /tmp/mock-relay && mkdir -p /tmp/mock-relay
+          setsid nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" 8765 /tmp/mock-relay > /tmp/mock-relay.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8765/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:8765/health || { cat /tmp/mock-relay.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:8765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+      - name: Generate 60 reports
+        run: |
+          python3 - <<'EOF'
+          import json
+          reports = [{"delivery_id": f"d{i}", "workflow_name": "wf", "job_name": f"job-{i}",
+                      "triage_verdict": {"schema_version": 1, "category": "flake", "confidence": "low", "summary": "x"}}
+                     for i in range(60)]
+          json.dump(reports, open("/tmp/late-reports.json", "w"))
+          EOF
+      - id: action
+        uses: .
+        with:
+          event-type: late-report
+          status: in_progress
+          triage-verdict-list: '@/tmp/late-reports.json'
+          callback-url: http://127.0.0.1:8765/github/callback
+      - name: Assert two chunked requests
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          d = "/tmp/mock-relay"
+          reqs = sorted((f for f in os.listdir(d) if f.startswith("req-")), key=lambda f: int(f[4:-5]))
+          print(reqs)
+          if len(reqs) != 2:
+              sys.exit(f"FAIL: expected 2 requests, got {reqs}")
+          sizes = []
+          names = []
+          for f in reqs:
+              b = json.loads(json.load(open(os.path.join(d, f)))["body"])
+              assert b["event_type"] == "late-report", "event_type"
+              sizes.append(len(b["reports"]))
+              names += [r["job_name"] for r in b["reports"]]
+          print("sizes:", sizes)
+          assert sizes == [50, 10], f"expected chunks [50, 10], got {sizes}"
+          assert names == [f"job-{i}" for i in range(60)], "reports out of order or missing"
+          print("PASS")
+          EOF

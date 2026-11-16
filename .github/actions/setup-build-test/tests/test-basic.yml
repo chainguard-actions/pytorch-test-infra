@@ -1,0 +1,45 @@
+name: Test basic checkout into repository subdirectory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          submodules: "false"
+          python-version: "3.10"
+      - name: Assert repository checked out under its own path
+        run: |
+          ls -la "$GITHUB_WORKSPACE/actions/checkout" || true
+          if [ ! -f "$GITHUB_WORKSPACE/actions/checkout/action.yml" ]; then
+            echo "FAIL: action.yml not found in actions/checkout subdirectory"
+            exit 1
+          fi
+          if ! grep -q "name: 'Checkout'" "$GITHUB_WORKSPACE/actions/checkout/action.yml"; then
+            echo "FAIL: unexpected action.yml content"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert checked out branch is main
+        run: |
+          cd "$GITHUB_WORKSPACE/actions/checkout"
+          BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+          echo "branch: $BRANCH"
+          if [ "$BRANCH" != "main" ]; then
+            echo "FAIL: expected branch main"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert RUNNER_ARTIFACT_DIR exported
+        run: |
+          echo "RUNNER_ARTIFACT_DIR: $RUNNER_ARTIFACT_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "${RUNNER_TEMP}/artifacts" ]; then
+            echo "FAIL: expected ${RUNNER_TEMP}/artifacts"
+            exit 1
+          fi
+          echo "PASS"

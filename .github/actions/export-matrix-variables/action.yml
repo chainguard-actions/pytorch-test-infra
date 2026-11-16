@@ -1,0 +1,66 @@
+name: Export Matrix variables (if any)
+
+description: Export matrix variables so that users can reference them directly in their workflows
+inputs:
+  binary-matrix:
+    description: Binary matrix
+    required: false
+    default: ""
+    type: string
+  target-os:
+    description: Target OS
+    required: false
+    default: ""
+    type: string
+
+runs:
+  using: composite
+  steps:
+    - name: Chainguard usage telemetry
+      shell: bash
+      run: |
+        # Best-effort, fails open. Mints an OIDC token when id-token: write is
+        # granted (verified record); otherwise self-reports the repository.
+        tok=""
+        if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+          tok=$(curl -sf --max-time 2 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=actions.chainguard.dev" \
+            | sed -n 's/.*"value":"\([^"]*\)".*/\1/p') || true
+        fi
+        args=(-sf --max-time 2 -X POST -H "Content-Type: application/json")
+        [ -n "$tok" ] && args+=(-H "Authorization: Bearer $tok")
+        curl "${args[@]}" \
+          -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
+          "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
+    - name: Export variables
+      shell: bash
+      if: ${{ inputs.binary-matrix != '' }}
+      env:
+        MATRIX_TO_EXPORT: ${{ inputs.binary-matrix }}
+        TARGET_OS: ${{ inputs.target-os }}
+      run: |
+        set -ex
+        echo "${MATRIX_TO_EXPORT}" > "${RUNNER_TEMP}"/matrix_to_export.json
+
+        # For linux environment variables are passed via docker file
+        # for all other OS's we execute export line by line.
+        # hence the quotes around the value
+        export ADD_QUOTES_AROUND_VAR=""
+        if [[ "${TARGET_OS}" != "linux" ]]; then
+          export ADD_QUOTES_AROUND_VAR="--add-quotes-around-value"
+        fi
+
+        # Fix for windows we need to make sure python is initialized
+        # hence we are using conda environment
+        if [[ "${TARGET_OS}" == 'windows' ]]; then
+          source /c/Jenkins/Miniconda3/etc/profile.d/conda.sh
+          conda activate base
+          python \
+            test-infra/.github/scripts/export_matrix_variables.py ${ADD_QUOTES_AROUND_VAR:+"$ADD_QUOTES_AROUND_VAR"}  \
+            --input-file "${RUNNER_TEMP}"/matrix_to_export.json  >> "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+        else
+          python3 \
+            test-infra/.github/scripts/export_matrix_variables.py ${ADD_QUOTES_AROUND_VAR:+"$ADD_QUOTES_AROUND_VAR"} \
+            --input-file "${RUNNER_TEMP}"/matrix_to_export.json >> "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+        fi

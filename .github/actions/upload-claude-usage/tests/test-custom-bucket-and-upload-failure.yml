@@ -1,0 +1,52 @@
+name: Test custom bucket/prefix and best-effort upload failure
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            (sudo apt-get update && sudo apt-get install -y jq) || (apt-get update && apt-get install -y jq)
+          fi
+      - name: Install failing mock aws CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/mockbin"
+          cat > "$RUNNER_TEMP/mockbin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/aws-args.txt
+          echo "upload failed: access denied" >&2
+          exit 1
+          EOF
+          chmod +x "$RUNNER_TEMP/mockbin/aws"
+          echo "$RUNNER_TEMP/mockbin" >> "$GITHUB_PATH"
+          rm -f /tmp/aws-args.txt
+          echo '[{"type":"result","duration_ms":"500","num_turns":2,"usage":{"input_tokens":"abc"}}]' \
+            > "$RUNNER_TEMP/metrics.json"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+          s3-bucket: my-test-bucket
+          s3-prefix: my/prefix
+      - name: Assert step succeeded with correct target and payload
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: expected success despite aws failure"; exit 1; fi
+          ARGS="$(cat /tmp/aws-args.txt)" || { echo "FAIL: aws not called"; exit 1; }
+          echo "aws args: $ARGS"
+          case "$ARGS" in
+            "s3 cp /tmp/claude_usage.json s3://my-test-bucket/my/prefix/"*.json) ;;
+            *) echo "FAIL: unexpected aws args"; exit 1 ;;
+          esac
+          cat /tmp/claude_usage.json
+          [ "$(jq -r '.duration_ms' /tmp/claude_usage.json)" = "500" ] || { echo "FAIL: duration_ms"; exit 1; }
+          [ "$(jq -r '.num_turns' /tmp/claude_usage.json)" = "2" ] || { echo "FAIL: num_turns"; exit 1; }
+          [ "$(jq -r '.input_tokens' /tmp/claude_usage.json)" = "0" ] || { echo "FAIL: input_tokens"; exit 1; }
+          [ "$(jq -r '.total_cost_usd' /tmp/claude_usage.json)" = "0" ] || { echo "FAIL: total_cost_usd"; exit 1; }
+          [ "$(jq -r '.model' /tmp/claude_usage.json)" = "" ] || { echo "FAIL: model should be empty"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,84 @@
+name: Test basic upload with valid metrics
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            (sudo apt-get update && sudo apt-get install -y jq) || (apt-get update && apt-get install -y jq)
+          fi
+          jq --version
+      - name: Install mock aws CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/mockbin"
+          cat > "$RUNNER_TEMP/mockbin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/aws-args.txt
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-uploaded.json
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/mockbin/aws"
+          echo "$RUNNER_TEMP/mockbin" >> "$GITHUB_PATH"
+          rm -f /tmp/aws-args.txt /tmp/aws-uploaded.json /tmp/claude_usage.json
+      - name: Create metrics file
+        run: |
+          cat > "$RUNNER_TEMP/claude-output.json" <<'EOF'
+          [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"content": "hi"}},
+            {"type": "result", "duration_ms": 1, "num_turns": 1, "total_cost_usd": 0.01,
+             "usage": {"input_tokens": 1, "output_tokens": 1}},
+            {"type": "result", "duration_ms": 12345, "num_turns": 7, "total_cost_usd": 0.42,
+             "usage": {"input_tokens": 100, "output_tokens": 200,
+                       "cache_read_input_tokens": 300, "cache_creation_input_tokens": 400},
+             "modelUsage": {"claude-sonnet-4-5": {"inputTokens": 100}},
+             "result": "done"}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/claude-output.json
+      - name: Assert payload uploaded
+        run: |
+          set -e
+          echo "aws args:"; cat /tmp/aws-args.txt || { echo "FAIL: aws not called"; exit 1; }
+          echo "payload:"; cat /tmp/aws-uploaded.json || { echo "FAIL: no payload uploaded"; exit 1; }
+          P=/tmp/aws-uploaded.json
+          check() {
+            actual="$(jq -r "$1" "$P")"
+            echo "$1 = $actual"
+            if [ "$actual" != "$2" ]; then
+              echo "FAIL: expected $1 == '$2'"
+              exit 1
+            fi
+          }
+          check '.duration_ms' 12345
+          check '.num_turns' 7
+          check '.total_cost_usd' 0.42
+          check '.input_tokens' 100
+          check '.output_tokens' 200
+          check '.cache_read_input_tokens' 300
+          check '.cache_creation_input_tokens' 400
+          check '.model' claude-sonnet-4-5
+          check '.event_name' workflow_dispatch
+          check '.pr_number' 0
+          check '.run_id | type' number
+          check '.run_attempt | type' number
+          check 'has("result")' false
+          if [ -z "$(jq -r '.repo' "$P")" ]; then echo "FAIL: repo empty"; exit 1; fi
+          if [ -z "$(jq -r '.actor' "$P")" ]; then echo "FAIL: actor empty"; exit 1; fi
+          jq -r '.timestamp' "$P" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.000$' \
+            || { echo "FAIL: bad timestamp"; exit 1; }
+          ARGS="$(cat /tmp/aws-args.txt)"
+          case "$ARGS" in
+            "s3 cp /tmp/claude_usage.json s3://ossci-raw-job-status/claude_code_usage/"*.json) ;;
+            *) echo "FAIL: unexpected aws args: $ARGS"; exit 1 ;;
+          esac
+          echo "PASS"

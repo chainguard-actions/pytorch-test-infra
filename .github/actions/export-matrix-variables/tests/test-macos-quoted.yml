@@ -1,0 +1,26 @@
+name: Test non-linux target (quoted values)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install export script stub at expected path
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/test-infra/.github/scripts"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/export_matrix_variables.py" \
+             "$GITHUB_WORKSPACE/test-infra/.github/scripts/export_matrix_variables.py"
+          rm -f "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}" "${RUNNER_TEMP}/matrix_to_export.json"
+      - id: action
+        uses: .
+        with:
+          binary-matrix: '{"python_version": "3.12", "desired_cuda": "cpu"}'
+          target-os: macos
+      - name: Assert env file content has quoted values
+        run: |
+          F="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          echo "--- env file"; cat "$F" || { echo "FAIL: env file missing"; exit 1; }
+          grep -qx 'PYTHON_VERSION="3.12"' "$F" || { echo "FAIL: quoted PYTHON_VERSION missing"; exit 1; }
+          grep -qx 'DESIRED_CUDA="cpu"' "$F" || { echo "FAIL: quoted DESIRED_CUDA missing"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,18 @@
+name: Test environment file
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          default-packages: "wheel"
+          environment-file: tests/fixtures/environment.yml
+      - name: Assert package from env file installed
+        run: |
+          $CONDA_RUN python -c 'import tomli; print(tomli.__name__)' || { echo "FAIL: tomli not installed"; exit 1; }
+          $CONDA_RUN python -c 'import wheel' || { echo "FAIL: wheel not installed"; exit 1; }
+          echo "PASS"

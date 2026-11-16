@@ -1,0 +1,51 @@
+name: Test teardown with extra-delete-dir input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install a recording powershell shim
+        run: |
+          mkdir -p "$HOME/shimbin"
+          cat > "$HOME/shimbin/powershell" <<'EOF'
+          #!/bin/sh
+          log=/tmp/powershell-invocations.log
+          echo "=== INVOCATION: $* ===" >> "$log"
+          for arg in "$@"; do
+            p=$(printf '%s' "$arg" | sed -n "s/.*'\(.*\)'.*/\1/p")
+            if [ -n "$p" ] && [ -f "$p" ]; then
+              cat "$p" >> "$log"
+            fi
+          done
+          exit 0
+          EOF
+          chmod +x "$HOME/shimbin/powershell"
+          echo "$HOME/shimbin" >> "$GITHUB_PATH"
+          if [ -w /usr/local/bin ]; then
+            cp "$HOME/shimbin/powershell" /usr/local/bin/powershell
+          elif command -v sudo >/dev/null 2>&1; then
+            sudo cp "$HOME/shimbin/powershell" /usr/local/bin/powershell || true
+          fi
+          rm -f /tmp/powershell-invocations.log
+      - id: action
+        uses: .
+        with:
+          extra-delete-dir: some-extra-dir
+      - name: Assert action succeeded and ran both steps
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/powershell-invocations.log || true
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          n=$(grep -c '=== INVOCATION' /tmp/powershell-invocations.log)
+          if [ "$n" -ne 2 ]; then
+            echo "FAIL: expected 2 powershell invocations, got $n"
+            exit 1
+          fi
+          echo "PASS"

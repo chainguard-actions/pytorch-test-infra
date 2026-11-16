@@ -1,0 +1,60 @@
+name: Test simulated GPU inside container runner
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake nvidia-smi and container marker
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/nvidia-smi" <<'EOF'
+          #!/bin/sh
+          if [ "$1" = "-L" ]; then
+            echo "GPU 0: NVIDIA A10G (UUID: GPU-fake-0000)"
+            exit 0
+          fi
+          echo "fake nvidia-smi"
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/nvidia-smi"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          if [ "$(id -u)" = "0" ]; then touch /.inarc; else sudo touch /.inarc; fi
+      - id: action
+        uses: .
+      - name: Assert has-nvidia is true
+        env:
+          ACTUAL: ${{ steps.action.outputs.has-nvidia }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "true" ]; then
+            echo "FAIL: expected 'true'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert in-container-runner is true
+        env:
+          ACTUAL: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "true" ]; then
+            echo "FAIL: expected 'true'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert exported env
+        run: |
+          echo "HAS_NVIDIA_GPU=$HAS_NVIDIA_GPU GPU_FLAG=${GPU_FLAG:-}"
+          if [ "$HAS_NVIDIA_GPU" != "true" ]; then
+            echo "FAIL: expected HAS_NVIDIA_GPU=true"
+            exit 1
+          fi
+          if [ "${GPU_FLAG:-}" != "--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all" ]; then
+            echo "FAIL: unexpected GPU_FLAG"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ "$(id -u)" = "0" ]; then rm -f /.inarc; else sudo rm -f /.inarc; fi

@@ -1,0 +1,67 @@
+name: Test basic buildx build with tags, build-args, labels, push
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker (no remote BuildKit under act)
+        run: |
+          mkdir -p /tmp/fake-docker/bin
+          rm -f /tmp/fake-docker/calls.log /tmp/fake-docker/count
+          echo ok > /tmp/fake-docker/mode
+          cat > /tmp/fake-docker/bin/docker <<'EOF'
+          #!/usr/bin/env bash
+          D=/tmp/fake-docker
+          { printf 'CALL'; printf ' [%s]' "$@"; printf '\n'; } >> "$D/calls.log"
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            n=$(cat "$D/count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$D/count"
+            mode=$(cat "$D/mode" 2>/dev/null || echo ok)
+            case "$mode" in
+              ok) echo "#1 [internal] load build definition from Dockerfile"; exit 0 ;;
+              flaky) if [ "$n" -lt 3 ]; then echo "ERROR: failed to dial: connection refused" >&2; exit 1; fi
+                     echo "#1 [internal] load build definition from Dockerfile"; exit 0 ;;
+              builderror) echo "#1 [internal] load build definition from Dockerfile"
+                     echo "ERROR: process did not complete successfully: exit code 2" >&2; exit 1 ;;
+            esac
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fake-docker/bin/docker
+          echo /tmp/fake-docker/bin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: "ghcr.io/example/img:abc123, ghcr.io/example/img:latest"
+          context: sub/ctx
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.source=https://example.com
+          cache-from: type=registry,ref=ghcr.io/example/img:cache
+          cache-to: type=inline
+          connect-attempts: '2'
+          connect-delay: '0'
+      - name: Assert output and invocation
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: $IMAGE"
+          cat /tmp/fake-docker/calls.log
+          if [ "$IMAGE" != "ghcr.io/example/img:abc123" ]; then echo "FAIL: image output"; exit 1; fi
+          grep -q '^CALL \[buildx\] \[create\] \[--name\] \[remote-buildkit\] \[--driver\] \[remote\]' /tmp/fake-docker/calls.log || { echo "FAIL: builder not created"; exit 1; }
+          BUILD="$(grep '^CALL \[buildx\] \[build\]' /tmp/fake-docker/calls.log)"
+          [ "$(echo "$BUILD" | wc -l)" -eq 1 ] || { echo "FAIL: expected exactly one build"; exit 1; }
+          for exp in '[--tag] [ghcr.io/example/img:abc123]' '[--tag] [ghcr.io/example/img:latest]' \
+                     '[--build-arg] [FOO=bar]' '[--build-arg] [BAZ=qux]' \
+                     '[--label] [org.opencontainers.image.source=https://example.com]' \
+                     '[--cache-from] [type=registry,ref=ghcr.io/example/img:cache]' \
+                     '[--cache-to] [type=inline]' '[--push]' '[--platform] [linux/'; do
+            echo "$BUILD" | grep -qF -- "$exp" || { echo "FAIL: missing $exp"; exit 1; }
+          done
+          echo "$BUILD" | grep -qE '\[sub/ctx\]$' || { echo "FAIL: context not last arg"; exit 1; }
+          if echo "$BUILD" | grep -qF -- '[--file]'; then echo "FAIL: unexpected --file"; exit 1; fi
+          if echo "$BUILD" | grep -qF -- '[--target]'; then echo "FAIL: unexpected --target"; exit 1; fi
+          echo "PASS"

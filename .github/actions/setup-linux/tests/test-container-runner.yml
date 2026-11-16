@@ -1,0 +1,106 @@
+name: Test container runner
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Mark as container runner
+        run: |
+          touch /.incontainer 2>/dev/null || sudo touch /.incontainer
+          [ -f /.incontainer ] || { echo "could not create /.incontainer"; exit 1; }
+      - name: Install fake tools (curl, aws, docker, sudo, lspci, systemctl)
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$FAKEBIN" /tmp/fakelog
+          rm -f /tmp/fakelog/*
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          cat > "$FAKEBIN/curl" <<EOF
+          #!/bin/bash
+          echo "curl \$*" >> /tmp/fakelog/curl.log
+          case "\$*" in
+            *api/token*) echo "fake-imds-token" ;;
+            *meta-data/ami-id*) echo "ami-0123456789" ;;
+            *meta-data/instance-id*) echo "i-0abcdef123" ;;
+            *meta-data/instance-type*) echo "c5.large" ;;
+            *) exec "$REAL_CURL" "\$@" ;;
+          esac
+          EOF
+          cat > "$FAKEBIN/aws" <<'EOF'
+          #!/bin/bash
+          echo "aws $* region=$AWS_DEFAULT_REGION" >> /tmp/fakelog/aws.log
+          case "$1 $2" in
+            "sts get-caller-identity")
+              printf '{\n    "UserId": "AIDATEST",\n    "Account": "123456789012",\n    "Arn": "arn:aws:iam::123456789012:user/test"\n}\n'
+              ;;
+            "ecr get-login-password")
+              echo "fake-ecr-password"
+              ;;
+            *) exit 1 ;;
+          esac
+          EOF
+          cat > "$FAKEBIN/docker" <<'EOF'
+          #!/bin/bash
+          echo "docker $*" >> /tmp/fakelog/docker.log
+          case "$1" in
+            login)
+              pw="$(cat)"
+              echo "password=$pw" >> /tmp/fakelog/docker.log
+              echo "Login Succeeded"
+              ;;
+          esac
+          exit 0
+          EOF
+          cat > "$FAKEBIN/sudo" <<'EOF'
+          #!/bin/bash
+          exec "$@"
+          EOF
+          cat > "$FAKEBIN/lspci" <<'EOF'
+          #!/bin/bash
+          echo "lspci called" >> /tmp/fakelog/lspci.log
+          echo "00:00.0 Host bridge: Intel Corporation 440FX"
+          EOF
+          cat > "$FAKEBIN/systemctl" <<'EOF'
+          #!/bin/bash
+          echo "systemctl $*" >> /tmp/fakelog/systemctl.log
+          exit 0
+          EOF
+          chmod +x "$FAKEBIN"/*
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert ECR login still happens
+        run: |
+          cat /tmp/fakelog/docker.log
+          grep -q "docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com" /tmp/fakelog/docker.log || { echo "FAIL: docker login wrong"; exit 1; }
+          echo "PASS"
+      - name: Assert non-container steps were skipped
+        run: |
+          if grep -q "system prune" /tmp/fakelog/docker.log; then
+            echo "FAIL: docker prune should be skipped in container runner"
+            exit 1
+          fi
+          if grep -q "docker version" /tmp/fakelog/docker.log; then
+            echo "FAIL: docker start check should be skipped in container runner"
+            exit 1
+          fi
+          if [ -f /tmp/fakelog/lspci.log ]; then
+            echo "FAIL: nvidia driver check should be skipped in container runner"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert env vars set and GPU_FLAG absent (no /dev/nvidiaX)
+        run: |
+          [ "$RUNNER_ARTIFACT_DIR" = "$RUNNER_TEMP/artifacts" ] || { echo "FAIL: artifact dir '$RUNNER_ARTIFACT_DIR'"; exit 1; }
+          [ -d "$RUNNER_ARTIFACT_DIR" ] || { echo "FAIL: artifact dir missing"; exit 1; }
+          if ! compgen -G "/dev/nvidia[0-9]" >/dev/null && [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG set without nvidia device: $GPU_FLAG"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Clean up container marker
+        if: always()
+        run: rm -f /.incontainer 2>/dev/null || sudo rm -f /.incontainer || true

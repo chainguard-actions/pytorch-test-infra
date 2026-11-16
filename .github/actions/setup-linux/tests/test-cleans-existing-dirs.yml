@@ -1,0 +1,63 @@
+name: Test stale runner dirs are recreated
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure not detected as container runner
+        run: rm -f /.inarc /.incontainer 2>/dev/null || sudo rm -f /.inarc /.incontainer
+      - name: Create stale content
+        run: |
+          for d in artifacts test-results docs; do
+            mkdir -p "$RUNNER_TEMP/$d/sub"
+            echo stale > "$RUNNER_TEMP/$d/stale.txt"
+            echo stale > "$RUNNER_TEMP/$d/sub/stale.txt"
+          done
+      - name: Install fake tools
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$FAKEBIN" /tmp/fakelog
+          rm -f /tmp/fakelog/*
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          cat > "$FAKEBIN/curl" <<EOF
+          #!/bin/bash
+          case "\$*" in
+            *169.254.169.254*) echo "fake-value" ;;
+            *) exec "$REAL_CURL" "\$@" ;;
+          esac
+          EOF
+          cat > "$FAKEBIN/aws" <<'EOF'
+          #!/bin/bash
+          case "$1 $2" in
+            "sts get-caller-identity") printf '{\n    "Account": "123456789012",\n}\n' ;;
+            "ecr get-login-password") echo "pw" ;;
+            *) exit 1 ;;
+          esac
+          EOF
+          cat > "$FAKEBIN/docker" <<'EOF'
+          #!/bin/bash
+          echo "docker $*" >> /tmp/fakelog/docker.log
+          [ "$1" = login ] && cat >/dev/null
+          exit 0
+          EOF
+          printf '#!/bin/bash\nexec "$@"\n' > "$FAKEBIN/sudo"
+          printf '#!/bin/bash\necho "00:00.0 Host bridge"\n' > "$FAKEBIN/lspci"
+          printf '#!/bin/bash\nexit 0\n' > "$FAKEBIN/systemctl"
+          chmod +x "$FAKEBIN"/*
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert dirs exist and are empty
+        run: |
+          for d in "$RUNNER_ARTIFACT_DIR" "$RUNNER_TEST_RESULTS_DIR" "$RUNNER_DOCS_DIR"; do
+            echo "checking $d"
+            [ -n "$d" ] && [ -d "$d" ] || { echo "FAIL: '$d' missing"; exit 1; }
+            if [ -n "$(ls -A "$d")" ]; then
+              echo "FAIL: $d not emptied:"; ls -la "$d"; exit 1
+            fi
+          done
+          echo "PASS"

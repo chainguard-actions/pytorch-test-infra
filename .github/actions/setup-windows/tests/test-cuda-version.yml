@@ -1,0 +1,64 @@
+name: Test with a CUDA version input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Windows tool shims (powershell, cygpath) and fast-failing EC2 metadata curl
+        run: |
+          SHIMS="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIMS"
+          cat > "$SHIMS/powershell" <<EOF
+          #!/bin/sh
+          echo "powershell \$*" >> "$RUNNER_TEMP/powershell-calls.log"
+          exit 0
+          EOF
+          cat > "$SHIMS/cygpath" <<'EOF'
+          #!/bin/sh
+          echo "$1"
+          EOF
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          cat > "$SHIMS/curl" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *169.254.169.254*) exit 22 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+          chmod +x "$SHIMS"/*
+          echo "$SHIMS" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: "12.4"
+      - name: Assert action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert environment variables and directories
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          if [ -z "$RUNNER_ARTIFACT_DIR" ] || [ ! -d "$RUNNER_ARTIFACT_DIR" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR not set or missing"
+            exit 1
+          fi
+          if [ -z "$RUNNER_TEST_RESULTS_DIR" ] || [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR not set or missing"
+            exit 1
+          fi
+          case "$RUNNER_ARTIFACT_DIR" in */artifacts) ;; *) echo "FAIL: bad artifact dir"; exit 1 ;; esac
+          case "$RUNNER_TEST_RESULTS_DIR" in */test-results) ;; *) echo "FAIL: bad test-results dir"; exit 1 ;; esac
+          if [ "$(git config --global --get core.longpaths)" != "true" ]; then
+            echo "FAIL: core.longpaths not set"
+            exit 1
+          fi
+          echo "PASS"

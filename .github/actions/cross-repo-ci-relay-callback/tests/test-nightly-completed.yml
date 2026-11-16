@@ -1,0 +1,71 @@
+name: Test nightly completed
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          rm -rf /tmp/mock-relay && mkdir -p /tmp/mock-relay
+          setsid nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" 8765 /tmp/mock-relay > /tmp/mock-relay.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8765/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:8765/health || { cat /tmp/mock-relay.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:8765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0e797b5a6acf1234567890abcdef1234567890ab
+          event-type: nightly
+          job-name: build-cpu
+          test-results: '{"passed": 10, "failed": 0, "skipped": 2}'
+          artifact-url: https://example.com/artifacts/123
+          triage-verdict: '{"schema_version": 1, "category": "flake", "confidence": "low", "summary": "flaky"}'
+          callback-url: http://127.0.0.1:8765/github/callback/
+      - name: Assert payload sent to relay
+        run: |
+          ls -la /tmp/mock-relay
+          python3 - <<'EOF'
+          import json, os, sys
+          d = "/tmp/mock-relay"
+          reqs = sorted(f for f in os.listdir(d) if f.startswith("req-"))
+          if len(reqs) != 1:
+              sys.exit(f"FAIL: expected 1 request, got {reqs}")
+          r = json.load(open(os.path.join(d, reqs[0])))
+          print("path:", r["path"])
+          if r["path"] != "/github/callback":
+              sys.exit("FAIL: unexpected path (trailing slash should be stripped)")
+          if r["auth"] != "Bearer mock-oidc-token-123":
+              sys.exit("FAIL: OIDC token not used as bearer")
+          if r["content_type"] != "application/json":
+              sys.exit("FAIL: wrong content type")
+          tok = json.load(open(os.path.join(d, "token-request.json")))
+          if "audience=pytorch-cross-repo-ci-relay" not in tok["path"]:
+              sys.exit(f"FAIL: wrong audience in token request: {tok['path']}")
+          b = json.loads(r["body"])
+          print(json.dumps(b, indent=2))
+          sha = "0e797b5a6acf1234567890abcdef1234567890ab"
+          assert b["event_type"] == "nightly", "event_type"
+          assert b["delivery_id"] == sha, "delivery_id"
+          assert b["payload"]["head_sha"] == sha, "head_sha"
+          assert b["payload"]["repository"]["full_name"] == "pytorch/pytorch", "repo"
+          w = b["workflow"]
+          assert w["schema_version"] == "1", "schema_version"
+          assert w["status"] == "completed", "status"
+          assert w["conclusion"] == "success", "conclusion"
+          assert w["name"] == "Test nightly completed", "name"
+          assert w["job_name"] == "build-cpu", "job_name"
+          assert "/actions/runs/" in w["url"], "url"
+          assert w["run_id"], "run_id"
+          assert w["check_run_id"], "check_run_id"
+          assert w["started_at"] and w["started_at"].endswith("Z"), "started_at"
+          assert w["completed_at"] and w["completed_at"].endswith("Z"), "completed_at"
+          assert w["test_results"] == {"passed": 10, "failed": 0, "skipped": 2}, "test_results"
+          assert w["artifact_url"] == "https://example.com/artifacts/123", "artifact_url"
+          assert w["triage_verdict"]["category"] == "flake", "triage_verdict"
+          print("PASS")
+          EOF

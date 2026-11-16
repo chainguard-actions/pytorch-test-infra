@@ -1,0 +1,37 @@
+name: Test long python version is shortened
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/vision
+          ref: main
+          python-version: '3.10.19'
+          cuda-version: cpu
+          arch: aarch64
+      - name: Assert ARTIFACT_NAME uses short python version
+        run: |
+          echo "ARTIFACT_NAME: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_vision_main_3.10_cpu_aarch64" ]; then
+            echo "FAIL: expected pytorch_vision_main_3.10_cpu_aarch64"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert BUILD_ENV_FILE generated
+        run: |
+          echo "BUILD_ENV_FILE: $BUILD_ENV_FILE"
+          if [ -z "$BUILD_ENV_FILE" ] || [ ! -f "$BUILD_ENV_FILE" ]; then
+            echo "FAIL: BUILD_ENV_FILE missing"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,60 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert conda environment was set up
+        run: |
+          set -x
+          echo "CONDA_ENV=$CONDA_ENV"
+          echo "CONDA_PREFIX=$CONDA_PREFIX"
+          echo "CONDA_RUN=$CONDA_RUN"
+          echo "CONDA_INSTALL=$CONDA_INSTALL"
+          if [ -z "$CONDA_PREFIX" ] || [ ! -d "$CONDA_PREFIX" ]; then
+            echo "FAIL: CONDA_PREFIX not set or missing"
+            exit 1
+          fi
+          if [ "$CONDA_ENV" != "$CONDA_PREFIX" ]; then
+            echo "FAIL: CONDA_ENV should equal CONDA_PREFIX"
+            exit 1
+          fi
+          if [ "$CONDA_PREFIX" != "${RUNNER_TEMP}/conda_environment_${GITHUB_RUN_ID}" ]; then
+            echo "FAIL: unexpected CONDA_PREFIX"
+            exit 1
+          fi
+          case "$CONDA_RUN" in
+            *"run -p ${CONDA_PREFIX} --no-capture-output"*) ;;
+            *) echo "FAIL: unexpected CONDA_RUN"; exit 1 ;;
+          esac
+          case "$CONDA_INSTALL" in
+            *"install --yes --quiet -p ${CONDA_PREFIX}"*) ;;
+            *) echo "FAIL: unexpected CONDA_INSTALL"; exit 1 ;;
+          esac
+          if [ ! -x "${RUNNER_TEMP}/miniconda/bin/conda" ]; then
+            echo "FAIL: miniconda not installed"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert python version and default packages
+        run: |
+          VER=$($CONDA_RUN python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          echo "python version: $VER"
+          if [ "$VER" != "3.9" ]; then
+            echo "FAIL: expected python 3.9"
+            exit 1
+          fi
+          $CONDA_RUN cmake --version | tee /tmp/cmake.txt
+          grep -q "3.22" /tmp/cmake.txt || { echo "FAIL: cmake 3.22 not installed"; exit 1; }
+          $CONDA_RUN ninja --version || { echo "FAIL: ninja not installed"; exit 1; }
+          echo "PASS"
+      - name: Assert channel priority reset
+        run: |
+          OUT=$(conda config --show channel_priority)
+          echo "$OUT"
+          echo "$OUT" | grep -q "disabled" || { echo "FAIL: channel_priority not disabled"; exit 1; }
+          echo "PASS"

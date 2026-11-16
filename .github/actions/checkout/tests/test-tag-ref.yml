@@ -1,0 +1,38 @@
+name: Test checkout of a tag ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: v4.1.0
+          path: tag-target
+          persist-credentials: false
+      - name: Assert tag checked out
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          cd "$GITHUB_WORKSPACE/tag-target"
+          echo "commit: $COMMIT"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          echo "HEAD: $HEAD_SHA"
+          if [ "$HEAD_SHA" != "$COMMIT" ]; then
+            echo "FAIL: HEAD does not match commit output"
+            exit 1
+          fi
+          TAG_SHA="$(git rev-parse 'v4.1.0^{commit}')"
+          echo "tag sha: $TAG_SHA"
+          if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            echo "FAIL: HEAD is not at tag v4.1.0"
+            exit 1
+          fi
+          if git config --local --get-regexp 'http\..*\.extraheader' >/dev/null 2>&1; then
+            echo "FAIL: credentials persisted despite persist-credentials=false"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,33 @@
+name: Test script run inside repository subdirectory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare subdir, env file and script
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/subrepo/scripts"
+          echo 'export CONDA_RUN=""' > "$RUNNER_TEMP/build_env.sh"
+          cat > "$GITHUB_WORKSPACE/subrepo/scripts/run.sh" <<'EOF'
+          pwd > "${GITHUB_WORKSPACE}/subdir-marker.txt"
+          EOF
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/build_env.sh" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          repository: subrepo
+          script: scripts/run.sh
+      - name: Assert script ran in subdirectory
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/subdir-marker.txt" ]; then
+            echo "FAIL: marker not created"
+            exit 1
+          fi
+          ACTUAL="$(cat "$GITHUB_WORKSPACE/subdir-marker.txt")"
+          echo "actual: $ACTUAL"
+          case "$ACTUAL" in
+            */subrepo) echo "PASS" ;;
+            *) echo "FAIL: expected working dir ending in /subrepo"; exit 1 ;;
+          esac

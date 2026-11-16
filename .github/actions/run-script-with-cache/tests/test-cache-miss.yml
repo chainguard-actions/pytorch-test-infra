@@ -1,0 +1,36 @@
+name: Test cache miss runs script
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env file and script
+        run: |
+          echo 'export CONDA_RUN=""' > "$RUNNER_TEMP/build_env.sh"
+          cat > "$RUNNER_TEMP/cache-script.sh" <<'EOF'
+          mkdir -p "${GITHUB_WORKSPACE}/cached-dir"
+          echo built > "${GITHUB_WORKSPACE}/cached-dir/out.txt"
+          echo ran > "${GITHUB_WORKSPACE}/cache-marker.txt"
+          EOF
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/build_env.sh" >> "$GITHUB_ENV"
+          echo "SCRIPT_PATH=$RUNNER_TEMP/cache-script.sh" >> "$GITHUB_ENV"
+          echo "CACHE_KEY=act-test-$(date +%s)-$RANDOM" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          cache-path: cached-dir
+          cache-key: ${{ env.CACHE_KEY }}
+          script: ${{ env.SCRIPT_PATH }}
+      - name: Assert script ran on cache miss
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/cache-marker.txt" ]; then
+            echo "FAIL: script did not run on cache miss"
+            exit 1
+          fi
+          if [ "$(cat "$GITHUB_WORKSPACE/cached-dir/out.txt")" != "built" ]; then
+            echo "FAIL: cached-dir output missing"
+            exit 1
+          fi
+          echo "PASS"

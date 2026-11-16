@@ -1,0 +1,52 @@
+name: Test action invokes driver update and nvidia-smi via cmd shell
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake cmd shell (Windows cmd is unavailable on Linux)
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/cmd" <<'EOF'
+          #!/bin/sh
+          # Fake cmd.exe: record the script act asks us to run, then succeed.
+          LOG=/tmp/fake-cmd.log
+          echo "ARGS: $*" >> "$LOG"
+          for f in $(echo "$*" | tr '"' ' ' | tr ' ' '\n' | grep -E '\.(cmd|bat)$'); do
+            if [ -f "$f" ]; then
+              echo "--- SCRIPT $f ---" >> "$LOG"
+              cat "$f" >> "$LOG"
+              echo "" >> "$LOG"
+            fi
+          done
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/cmd"
+          rm -f /tmp/fake-cmd.log
+          if command -v sudo >/dev/null 2>&1; then
+            sudo cp "$RUNNER_TEMP/fakebin/cmd" /usr/local/bin/cmd || true
+          else
+            cp "$RUNNER_TEMP/fakebin/cmd" /usr/local/bin/cmd || true
+          fi
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert driver update script and nvidia-smi were invoked
+        run: |
+          echo "=== fake cmd log ==="
+          cat /tmp/fake-cmd.log || { echo "FAIL: fake cmd was never invoked"; exit 1; }
+          if ! grep -q 'driver_update.bat' /tmp/fake-cmd.log; then
+            echo "FAIL: driver_update.bat was not invoked"
+            exit 1
+          fi
+          if ! grep -q 'scripts' /tmp/fake-cmd.log; then
+            echo "FAIL: expected scripts directory path in driver update command"
+            exit 1
+          fi
+          if ! grep -q 'nvidia-smi' /tmp/fake-cmd.log; then
+            echo "FAIL: nvidia-smi verification was not invoked"
+            exit 1
+          fi
+          echo "PASS"

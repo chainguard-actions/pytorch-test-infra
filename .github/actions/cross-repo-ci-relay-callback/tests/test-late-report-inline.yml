@@ -1,0 +1,46 @@
+name: Test late report inline
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          rm -rf /tmp/mock-relay && mkdir -p /tmp/mock-relay
+          setsid nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" 8765 /tmp/mock-relay > /tmp/mock-relay.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8765/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:8765/health || { cat /tmp/mock-relay.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:8765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          event-type: late-report
+          triage-verdict-list: >-
+            [{"delivery_id": "d1", "workflow_name": "wf", "job_name": "build-npu", "check_run_id": 123456789,
+              "triage_verdict": {"schema_version": 1, "category": "upstream", "confidence": "high", "summary": "s"}},
+             {"delivery_id": "d2", "workflow_name": "wf", "job_name": "test-npu",
+              "triage_verdict": {"schema_version": 1, "category": "infra", "confidence": "medium", "summary": "t"}}]
+          callback-url: http://127.0.0.1:8765/github/callback/
+      - name: Assert late report payload
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          d = "/tmp/mock-relay"
+          reqs = sorted(f for f in os.listdir(d) if f.startswith("req-"))
+          if len(reqs) != 1:
+              sys.exit(f"FAIL: expected 1 request, got {reqs}")
+          r = json.load(open(os.path.join(d, reqs[0])))
+          assert r["auth"] == "Bearer mock-oidc-token-123", "auth"
+          b = json.loads(r["body"])
+          print(json.dumps(b, indent=2))
+          assert b["event_type"] == "late-report", "event_type"
+          assert "workflow" not in b, "late report must not carry a workflow block"
+          reps = b["reports"]
+          assert len(reps) == 2, "two reports"
+          assert reps[0]["job_name"] == "build-npu" and reps[0]["check_run_id"] == 123456789, "report 0"
+          assert reps[1]["delivery_id"] == "d2" and reps[1]["triage_verdict"]["category"] == "infra", "report 1"
+          print("PASS")
+          EOF

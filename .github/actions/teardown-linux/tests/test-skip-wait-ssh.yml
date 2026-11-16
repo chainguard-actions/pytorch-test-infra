@@ -1,0 +1,42 @@
+name: Test skip-wait-ssh
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who (never touch the real daemon)
+        run: |
+          BIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$BIN"
+          cat > "$BIN/docker" <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> "$RUNNER_TEMP/docker.log"
+          case "$1" in
+            ps) echo "abc123"; echo "def456" ;;
+          esac
+          exit 0
+          EOF
+          cat > "$BIN/who" <<'EOF'
+          #!/bin/sh
+          echo "called" >> "$RUNNER_TEMP/who.log"
+          exit 0
+          EOF
+          chmod +x "$BIN/docker" "$BIN/who"
+          echo "$BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          skip-wait-ssh: "true"
+      - name: Assert docker cleanup ran and ssh wait skipped
+        run: |
+          echo "--- docker.log ---"; cat "$RUNNER_TEMP/docker.log" || true
+          grep -qx "docker ps -q" "$RUNNER_TEMP/docker.log" || { echo "FAIL: docker ps -q not called"; exit 1; }
+          grep -qx "docker stop abc123 def456" "$RUNNER_TEMP/docker.log" || { echo "FAIL: docker stop not called with container ids"; exit 1; }
+          grep -qx "docker system prune -af" "$RUNNER_TEMP/docker.log" || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          if [ -f "$RUNNER_TEMP/who.log" ]; then
+            echo "FAIL: who was called even though skip-wait-ssh was set"
+            exit 1
+          fi
+          echo "PASS"

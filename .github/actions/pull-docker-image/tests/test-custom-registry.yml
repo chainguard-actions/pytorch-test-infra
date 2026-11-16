@@ -1,0 +1,46 @@
+name: Test custom docker registry
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock aws and docker
+        run: |
+          MOCK_BIN="$RUNNER_TEMP/mockbin"
+          mkdir -p "$MOCK_BIN"
+          rm -f /tmp/mock-calls.log /tmp/mock-inspect-exit /tmp/mock-pull-failures
+          cat > "$MOCK_BIN/aws" <<'EOF'
+          #!/bin/bash
+          echo "aws $*" >> /tmp/mock-calls.log
+          echo "fake-password"
+          EOF
+          cat > "$MOCK_BIN/docker" <<'EOF'
+          #!/bin/bash
+          echo "docker $*" >> /tmp/mock-calls.log
+          case "$1" in
+            login) cat >/dev/null; echo "Login Succeeded"; exit 0 ;;
+            manifest) echo '{"config":{"size":1048576},"layers":[{"size":1048576},{"size":2097152}]}'; exit 0 ;;
+            inspect) exit "$(cat /tmp/mock-inspect-exit 2>/dev/null || echo 1)" ;;
+            pull)
+              n=$(cat /tmp/mock-pull-failures 2>/dev/null || echo 0)
+              if [ "$n" -gt 0 ]; then echo $((n-1)) > /tmp/mock-pull-failures; echo "pull failed" >&2; exit 1; fi
+              echo "pulled $2"; exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x "$MOCK_BIN/aws" "$MOCK_BIN/docker"
+          echo "$MOCK_BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:tag
+          docker-registry: 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      - name: Assert custom registry login
+        run: |
+          echo "--- mock calls ---"; cat /tmp/mock-calls.log
+          grep -q "^docker login -u AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com$" /tmp/mock-calls.log || { echo "FAIL: login to custom registry not called"; exit 1; }
+          if grep -q "308535385114" /tmp/mock-calls.log; then echo "FAIL: default registry used"; exit 1; fi
+          grep -q "^docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:tag$" /tmp/mock-calls.log || { echo "FAIL: pull not called"; exit 1; }
+          echo "PASS"

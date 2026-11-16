@@ -1,0 +1,129 @@
+name: Test basic (non-container runner)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure not detected as container runner
+        run: |
+          rm -f /.inarc /.incontainer 2>/dev/null || sudo rm -f /.inarc /.incontainer
+          if [ -f /.inarc ] || [ -f /.incontainer ]; then
+            echo "could not remove container marker files"
+            exit 1
+          fi
+      - name: Install fake tools (curl, aws, docker, sudo, lspci, systemctl)
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$FAKEBIN" /tmp/fakelog
+          rm -f /tmp/fakelog/*
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          cat > "$FAKEBIN/curl" <<EOF
+          #!/bin/bash
+          echo "curl \$*" >> /tmp/fakelog/curl.log
+          case "\$*" in
+            *api/token*) echo "fake-imds-token" ;;
+            *meta-data/ami-id*) echo "ami-0123456789" ;;
+            *meta-data/instance-id*) echo "i-0abcdef123" ;;
+            *meta-data/instance-type*) echo "c5.large" ;;
+            *) exec "$REAL_CURL" "\$@" ;;
+          esac
+          EOF
+          cat > "$FAKEBIN/aws" <<'EOF'
+          #!/bin/bash
+          echo "aws $* region=$AWS_DEFAULT_REGION" >> /tmp/fakelog/aws.log
+          case "$1 $2" in
+            "sts get-caller-identity")
+              printf '{\n    "UserId": "AIDATEST",\n    "Account": "123456789012",\n    "Arn": "arn:aws:iam::123456789012:user/test"\n}\n'
+              ;;
+            "ecr get-login-password")
+              echo "fake-ecr-password"
+              ;;
+            *) exit 1 ;;
+          esac
+          EOF
+          cat > "$FAKEBIN/docker" <<'EOF'
+          #!/bin/bash
+          echo "docker $*" >> /tmp/fakelog/docker.log
+          case "$1" in
+            login)
+              pw="$(cat)"
+              echo "password=$pw" >> /tmp/fakelog/docker.log
+              echo "Login Succeeded"
+              ;;
+          esac
+          exit 0
+          EOF
+          cat > "$FAKEBIN/sudo" <<'EOF'
+          #!/bin/bash
+          exec "$@"
+          EOF
+          cat > "$FAKEBIN/lspci" <<'EOF'
+          #!/bin/bash
+          echo "00:00.0 Host bridge: Intel Corporation 440FX"
+          EOF
+          cat > "$FAKEBIN/systemctl" <<'EOF'
+          #!/bin/bash
+          echo "systemctl $*" >> /tmp/fakelog/systemctl.log
+          exit 0
+          EOF
+          chmod +x "$FAKEBIN"/*
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert EC2 metadata was queried
+        run: |
+          cat /tmp/fakelog/curl.log
+          for c in ami-id instance-id instance-type; do
+            if ! grep -q "meta-data/$c" /tmp/fakelog/curl.log; then
+              echo "FAIL: metadata $c not queried"
+              exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert ECR login
+        run: |
+          cat /tmp/fakelog/aws.log
+          cat /tmp/fakelog/docker.log
+          grep -q "sts get-caller-identity" /tmp/fakelog/aws.log || { echo "FAIL: no sts call"; exit 1; }
+          grep -q "ecr get-login-password --region us-east-1" /tmp/fakelog/aws.log || { echo "FAIL: no ecr password call"; exit 1; }
+          grep -q "docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com" /tmp/fakelog/docker.log || { echo "FAIL: docker login wrong"; exit 1; }
+          grep -q "password=fake-ecr-password" /tmp/fakelog/docker.log || { echo "FAIL: password not piped"; exit 1; }
+          echo "PASS"
+      - name: Assert docker cleanup ran (non-container runner)
+        run: |
+          grep -q "docker system prune -af" /tmp/fakelog/docker.log || { echo "FAIL: no prune"; exit 1; }
+          grep -q "docker ps -q" /tmp/fakelog/docker.log || { echo "FAIL: no docker ps"; exit 1; }
+          grep -q "docker version" /tmp/fakelog/docker.log || { echo "FAIL: docker version not checked"; exit 1; }
+          if [ -f /tmp/fakelog/systemctl.log ]; then
+            echo "FAIL: systemctl should not be called when docker is up"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert environment variables and directories
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          echo "RUNNER_DOCS_DIR=$RUNNER_DOCS_DIR"
+          [ "$RUNNER_ARTIFACT_DIR" = "$RUNNER_TEMP/artifacts" ] || { echo "FAIL: artifact dir"; exit 1; }
+          [ "$RUNNER_TEST_RESULTS_DIR" = "$RUNNER_TEMP/test-results" ] || { echo "FAIL: test results dir"; exit 1; }
+          [ "$RUNNER_DOCS_DIR" = "$RUNNER_TEMP/docs" ] || { echo "FAIL: docs dir"; exit 1; }
+          for d in "$RUNNER_ARTIFACT_DIR" "$RUNNER_TEST_RESULTS_DIR" "$RUNNER_DOCS_DIR"; do
+            [ -d "$d" ] || { echo "FAIL: $d missing"; exit 1; }
+          done
+          if [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG unexpectedly set: $GPU_FLAG"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert github env file preserved
+        run: |
+          F="$RUNNER_TEMP/github_env_${GITHUB_RUN_ID}"
+          [ -f "$F" ] || { echo "FAIL: $F missing"; exit 1; }
+          grep -q '^GITHUB' "$F" || { echo "FAIL: no GITHUB vars"; exit 1; }
+          grep -q '^CI' "$F" || { echo "FAIL: no CI vars"; exit 1; }
+          grep -q '^RUNNER' "$F" || { echo "FAIL: no RUNNER vars"; exit 1; }
+          echo "PASS"

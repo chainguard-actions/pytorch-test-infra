@@ -1,0 +1,59 @@
+name: Test basic teardown (both powershell steps run)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install a recording powershell shim (Linux runner has no Windows PowerShell)
+        run: |
+          mkdir -p "$HOME/shimbin"
+          cat > "$HOME/shimbin/powershell" <<'EOF'
+          #!/bin/sh
+          # Records the script that the runner asks powershell to execute.
+          # act invokes: powershell -command . /path/to/script.ps1
+          # (path may be bare or quoted, possibly combined into one arg)
+          log=/tmp/powershell-invocations.log
+          echo "=== INVOCATION: $* ===" >> "$log"
+          for arg in "$@"; do
+            for cand in "$arg" \
+                "$(printf '%s' "$arg" | sed -n "s/.*'\(.*\)'.*/\1/p")" \
+                "$(printf '%s' "$arg" | sed -e 's/^\. *//' -e 's/^"//' -e 's/"$//')"; do
+              if [ -n "$cand" ] && [ -f "$cand" ]; then
+                cat "$cand" >> "$log"
+                echo >> "$log"
+                break
+              fi
+            done
+          done
+          exit 0
+          EOF
+          chmod +x "$HOME/shimbin/powershell"
+          echo "$HOME/shimbin" >> "$GITHUB_PATH"
+          if [ -w /usr/local/bin ]; then
+            cp "$HOME/shimbin/powershell" /usr/local/bin/powershell
+          elif command -v sudo >/dev/null 2>&1; then
+            sudo cp "$HOME/shimbin/powershell" /usr/local/bin/powershell || true
+          fi
+          rm -f /tmp/powershell-invocations.log
+      - id: action
+        uses: .
+      - name: Assert both teardown steps were executed via powershell
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/powershell-invocations.log || true
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          n=$(grep -c '=== INVOCATION' /tmp/powershell-invocations.log)
+          if [ "$n" -ne 2 ]; then
+            echo "FAIL: expected 2 powershell invocations, got $n"
+            exit 1
+          fi
+          grep -q 'Get-SSH-Users' /tmp/powershell-invocations.log || { echo "FAIL: drain step not run"; exit 1; }
+          grep -q 'Stop-Process' /tmp/powershell-invocations.log || { echo "FAIL: kill step not run"; exit 1; }
+          echo "PASS"

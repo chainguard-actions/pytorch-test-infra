@@ -1,0 +1,35 @@
+name: Test full history checkout
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          path: full-target
+          fetch-depth: 0
+      - name: Assert full history
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          cd "$GITHUB_WORKSPACE/full-target"
+          COUNT="$(git rev-list --count HEAD)"
+          echo "commit count: $COUNT"
+          if [ "$COUNT" -le 10 ]; then
+            echo "FAIL: expected full history"
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$COMMIT" ]; then
+            echo "FAIL: HEAD does not match commit output"
+            exit 1
+          fi
+          if [ -z "$(git tag -l 'v4.1.0')" ]; then
+            echo "FAIL: expected tags to be fetched with fetch-depth 0"
+            exit 1
+          fi
+          echo "PASS"

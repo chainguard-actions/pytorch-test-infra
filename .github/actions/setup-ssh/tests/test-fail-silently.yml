@@ -1,0 +1,25 @@
+name: Test default usage with fail-silently
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          github-secret: ${{ github.token }}
+          fail-silently: "true"
+          instructions: "Run your debugging commands here"
+      - name: Assert action succeeded (fail-silently never fails the step)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success with fail-silently=true"
+            exit 1
+          fi
+          ls -la "$HOME/.ssh" 2>/dev/null || true
+          echo "PASS"

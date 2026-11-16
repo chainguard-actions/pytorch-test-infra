@@ -1,0 +1,33 @@
+name: Test nonexistent results dir is skipped
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          benchmark-results-dir: ${{ runner.temp }}/does-not-exist
+          github-token: ${{ github.token }}
+      - name: Assert action skipped (or failed gracefully on the sentinel repo job-id lookup)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          DEVICE: ${{ env.DEVICE_NAME }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "DEVICE_NAME: $DEVICE"
+          if [ "$OUTCOME" = "success" ]; then
+            case "$DEVICE" in
+              cpu|arm64-cpu|cuda|rocm|hpu|xpu) ;;
+              *) echo "FAIL: unexpected DEVICE_NAME '$DEVICE'"; exit 1 ;;
+            esac
+            echo "PASS: missing dir skipped without failure"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo job lookup not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

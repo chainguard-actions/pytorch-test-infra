@@ -1,0 +1,51 @@
+name: Test unusable metrics file skips upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            (sudo apt-get update && sudo apt-get install -y jq) || (apt-get update && apt-get install -y jq)
+          fi
+      - name: Install mock aws CLI and create bad files
+        run: |
+          mkdir -p "$RUNNER_TEMP/mockbin"
+          cat > "$RUNNER_TEMP/mockbin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" >> /tmp/aws-args.txt
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/mockbin/aws"
+          echo "$RUNNER_TEMP/mockbin" >> "$GITHUB_PATH"
+          rm -f /tmp/aws-args.txt
+          printf '[{"type": "result", "duration_ms": 12' > "$RUNNER_TEMP/truncated.json"
+          echo '{"type": "result", "duration_ms": 5}' > "$RUNNER_TEMP/object.json"
+          echo '[{"type": "system"}, {"type": "assistant"}]' > "$RUNNER_TEMP/noresult.json"
+      - id: truncated
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/truncated.json
+      - id: object
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/object.json
+      - id: noresult
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/noresult.json
+      - name: Assert all succeeded and aws never called
+        env:
+          O1: ${{ steps.truncated.outcome }}
+          O2: ${{ steps.object.outcome }}
+          O3: ${{ steps.noresult.outcome }}
+        run: |
+          echo "outcomes: $O1 $O2 $O3"
+          for o in "$O1" "$O2" "$O3"; do
+            if [ "$o" != "success" ]; then echo "FAIL: expected success"; exit 1; fi
+          done
+          if [ -f /tmp/aws-args.txt ]; then echo "FAIL: aws was called"; cat /tmp/aws-args.txt; exit 1; fi
+          echo "PASS"

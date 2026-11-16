@@ -1,0 +1,54 @@
+name: Test long python version is shortened in artifact name
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: pytorch/test-infra
+      REF: release/test
+      PACKAGE_TYPE: wheel
+      GPU_ARCH_VERSION: cpu
+      CHANNEL: nightly
+      PLATFORM: linux
+      BUILD_VERSION: 0.0.1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check out test-infra (provides tools/pkg-helpers)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          submodules: "false"
+          setup-miniconda: "true"
+          python-version: "3.12.4"
+          cuda-version: cu126
+          arch: aarch64
+      - name: Assert ARTIFACT_NAME shortened and slashes replaced
+        run: |
+          echo "ARTIFACT_NAME: ${ARTIFACT_NAME:-}"
+          if [ "${ARTIFACT_NAME:-}" != "pytorch_test-infra_release_test_3.12_cu126_aarch64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda env python version
+        shell: bash -l {0}
+        run: |
+          if [ -z "${CONDA_RUN:-}" ]; then
+            echo "FAIL: CONDA_RUN not set"
+            exit 1
+          fi
+          VER="$($CONDA_RUN python -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')"
+          echo "python in env: $VER"
+          if [ "$VER" != "3.12.4" ]; then
+            echo "FAIL: expected python 3.12.4"
+            exit 1
+          fi
+          echo "PASS"

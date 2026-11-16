@@ -1,0 +1,40 @@
+name: Test checkout of a tag ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: v4.0.0
+          submodules: "false"
+      - name: Assert tag v4.0.0 checked out
+        run: |
+          cd "$GITHUB_WORKSPACE/actions/checkout"
+          SHA="$(git rev-parse HEAD)"
+          echo "HEAD: $SHA"
+          EXPECTED="$(git ls-remote https://github.com/actions/checkout 'refs/tags/v4.0.0^{}' | cut -f1)"
+          [ -z "$EXPECTED" ] && EXPECTED="$(git ls-remote https://github.com/actions/checkout refs/tags/v4.0.0 | cut -f1)"
+          [ -z "$EXPECTED" ] && EXPECTED="3df4ab11eba7bda6032a0b82a6bb43b11571feac"
+          echo "expected: $EXPECTED"
+          if [ "$SHA" != "$EXPECTED" ]; then
+            echo "FAIL: expected v4.0.0 commit $EXPECTED"
+            exit 1
+          fi
+          if ! grep -q "node20" action.yml; then
+            echo "FAIL: expected v4.0.0 action.yml to use node20"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert RUNNER_ARTIFACT_DIR exported
+        run: |
+          echo "RUNNER_ARTIFACT_DIR: $RUNNER_ARTIFACT_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "${RUNNER_TEMP}/artifacts" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"

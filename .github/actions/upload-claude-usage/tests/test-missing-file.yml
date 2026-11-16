@@ -1,0 +1,31 @@
+name: Test missing metrics file skips upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock aws CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/mockbin"
+          cat > "$RUNNER_TEMP/mockbin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/aws-args.txt
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/mockbin/aws"
+          echo "$RUNNER_TEMP/mockbin" >> "$GITHUB_PATH"
+          rm -f /tmp/aws-args.txt
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/does-not-exist.json
+      - name: Assert step succeeded and aws not called
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: expected success"; exit 1; fi
+          if [ -f /tmp/aws-args.txt ]; then echo "FAIL: aws was called"; cat /tmp/aws-args.txt; exit 1; fi
+          echo "PASS"

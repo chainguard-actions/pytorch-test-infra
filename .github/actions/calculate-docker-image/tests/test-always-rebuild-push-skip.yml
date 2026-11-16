@@ -1,0 +1,28 @@
+name: Test always-rebuild and push inputs on skip path
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          docker-image-name: my-image:rebuild-tag
+          docker-build-dir: does/not/exist
+          use-custom-docker-registry: "false"
+          always-rebuild: "true"
+          push: "true"
+          force-push: "true"
+          repo-name: myrepo
+      - name: Assert image passed through and no build/push happened
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "my-image:rebuild-tag" ]; then
+            echo "FAIL: expected 'my-image:rebuild-tag'"
+            exit 1
+          fi
+          echo "PASS"

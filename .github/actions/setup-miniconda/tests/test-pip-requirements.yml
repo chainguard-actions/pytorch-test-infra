@@ -1,0 +1,36 @@
+name: Test pip requirements and custom python
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          python-version: "3.10"
+          default-packages: "wheel"
+          pip-requirements-file: tests/fixtures/requirements.txt
+      - name: Assert python version
+        run: |
+          VER=$($CONDA_RUN python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          echo "python version: $VER"
+          if [ "$VER" != "3.10" ]; then
+            echo "FAIL: expected python 3.10"
+            exit 1
+          fi
+          if [ ! -d "${RUNNER_TEMP}/conda-python-3.10" ]; then
+            echo "FAIL: base env for 3.10 missing"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert pip requirement installed
+        run: |
+          V=$($CONDA_RUN python -c 'import six; print(six.__version__)')
+          echo "six: $V"
+          if [ "$V" != "1.16.0" ]; then
+            echo "FAIL: expected six 1.16.0"
+            exit 1
+          fi
+          echo "PASS"

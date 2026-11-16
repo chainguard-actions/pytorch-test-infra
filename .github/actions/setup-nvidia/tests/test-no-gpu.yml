@@ -1,0 +1,54 @@
+name: Test no GPU detected
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure no GPU markers and compute expected container flag
+        id: pre
+        run: |
+          if command -v nvidia-smi >/dev/null 2>&1 || ls /dev/nvidia* >/dev/null 2>&1; then
+            echo "Runner unexpectedly has NVIDIA tooling/devices"
+          fi
+          if [ -f /.inarc ] || [ -f /.incontainer ]; then
+            echo "expected_container=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "expected_container=false" >> "$GITHUB_OUTPUT"
+          fi
+      - id: action
+        uses: .
+      - name: Assert has-nvidia is false
+        env:
+          ACTUAL: ${{ steps.action.outputs.has-nvidia }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "false" ]; then
+            echo "FAIL: expected 'false'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert in-container-runner matches marker files
+        env:
+          ACTUAL: ${{ steps.action.outputs.in-container-runner }}
+          EXPECTED: ${{ steps.pre.outputs.expected_container }}
+        run: |
+          echo "actual: $ACTUAL expected: $EXPECTED"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert exported env
+        run: |
+          echo "HAS_NVIDIA_GPU=$HAS_NVIDIA_GPU GPU_FLAG=${GPU_FLAG:-}"
+          if [ "$HAS_NVIDIA_GPU" != "false" ]; then
+            echo "FAIL: expected HAS_NVIDIA_GPU=false"
+            exit 1
+          fi
+          if [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG should not be set"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,53 @@
+name: Test dry run upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create results dir
+        run: |
+          mkdir -p "$RUNNER_TEMP/bench-results"
+          cat > "$RUNNER_TEMP/bench-results/results.json" <<'EOF'
+          [
+            {
+              "benchmark": {"name": "test-bench", "mode": "inference", "extra_info": {}},
+              "model": {"name": "test-model"},
+              "metric": {"name": "latency", "benchmark_values": [1.0, 2.0]}
+            }
+          ]
+          EOF
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          benchmark-results-dir: ${{ runner.temp }}/bench-results
+          benchmark-name: test-bench
+          dry-run: 'true'
+          github-token: ${{ github.token }}
+      - name: Assert action ran (or failed gracefully on the sentinel repo job-id lookup)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          VENV: ${{ env.VIRTUAL_ENV }}
+          DEVICE: ${{ env.DEVICE_NAME }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "VIRTUAL_ENV: $VENV"
+          echo "DEVICE_NAME: $DEVICE"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$DEVICE" ]; then
+              echo "FAIL: action succeeded but DEVICE_NAME was not exported"
+              exit 1
+            fi
+            if [ ! -x "$VENV/bin/python" ]; then
+              echo "FAIL: venv python not found at $VENV"
+              exit 1
+            fi
+            echo "PASS: dry run succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo job lookup not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

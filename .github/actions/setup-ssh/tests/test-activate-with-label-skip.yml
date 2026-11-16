@@ -1,0 +1,35 @@
+name: Test activate-with-label skips outside pull requests
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Seed an existing authorized_keys file
+        run: |
+          mkdir -p "$HOME/.ssh"
+          echo "ssh-ed25519 AAAAMARKERKEY marker@test" > "$HOME/.ssh/authorized_keys"
+      - id: action
+        uses: .
+        with:
+          github-secret: ${{ github.token }}
+          activate-with-label: "true"
+          label: with-ssh
+          remove-existing-keys: "true"
+          fail-silently: "false"
+      - name: Assert action succeeded and left keys untouched
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          cat "$HOME/.ssh/authorized_keys" || true
+          if ! grep -q "AAAAMARKERKEY" "$HOME/.ssh/authorized_keys"; then
+            echo "FAIL: existing key was removed although no pull request label applies"
+            exit 1
+          fi
+          echo "PASS"
