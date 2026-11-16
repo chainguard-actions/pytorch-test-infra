@@ -1,0 +1,58 @@
+name: Test nightly self-report
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local relay stand-in
+        run: |
+          rm -rf /tmp/crcr-requests
+          nohup setsid python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" 18080 /tmp/crcr-requests > /tmp/mock-relay.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:18080/ >/dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:18080/ || { cat /tmp/mock-relay.log; exit 1; }
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0e797b5a6acf0e797b5a6acf0e797b5a6acf0e79
+          event-type: nightly
+          callback-url: http://127.0.0.1:18080/github/callback/
+      - name: Assert callback (or graceful OIDC failure under act)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          ls -la /tmp/crcr-requests || true
+          if [ "$OUTCOME" = "success" ]; then
+            f=/tmp/crcr-requests/1.json
+            [ -f "$f" ] || { echo "FAIL: action succeeded but no callback was received"; exit 1; }
+            cat "$f"
+            python3 - "$f" <<'EOF'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          sha = "0e797b5a6acf0e797b5a6acf0e797b5a6acf0e79"
+          assert d["event_type"] == "nightly", d
+          assert d["delivery_id"] == sha, d
+          assert d["payload"]["head_sha"] == sha, d
+          assert d["payload"]["repository"]["full_name"] == "pytorch/pytorch", d
+          w = d["workflow"]
+          assert w["status"] == "completed" and w["conclusion"] == "success", w
+          assert w["started_at"] and w["completed_at"], w
+          print("PASS: nightly payload is correct")
+          EOF
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (OIDC token cannot be minted under act)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

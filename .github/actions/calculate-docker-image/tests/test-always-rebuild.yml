@@ -1,0 +1,64 @@
+name: Test always-rebuild with image:tag name
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "fake-password"
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/fake-docker.log
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+          rm -f /tmp/fake-build-args.txt /tmp/fake-docker.log
+      - name: Compute expected hash
+        id: hash
+        run: echo "hash=$(git rev-parse HEAD:tests/fixtures/docker)" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: test-image:customtag
+          docker-build-dir: tests/fixtures/docker
+          repo-name: myrepo
+          always-rebuild: "true"
+      - name: Assert image computed and build invoked
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          EXPECTED="308535385114.dkr.ecr.us-east-1.amazonaws.com/myrepo/test-image:customtag-${HASH}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ -z "$HASH" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: image mismatch"
+            exit 1
+          fi
+          if [ ! -f /tmp/fake-build-args.txt ]; then
+            echo "FAIL: build script was not invoked"
+            exit 1
+          fi
+          ARGS="$(cat /tmp/fake-build-args.txt)"
+          echo "build args: $ARGS"
+          if ! echo "$ARGS" | grep -qF -- "-t $EXPECTED"; then
+            echo "FAIL: build script not called with -t $EXPECTED"
+            exit 1
+          fi
+          if ! echo "$ARGS" | grep -qF ":customtag"; then
+            echo "FAIL: build script image arg missing custom tag"
+            exit 1
+          fi
+          if grep -q "^docker push" /tmp/fake-docker.log 2>/dev/null; then
+            echo "FAIL: should not push when push input is unset"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,31 @@
+name: Test macos matrix export (quoted values)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare test-infra script path
+        run: |
+          mkdir -p test-infra/.github/scripts
+          if [ -f .github/scripts/export_matrix_variables.py ]; then
+            cp .github/scripts/export_matrix_variables.py test-infra/.github/scripts/
+          else
+            cp tests/fixtures/export_matrix_variables.py test-infra/.github/scripts/
+          fi
+          rm -f "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+      - id: action
+        uses: .
+        with:
+          binary-matrix: '{"python_version": "3.11", "desired_cuda": "cpu"}'
+          target-os: macos
+      - name: Assert env file written with quoted values
+        run: |
+          F="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          if [ ! -f "$F" ]; then echo "FAIL: $F missing"; exit 1; fi
+          echo "--- content ---"; cat "$F"
+          grep -qiE 'python_version=.*3\.11' "$F" || { echo "FAIL: python_version missing"; exit 1; }
+          grep -qiE 'desired_cuda=.*cpu' "$F" || { echo "FAIL: desired_cuda missing"; exit 1; }
+          grep -q '"' "$F" || { echo "FAIL: expected quoted values for non-linux"; exit 1; }
+          echo "PASS"

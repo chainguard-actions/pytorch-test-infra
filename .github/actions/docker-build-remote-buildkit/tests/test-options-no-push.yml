@@ -1,0 +1,57 @@
+name: Test file/target/cache options with push disabled
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -rf /tmp/fake-docker && mkdir -p /tmp/fake-docker/bin
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" /tmp/fake-docker/bin/docker
+          chmod +x /tmp/fake-docker/bin/docker
+          echo success > /tmp/fake-docker/mode
+          echo /tmp/fake-docker/bin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: |
+            registry.example.com/one:v1
+
+            registry.example.com/two:v1
+          context: tests/fixtures
+          file: tests/fixtures/Dockerfile.custom
+          target: builder
+          push: 'false'
+          cache-from: |
+            type=registry,ref=registry.example.com/cache:a
+          cache-to: |
+            type=registry,ref=registry.example.com/cache:a,mode=max
+          connect-attempts: '2'
+          connect-delay: '0'
+      - name: Assert image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "registry.example.com/one:v1" ]; then
+            echo "FAIL: expected first tag"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert buildx invocation
+        run: |
+          set -e
+          A=/tmp/fake-docker/build-args-1
+          cat "$A"
+          for want in --file tests/fixtures/Dockerfile.custom --target builder \
+                      --cache-from type=registry,ref=registry.example.com/cache:a \
+                      --cache-to type=registry,ref=registry.example.com/cache:a,mode=max \
+                      registry.example.com/one:v1 registry.example.com/two:v1; do
+            grep -Fxq -- "$want" "$A" || { echo "FAIL: missing arg '$want'"; exit 1; }
+          done
+          [ "$(grep -cFx -- --tag "$A")" = "2" ] || { echo "FAIL: expected 2 --tag (blank line skipped)"; exit 1; }
+          if grep -Fxq -- --push "$A"; then echo "FAIL: --push present with push=false"; exit 1; fi
+          [ "$(tail -n1 "$A")" = "tests/fixtures" ] || { echo "FAIL: context should be last arg"; exit 1; }
+          echo "PASS"

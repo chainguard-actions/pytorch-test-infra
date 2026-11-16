@@ -1,0 +1,35 @@
+name: Test basic script run (no cache)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare build env file and script
+        run: |
+          mkdir -p "$RUNNER_TEMP/acttest"
+          echo 'export CONDA_RUN=""' > "$RUNNER_TEMP/acttest/build_env.sh"
+          echo 'export FROM_BUILD_ENV="hello-from-env"' >> "$RUNNER_TEMP/acttest/build_env.sh"
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/acttest/build_env.sh" >> "$GITHUB_ENV"
+          cat > test-basic-script.sh <<'EOF'
+          #!/bin/bash
+          echo "script ran with ${FROM_BUILD_ENV}" > basic-marker.txt
+          EOF
+      - id: action
+        uses: .
+        with:
+          script: test-basic-script.sh
+      - name: Assert script ran and saw build env
+        run: |
+          if [ ! -f basic-marker.txt ]; then
+            echo "FAIL: marker file not created"
+            exit 1
+          fi
+          CONTENT="$(cat basic-marker.txt)"
+          echo "actual: $CONTENT"
+          if [ "$CONTENT" != "script ran with hello-from-env" ]; then
+            echo "FAIL: unexpected marker content"
+            exit 1
+          fi
+          echo "PASS"

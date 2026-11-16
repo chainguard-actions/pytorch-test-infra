@@ -1,0 +1,31 @@
+name: Test starts docker when daemon not running
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fakes (docker daemon down)
+        run: bash "$GITHUB_WORKSPACE/tests/fixtures/setup-fakes.sh" docker-down
+      - id: action
+        uses: .
+      - name: Assert docker daemon was started via sudo systemctl
+        run: |
+          cat /tmp/fakes-log/systemctl.log || true
+          cat /tmp/fakes-log/sudo.log || true
+          if ! grep -q "is-active --quiet docker" /tmp/fakes-log/systemctl.log; then
+            echo "FAIL: systemctl is-active not checked"; exit 1
+          fi
+          if ! grep -q "^systemctl start docker" /tmp/fakes-log/sudo.log; then
+            echo "FAIL: sudo systemctl start docker not invoked"; exit 1
+          fi
+          echo "PASS"
+      - name: Assert env dirs still exported
+        run: |
+          if [ -z "$RUNNER_ARTIFACT_DIR" ] || [ ! -d "$RUNNER_ARTIFACT_DIR" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR not set up"; exit 1
+          fi
+          echo "PASS"

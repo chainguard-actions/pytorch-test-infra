@@ -1,0 +1,59 @@
+name: Test long python version shortened in artifact name
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: actions/hello-world-javascript-action
+      REF: main
+      PYTHON_VERSION: "3.11"
+      CU_VERSION: cpu
+      GPU_ARCH_VERSION: ""
+      ARCH: x86_64
+      PACKAGE_TYPE: wheel
+      CHANNEL: nightly
+      UPLOAD_TO_BASE_BUCKET: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check out test-infra pkg-helpers (expected at $GITHUB_WORKSPACE/test-infra)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+          sparse-checkout: tools/pkg-helpers
+      - id: action
+        uses: .
+        with:
+          repository: actions/hello-world-javascript-action
+          ref: main
+          submodules: "false"
+          setup-miniconda: "true"
+          python-version: "3.11.9"
+          cuda-version: cpu
+          arch: x86_64
+      - name: Assert ARTIFACT_NAME uses short python version
+        run: |
+          echo "actual: ${ARTIFACT_NAME:-}"
+          EXPECTED="actions_hello-world-javascript-action_main_3.11_cpu_x86_64"
+          if [ "${ARTIFACT_NAME:-}" != "$EXPECTED" ]; then
+            echo "FAIL: expected '$EXPECTED'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda env has requested python
+        shell: bash -l {0}
+        run: |
+          echo "CONDA_ENV: ${CONDA_ENV:-}"
+          if [ -z "${CONDA_ENV:-}" ] || [ ! -d "$CONDA_ENV" ]; then
+            echo "FAIL: CONDA_ENV not set or missing"
+            exit 1
+          fi
+          PYV=$(${CONDA_RUN} python -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])')
+          echo "python in env: $PYV"
+          if [ "$PYV" != "3.11.9" ]; then
+            echo "FAIL: expected python 3.11.9"
+            exit 1
+          fi
+          echo "PASS"

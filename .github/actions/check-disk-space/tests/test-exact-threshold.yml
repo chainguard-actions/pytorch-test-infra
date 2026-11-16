@@ -1,0 +1,32 @@
+name: Test exact threshold passes (mocked df)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake df reporting exactly 2GB free on /
+        run: |
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/df <<'EOF'
+          #!/bin/sh
+          echo "Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on"
+          echo "/dev/disk1s1 488245288 400000000 2097152 99% 1000 2000 1% /"
+          EOF
+          chmod +x /tmp/fakebin/df
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          minimum-available-space-in-gb: 2
+      - name: Assert action succeeded at boundary
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          echo "PASS"

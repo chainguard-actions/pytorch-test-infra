@@ -1,0 +1,35 @@
+name: Test command mode
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -rf /tmp/fake-docker && mkdir -p /tmp/fake-docker/bin
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" /tmp/fake-docker/bin/docker
+          chmod +x /tmp/fake-docker/bin/docker
+          echo success > /tmp/fake-docker/mode
+          echo /tmp/fake-docker/bin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          command: echo "custom build ran" > /tmp/fake-docker/command-marker && docker buildx build --tag custom:1 --push .
+          tags: ignored:tag
+          connect-attempts: '2'
+          connect-delay: '0'
+      - name: Assert command ran and image output empty
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: '$IMAGE'"
+          cat /tmp/fake-docker/calls.log
+          if [ -n "$IMAGE" ]; then echo "FAIL: image output must be empty in command mode"; exit 1; fi
+          grep -q "custom build ran" /tmp/fake-docker/command-marker || { echo "FAIL: command did not run"; exit 1; }
+          grep -q "buildx create --name remote-buildkit" /tmp/fake-docker/calls.log || { echo "FAIL: builder not registered"; exit 1; }
+          A=/tmp/fake-docker/build-args-1
+          grep -Fxq custom:1 "$A" || { echo "FAIL: command's own build not invoked"; exit 1; }
+          if grep -Fxq ignored:tag "$A"; then echo "FAIL: tags input should be ignored"; exit 1; fi
+          echo "PASS"

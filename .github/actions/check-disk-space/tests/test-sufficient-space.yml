@@ -1,0 +1,40 @@
+name: Test sufficient disk space (mocked df)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake df reporting 100GB free on /
+        run: |
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/df <<'EOF'
+          #!/bin/sh
+          echo "Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted on"
+          echo "/dev/disk1s1 488245288 100000000 104857600 50% 1000 2000 1% /"
+          echo "/dev/disk1s2 488245288 100000000 10 50% 1000 2000 1% /System/Volumes/Data"
+          EOF
+          chmod +x /tmp/fakebin/df
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - name: Sanity check fake df is used
+        run: |
+          which df
+          if [ "$(which df)" != "/tmp/fakebin/df" ]; then
+            echo "FAIL: fake df not on PATH"
+            exit 1
+          fi
+      - id: action
+        uses: .
+        with:
+          minimum-available-space-in-gb: 6
+      - name: Assert action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          echo "PASS"

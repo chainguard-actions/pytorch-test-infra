@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Fake docker CLI for tests. Records every invocation under /tmp/fake-docker.
+# Behaviour of `docker buildx build` is selected by /tmp/fake-docker/mode:
+#   success            - succeed immediately
+#   cold-then-success  - fail twice with a connection-phase error, then succeed
+#   build-error        - fail with a real build error (after build started)
+state=/tmp/fake-docker
+mkdir -p "$state"
+echo "$*" >> "$state/calls.log"
+
+if [ "${1:-} ${2:-}" = "buildx create" ] || [ "${1:-} ${2:-}" = "buildx use" ]; then
+  exit 0
+fi
+
+if [ "${1:-} ${2:-}" = "buildx build" ]; then
+  n=$(cat "$state/build-count" 2>/dev/null || echo 0)
+  n=$((n + 1))
+  echo "$n" > "$state/build-count"
+  printf '%s\n' "$@" > "$state/build-args-$n"
+  mode=$(cat "$state/mode" 2>/dev/null || echo success)
+  case "$mode" in
+    success)
+      echo "#1 [internal] load build definition from Dockerfile"
+      echo "#2 DONE"
+      exit 0
+      ;;
+    cold-then-success)
+      if [ "$n" -lt 3 ]; then
+        echo "ERROR: failed to dial gRPC: connection refused"
+        exit 1
+      fi
+      echo "#1 [internal] load build definition from Dockerfile"
+      exit 0
+      ;;
+    build-error)
+      echo "#1 [internal] load build definition from Dockerfile"
+      echo "#5 [2/3] RUN false"
+      echo "ERROR: process \"/bin/sh -c false\" did not complete successfully: exit code: 1"
+      exit 1
+      ;;
+  esac
+fi
+exit 0

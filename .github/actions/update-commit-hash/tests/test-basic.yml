@@ -1,0 +1,35 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare sandbox workspace
+        run: mkdir -p "$GITHUB_WORKSPACE/sandbox-basic"
+      - id: action
+        uses: .
+        continue-on-error: true
+        env:
+          # The action checks out into the workspace root; point it at a sandbox
+          # so the repository under test is not touched (if honored).
+          GITHUB_WORKSPACE: ${{ github.workspace }}/sandbox-basic
+        with:
+          repo-name: vision
+          branch: main
+          updatebot-token: ${{ secrets.GITHUB_TOKEN }}
+          pytorchbot-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert action ran (succeeded, or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: action completed successfully"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel source repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

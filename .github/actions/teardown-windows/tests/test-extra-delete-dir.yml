@@ -1,0 +1,47 @@
+name: Test extra-delete-dir input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install recording powershell shim
+        run: |
+          BIN="$RUNNER_TEMP/ps-shim-bin"
+          mkdir -p "$BIN"
+          rm -rf /tmp/ps-calls
+          mkdir -p /tmp/ps-calls
+          cat > "$BIN/powershell" <<'EOF'
+          #!/bin/bash
+          LOG=/tmp/ps-calls
+          mkdir -p "$LOG"
+          n=$(ls "$LOG" | wc -l)
+          all="$*"
+          path=$(printf '%s' "$all" | sed -n "s/.*'\(.*\)'.*/\1/p")
+          if [ -n "$path" ] && [ -f "$path" ]; then
+            cp "$path" "$LOG/$n.ps1"
+          else
+            for a in "$@"; do [ -f "$a" ] && path="$a"; done
+            if [ -n "$path" ] && [ -f "$path" ]; then cp "$path" "$LOG/$n.ps1"; else echo "$all" > "$LOG/$n.ps1"; fi
+          fi
+          exit 0
+          EOF
+          chmod +x "$BIN/powershell"
+          echo "$BIN" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/extra-dir"
+          echo keep > "$RUNNER_TEMP/extra-dir/file.txt"
+      - id: action
+        uses: .
+        with:
+          extra-delete-dir: ${{ runner.temp }}/extra-dir
+      - name: Assert action succeeded with input set
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: expected success"; exit 1; fi
+          count=$(ls /tmp/ps-calls | wc -l)
+          echo "calls: $count"
+          if [ "$count" -ne 2 ]; then echo "FAIL: expected 2 powershell invocations"; exit 1; fi
+          echo "PASS"

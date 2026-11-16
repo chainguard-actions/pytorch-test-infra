@@ -1,0 +1,49 @@
+name: Test kill step runs even if drain step fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install failing-first powershell shim
+        run: |
+          BIN="$RUNNER_TEMP/ps-shim-bin"
+          mkdir -p "$BIN"
+          rm -rf /tmp/ps-calls
+          mkdir -p /tmp/ps-calls
+          cat > "$BIN/powershell" <<'EOF'
+          #!/bin/bash
+          # Records the script; fails on the first call to simulate drain-step failure
+          LOG=/tmp/ps-calls
+          mkdir -p "$LOG"
+          n=$(ls "$LOG" | wc -l)
+          all="$*"
+          path=$(printf '%s' "$all" | sed -n "s/.*'\(.*\)'.*/\1/p")
+          if [ -n "$path" ] && [ -f "$path" ]; then
+            cp "$path" "$LOG/$n.ps1"
+          else
+            for a in "$@"; do [ -f "$a" ] && path="$a"; done
+            if [ -n "$path" ] && [ -f "$path" ]; then cp "$path" "$LOG/$n.ps1"; else echo "$all" > "$LOG/$n.ps1"; fi
+          fi
+          echo "shim recorded call $n"
+          if [ "$n" -eq 0 ]; then exit 1; fi
+          exit 0
+          EOF
+          chmod +x "$BIN/powershell"
+          echo "$BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        continue-on-error: true
+      - name: Assert second step still ran and action reported failure
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          ls -la /tmp/ps-calls
+          if [ "$OUTCOME" != "failure" ]; then echo "FAIL: expected failure outcome"; exit 1; fi
+          count=$(ls /tmp/ps-calls | wc -l)
+          echo "calls: $count"
+          if [ "$count" -ne 2 ]; then echo "FAIL: expected kill step to run after drain failure"; exit 1; fi
+          grep -q "Stop-Process" /tmp/ps-calls/1.ps1 || { echo "FAIL: second call was not the kill step"; exit 1; }
+          echo "PASS"

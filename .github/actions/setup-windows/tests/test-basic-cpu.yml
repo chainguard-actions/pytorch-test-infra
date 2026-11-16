@@ -1,0 +1,83 @@
+name: Test basic usage (cpu)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install shims for Windows-only tools (powershell, cygpath) and EC2 metadata curl
+        run: |
+          set -eu
+          MOCKBIN="$RUNNER_TEMP/mockbin"
+          mkdir -p "$MOCKBIN"
+          REAL_CURL="$(command -v curl || true)"
+          cat > "$MOCKBIN/powershell" <<EOF
+          #!/bin/sh
+          echo "\$*" >> "$RUNNER_TEMP/powershell-calls.log"
+          exit 0
+          EOF
+          cat > "$MOCKBIN/cygpath" <<'EOF'
+          #!/bin/sh
+          echo "$1"
+          EOF
+          cat > "$MOCKBIN/curl" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *169.254.169.254*)
+              case "\$*" in
+                *-X\ PUT*) echo "fake-token"; exit 0 ;;
+              esac
+              for a in "\$@"; do last="\$a"; done
+              echo "fake-\${last##*/}"
+              exit 0
+              ;;
+          esac
+          if [ -n "$REAL_CURL" ]; then exec "$REAL_CURL" "\$@"; fi
+          exit 1
+          EOF
+          chmod +x "$MOCKBIN"/*
+          rm -f "$RUNNER_TEMP/powershell-calls.log"
+          echo "$MOCKBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: cpu
+      - name: Assert git global config was set
+        run: |
+          for kv in core.longpaths=true core.symlinks=true core.fsmonitor=false; do
+            key="${kv%%=*}"; want="${kv#*=}"
+            got="$(git config --global --get "$key" || true)"
+            echo "$key: $got"
+            if [ "$got" != "$want" ]; then
+              echo "FAIL: expected $key=$want"
+              exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert environment variables and directories
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "$RUNNER_TEMP/artifacts" ]; then
+            echo "FAIL: unexpected RUNNER_ARTIFACT_DIR"
+            exit 1
+          fi
+          if [ "$RUNNER_TEST_RESULTS_DIR" != "$RUNNER_TEMP/test-results" ]; then
+            echo "FAIL: unexpected RUNNER_TEST_RESULTS_DIR"
+            exit 1
+          fi
+          if [ ! -d "$RUNNER_ARTIFACT_DIR" ] || [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+            echo "FAIL: directories not created"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert powershell steps were invoked
+        run: |
+          cat "$RUNNER_TEMP/powershell-calls.log"
+          n="$(wc -l < "$RUNNER_TEMP/powershell-calls.log")"
+          if [ "$n" -lt 2 ]; then
+            echo "FAIL: expected 2 powershell invocations, got $n"
+            exit 1
+          fi
+          echo "PASS"

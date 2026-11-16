@@ -1,0 +1,33 @@
+name: Test S3 upload failure is non-fatal
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up failing fake aws and metrics file
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/aws-args
+          echo "simulated upload failure" >&2
+          exit 1
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/aws-args
+          echo '[{"type":"result","duration_ms":10,"num_turns":2}]' > "$RUNNER_TEMP/metrics.json"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+      - name: Assert step succeeded despite upload failure
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: expected success"; exit 1; fi
+          if [ ! -f /tmp/aws-args ]; then echo "FAIL: aws was not attempted"; exit 1; fi
+          echo "PASS"

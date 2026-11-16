@@ -1,0 +1,30 @@
+name: Test no files found (ignore)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          name: ignored-artifact
+          path: nonexistent-path-xyz/file.txt
+          if-no-files-found: ignore
+      - name: Assert success
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          RESULT: ${{ steps.action.outputs.uploaded-objects }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "result: $RESULT"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ -n "$RESULT" ] && [ "$RESULT" != "{}" ]; then
+            echo "FAIL: expected no uploaded objects"
+            exit 1
+          fi
+          echo "PASS"

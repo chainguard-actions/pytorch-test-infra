@@ -1,0 +1,43 @@
+name: Test image already present locally (no pull)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FAKE_DOCKER_IMAGE_PRESENT: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and aws on PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/fake-bin"
+          rm -f /tmp/fake-calls.log /tmp/fake-login-stdin
+          cat > "$RUNNER_TEMP/fake-bin/docker" <<'EOF'
+          #!/bin/bash
+          echo "docker $*" >> /tmp/fake-calls.log
+          case "$1" in
+            login) cat > /tmp/fake-login-stdin; echo "Login Succeeded"; exit 0 ;;
+            manifest) echo '{"config":{"size":1048576},"layers":[{"size":1048576},{"size":2097152}]}'; exit 0 ;;
+            inspect) if [ "$FAKE_DOCKER_IMAGE_PRESENT" = "1" ]; then exit 0; else exit 1; fi ;;
+            pull) if [ "$FAKE_DOCKER_PULL_FAIL" = "1" ]; then exit 1; fi; echo "pulled $2"; exit 0 ;;
+          esac
+          exit 0
+          EOF
+          cat > "$RUNNER_TEMP/fake-bin/aws" <<'EOF'
+          #!/bin/bash
+          echo "aws $*" >> /tmp/fake-calls.log
+          if [ "$FAKE_AWS_FAIL" = "1" ]; then exit 1; fi
+          echo "fake-ecr-password"
+          EOF
+          chmod +x "$RUNNER_TEMP/fake-bin/docker" "$RUNNER_TEMP/fake-bin/aws"
+          echo "$RUNNER_TEMP/fake-bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/cached/image:1.0
+      - name: Assert no pull happened
+        run: |
+          cat /tmp/fake-calls.log
+          grep -qx "docker inspect --type=image example.com/cached/image:1.0" /tmp/fake-calls.log || { echo "FAIL: inspect not called"; exit 1; }
+          if grep -q "^docker pull" /tmp/fake-calls.log; then echo "FAIL: pull should not run when image is present"; exit 1; fi
+          echo "PASS"

@@ -1,0 +1,36 @@
+name: Test explicit github-server-url
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          path: server-url-target
+          github-server-url: https://github.com
+      - name: Assert checkout from explicit server URL succeeded
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          DIR="$GITHUB_WORKSPACE/server-url-target"
+          echo "commit: $COMMIT"
+          if [ ! -f "$DIR/action.yml" ]; then
+            echo "FAIL: action.yml not found"
+            exit 1
+          fi
+          if ! echo "$COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "FAIL: commit output is not a SHA"
+            exit 1
+          fi
+          URL="$(git -C "$DIR" remote get-url origin)"
+          echo "origin: $URL"
+          case "$URL" in
+            https://github.com/actions/checkout*) ;;
+            *) echo "FAIL: origin URL does not use the given server URL"; exit 1 ;;
+          esac
+          echo "PASS"

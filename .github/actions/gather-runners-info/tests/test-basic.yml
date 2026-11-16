@@ -1,0 +1,58 @@
+name: Test basic usage (CPU runner, no venv)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure lscpu is available
+        run: |
+          if ! command -v lscpu; then
+            (sudo apt-get update && sudo apt-get install -y util-linux) || (apt-get update && apt-get install -y util-linux) || true
+          fi
+      - id: action
+        uses: .
+        continue-on-error: true
+      - name: Assert device detection exported to env
+        run: |
+          echo "DEVICE_NAME=$DEVICE_NAME"
+          echo "DEVICE_TYPE=$DEVICE_TYPE"
+          arch=$(uname -m)
+          case "$arch" in
+            aarch64|arm64) expected=arm64-cpu ;;
+            *) expected=cpu ;;
+          esac
+          if [ "$DEVICE_NAME" != "$expected" ]; then
+            echo "FAIL: expected DEVICE_NAME=$expected"
+            exit 1
+          fi
+          if [ -z "$DEVICE_TYPE" ]; then
+            echo "FAIL: DEVICE_TYPE is empty"
+            exit 1
+          fi
+          if [ "$expected" = "cpu" ] && ! echo "$DEVICE_TYPE" | grep -qE '_[0-9]+c$'; then
+            echo "FAIL: DEVICE_TYPE should end with _<cores>c"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert runners-info output
+        env:
+          RESULT: ${{ steps.action.outputs.runners-info }}
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "result: $RESULT"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$RESULT" ]; then
+              echo "FAIL: action succeeded but runners-info is empty"
+              exit 1
+            fi
+            printf '%s' "$RESULT" | python3 -c 'import json,sys; json.load(sys.stdin)' || { echo "FAIL: runners-info is not valid JSON"; exit 1; }
+            echo "PASS: valid JSON runners-info"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: info-gathering step failed in harness (external script/pip unavailable); device detection verified above"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

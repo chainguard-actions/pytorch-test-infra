@@ -1,0 +1,65 @@
+name: Test with venv input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure lscpu is available
+        run: |
+          if ! command -v lscpu; then
+            (sudo apt-get update && sudo apt-get install -y util-linux) || (apt-get update && apt-get install -y util-linux) || true
+          fi
+      - name: Create virtualenv
+        run: |
+          set -x
+          if ! python3 -m venv /tmp/test-venv; then
+            rm -rf /tmp/test-venv
+            python3 -m pip install --user virtualenv || python3 -m pip install --break-system-packages virtualenv
+            python3 -m virtualenv /tmp/test-venv
+          fi
+          test -f /tmp/test-venv/bin/activate
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          venv: /tmp/test-venv/bin/activate
+      - name: Assert device detection exported to env
+        run: |
+          echo "DEVICE_NAME=$DEVICE_NAME"
+          echo "DEVICE_TYPE=$DEVICE_TYPE"
+          case "$DEVICE_NAME" in
+            cpu|arm64-cpu) ;;
+            *) echo "FAIL: unexpected DEVICE_NAME"; exit 1 ;;
+          esac
+          if [ -z "$DEVICE_TYPE" ]; then
+            echo "FAIL: DEVICE_TYPE is empty"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert runners-info output
+        env:
+          RESULT: ${{ steps.action.outputs.runners-info }}
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "result: $RESULT"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$RESULT" ]; then
+              echo "FAIL: action succeeded but runners-info is empty"
+              exit 1
+            fi
+            printf '%s' "$RESULT" | python3 -c 'import json,sys; json.load(sys.stdin)' || { echo "FAIL: runners-info is not valid JSON"; exit 1; }
+            # psutil should have been installed into the venv, not system
+            if ! /tmp/test-venv/bin/python -c 'import psutil'; then
+              echo "FAIL: psutil not installed in venv"
+              exit 1
+            fi
+            echo "PASS"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: info-gathering step failed in harness (external script unavailable); device detection verified above"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

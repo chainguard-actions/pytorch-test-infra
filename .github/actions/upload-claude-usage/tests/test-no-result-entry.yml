@@ -1,0 +1,46 @@
+name: Test metrics file without usable result entry
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up fake aws and bad metrics files
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" >> /tmp/aws-args
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/aws-args
+          echo '[{"type":"system"},{"type":"assistant"}]' > "$RUNNER_TEMP/noresult.json"
+          printf '[{"type":"result","duration_ms":1' > "$RUNNER_TEMP/truncated.json"
+          echo '{"type":"result","duration_ms":5}' > "$RUNNER_TEMP/notarray.json"
+      - id: noresult
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/noresult.json
+      - id: truncated
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/truncated.json
+      - id: notarray
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/notarray.json
+      - name: Assert all succeeded and no upload
+        env:
+          O1: ${{ steps.noresult.outcome }}
+          O2: ${{ steps.truncated.outcome }}
+          O3: ${{ steps.notarray.outcome }}
+        run: |
+          echo "outcomes: $O1 $O2 $O3"
+          for o in "$O1" "$O2" "$O3"; do
+            if [ "$o" != "success" ]; then echo "FAIL: expected success"; exit 1; fi
+          done
+          if [ -f /tmp/aws-args ]; then echo "FAIL: aws should not be called"; cat /tmp/aws-args; exit 1; fi
+          echo "PASS"

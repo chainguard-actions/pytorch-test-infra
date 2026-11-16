@@ -1,0 +1,88 @@
+name: Test basic nightly commit
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create local fake remote with main and nightly branches
+        run: |
+          set -euo pipefail
+          REMOTE="$RUNNER_TEMP/fake-remote"
+          SEED="$RUNNER_TEMP/seed"
+          rm -rf "$REMOTE" "$SEED"
+          git init --bare "$REMOTE"
+          git init "$SEED"
+          cd "$SEED"
+          git config user.email "test@example.com"
+          git config user.name "Test User"
+          git checkout -b nightly
+          echo "old nightly" > nightly.txt
+          git add nightly.txt
+          git commit -m "old nightly"
+          git push "$REMOTE" nightly:refs/heads/nightly
+          git checkout --orphan main
+          git rm -rf . >/dev/null
+          echo "hello from main" > README.md
+          git add README.md
+          git commit -m "main commit"
+          git push "$REMOTE" main:refs/heads/main
+          {
+            echo "OLD_NIGHTLY=$(git --git-dir="$REMOTE" rev-parse refs/heads/nightly)"
+            echo "MAIN_SHA=$(git --git-dir="$REMOTE" rev-parse refs/heads/main)"
+            echo "MAIN_TREE=$(git --git-dir="$REMOTE" rev-parse 'refs/heads/main^{tree}')"
+            echo "REMOTE=$REMOTE"
+            # Redirect the fake GitHub URL to the local bare repo via env-based git
+            # config, which applies to every later step regardless of HOME.
+            echo "GIT_CONFIG_COUNT=2"
+            echo "GIT_CONFIG_KEY_0=url.file://$REMOTE.insteadOf"
+            echo "GIT_CONFIG_VALUE_0=https://github.com/fake-org/fake-repo"
+            echo "GIT_CONFIG_KEY_1=safe.directory"
+            echo "GIT_CONFIG_VALUE_1=*"
+          } >> "$GITHUB_ENV"
+          git config --global url."file://$REMOTE".insteadOf "https://github.com/fake-org/fake-repo"
+
+      - id: action
+        uses: .
+        with:
+          token: ${{ secrets.GITHUB_TOKEN || github.token || 'local-file-remote-no-auth' }}
+          repository: fake-org/fake-repo
+          ref: main
+          path: nightly-checkout
+
+      - name: Assert checkout happened in subdirectory
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/nightly-checkout/README.md" ]; then
+            echo "FAIL: README.md not found in nightly-checkout"
+            ls -la "$GITHUB_WORKSPACE/nightly-checkout" || true
+            exit 1
+          fi
+          echo "PASS: checkout present"
+
+      - name: Assert nightly branch updated correctly
+        run: |
+          set -euo pipefail
+          NEW_NIGHTLY=$(git --git-dir="$REMOTE" rev-parse refs/heads/nightly)
+          PARENT=$(git --git-dir="$REMOTE" rev-parse "$NEW_NIGHTLY^1")
+          TREE=$(git --git-dir="$REMOTE" rev-parse "$NEW_NIGHTLY^{tree}")
+          MSG=$(git --git-dir="$REMOTE" log -1 --format=%s "$NEW_NIGHTLY")
+          echo "old nightly: $OLD_NIGHTLY"
+          echo "new nightly: $NEW_NIGHTLY"
+          echo "parent: $PARENT"
+          echo "tree: $TREE (main tree $MAIN_TREE)"
+          echo "message: $MSG"
+          if [ "$NEW_NIGHTLY" = "$OLD_NIGHTLY" ]; then
+            echo "FAIL: nightly branch not updated"; exit 1
+          fi
+          if [ "$PARENT" != "$OLD_NIGHTLY" ]; then
+            echo "FAIL: parent should be old nightly"; exit 1
+          fi
+          if [ "$TREE" != "$MAIN_TREE" ]; then
+            echo "FAIL: tree should match main tree"; exit 1
+          fi
+          if ! echo "$MSG" | grep -qE "^[0-9]{4}-[0-9]{2}-[0-9]{2} nightly release \(${MAIN_SHA}\)$"; then
+            echo "FAIL: unexpected commit message"; exit 1
+          fi
+          echo "PASS"

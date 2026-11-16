@@ -1,0 +1,38 @@
+name: Test ci-docker-hash match succeeds
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          mkdir -p /tmp/fakebin
+          printf '#!/bin/sh\necho fake-password\n' > /tmp/fakebin/aws
+          printf '#!/bin/sh\nexit 0\n' > /tmp/fakebin/docker
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+      - name: Compute expected hash
+        id: hash
+        run: echo "hash=$(git rev-parse HEAD:tests/fixtures/docker)" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: test-image
+          docker-build-dir: tests/fixtures/docker
+          repo-name: myrepo
+          ci-docker-hash: ${{ steps.hash.outputs.hash }}
+      - name: Assert image uses hash tag
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          EXPECTED="308535385114.dkr.ecr.us-east-1.amazonaws.com/myrepo/test-image:${HASH}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ -z "$HASH" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: image mismatch"
+            exit 1
+          fi
+          echo "PASS"

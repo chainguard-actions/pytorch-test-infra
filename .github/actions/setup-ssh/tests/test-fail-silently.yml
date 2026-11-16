@@ -1,0 +1,29 @@
+name: Test default run with fail-silently succeeds
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          github-secret: ${{ github.token }}
+          activate-with-label: 'false'
+          fail-silently: 'true'
+          instructions: 'Run your debugging commands now'
+      - name: Assert step succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: fail-silently=true should always succeed"
+            exit 1
+          fi
+          if [ -f ~/.ssh/authorized_keys ]; then
+            echo "authorized_keys contents:"
+            cat ~/.ssh/authorized_keys
+          fi
+          echo "PASS"

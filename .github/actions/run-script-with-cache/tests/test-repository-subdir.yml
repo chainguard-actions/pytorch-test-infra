@@ -1,0 +1,35 @@
+name: Test repository input as working directory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare build env file and script in subdir
+        run: |
+          mkdir -p "$RUNNER_TEMP/acttest"
+          echo 'export CONDA_RUN=""' > "$RUNNER_TEMP/acttest/build_env.sh"
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/acttest/build_env.sh" >> "$GITHUB_ENV"
+          mkdir -p sub-repo-dir
+          cat > sub-repo-dir/run.sh <<'EOF'
+          #!/bin/bash
+          pwd > pwd-marker.txt
+          EOF
+      - id: action
+        uses: .
+        with:
+          repository: sub-repo-dir
+          script: run.sh
+      - name: Assert script ran inside the repository dir
+        run: |
+          if [ ! -f sub-repo-dir/pwd-marker.txt ]; then
+            echo "FAIL: marker not found in sub-repo-dir"
+            exit 1
+          fi
+          ACTUAL="$(cat sub-repo-dir/pwd-marker.txt)"
+          echo "actual: $ACTUAL"
+          case "$ACTUAL" in
+            */sub-repo-dir) echo "PASS" ;;
+            *) echo "FAIL: script did not run in sub-repo-dir"; exit 1 ;;
+          esac

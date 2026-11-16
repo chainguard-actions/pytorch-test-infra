@@ -1,0 +1,58 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          repository: actions/hello-world-javascript-action
+          requires: '["pull", "trunk"]'
+          secret-bot-token: ${{ github.token }}
+          clickhouse-url: https://clickhouse.invalid:8443
+          clickhouse-username: test-user
+          clickhouse-password: test-password
+      - name: Assert target repository was checked out into its path
+        run: |
+          DIR="$GITHUB_WORKSPACE/actions/hello-world-javascript-action"
+          ls -la "$DIR" || true
+          if [ ! -d "$DIR/.git" ]; then
+            echo "FAIL: expected repository checkout at $DIR"
+            exit 1
+          fi
+          echo "PASS: checkout present"
+      - name: Assert outcome and outputs
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          SHA: ${{ steps.action.outputs.latest_viable_sha }}
+          PUSH_RESULT: ${{ steps.action.outputs.push_result }}
+          TIME: ${{ steps.action.outputs.time }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "sha: $SHA"
+          echo "push_result: $PUSH_RESULT"
+          echo "time: $TIME"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$SHA" ]; then
+              echo "FAIL: action succeeded but latest_viable_sha is empty"
+              exit 1
+            fi
+            if [ "$SHA" != "None" ] && ! echo "$TIME" | grep -qE '^[0-9]+$'; then
+              echo "FAIL: expected numeric time output after push step"
+              exit 1
+            fi
+            echo "PASS: got sha '$SHA'"
+          elif [ "$OUTCOME" = "failure" ]; then
+            if [ -n "$PUSH_RESULT" ] || [ -n "$TIME" ]; then
+              echo "FAIL: push step should not have run after a failure"
+              exit 1
+            fi
+            echo "PASS: action failed gracefully (no ClickHouse / test-infra scripts available)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

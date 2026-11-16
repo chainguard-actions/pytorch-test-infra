@@ -1,0 +1,58 @@
+name: Test missing nightly branch fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create local fake remote with only a main branch
+        run: |
+          set -euo pipefail
+          REMOTE="$RUNNER_TEMP/fake-remote-nonightly"
+          SEED="$RUNNER_TEMP/seed-nonightly"
+          rm -rf "$REMOTE" "$SEED"
+          git init --bare "$REMOTE"
+          git init "$SEED"
+          cd "$SEED"
+          git config user.email "test@example.com"
+          git config user.name "Test User"
+          git checkout -b main
+          echo "hello" > README.md
+          git add README.md
+          git commit -m "main commit"
+          git push "$REMOTE" main:refs/heads/main
+          {
+            echo "REMOTE=$REMOTE"
+            echo "GIT_CONFIG_COUNT=2"
+            echo "GIT_CONFIG_KEY_0=url.file://$REMOTE.insteadOf"
+            echo "GIT_CONFIG_VALUE_0=https://github.com/fake-org/no-nightly-repo"
+            echo "GIT_CONFIG_KEY_1=safe.directory"
+            echo "GIT_CONFIG_VALUE_1=*"
+          } >> "$GITHUB_ENV"
+          git config --global url."file://$REMOTE".insteadOf "https://github.com/fake-org/no-nightly-repo"
+
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          token: ${{ secrets.GITHUB_TOKEN || github.token || 'local-file-remote-no-auth' }}
+          repository: fake-org/no-nightly-repo
+          ref: main
+          path: nightly-checkout
+
+      - name: Assert action failed and no nightly branch was created
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected failure when nightly branch is missing"
+            exit 1
+          fi
+          if git --git-dir="$REMOTE" rev-parse --verify -q refs/heads/nightly; then
+            echo "FAIL: nightly branch should not exist"
+            exit 1
+          fi
+          echo "PASS"

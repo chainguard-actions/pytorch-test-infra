@@ -1,0 +1,56 @@
+name: Test last result wins and value coercion
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up fake aws and metrics file
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/aws-args
+          cp "$3" /tmp/aws-uploaded.json
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/aws-args /tmp/aws-uploaded.json
+          cat > "$RUNNER_TEMP/metrics.json" <<'EOF'
+          [
+            {"type": "result", "duration_ms": 1, "num_turns": 1,
+             "modelUsage": {"first-model": {}}},
+            "stray string",
+            {"type": "result", "duration_ms": "999", "num_turns": "abc",
+             "usage": {"input_tokens": "50"}, "modelUsage": "not-an-object"}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+      - name: Assert payload from last result with coercion
+        run: |
+          if [ ! -f /tmp/aws-uploaded.json ]; then echo "FAIL: aws not called"; exit 1; fi
+          cat /tmp/aws-uploaded.json
+          echo "aws args: $(cat /tmp/aws-args)"
+          case "$(cat /tmp/aws-args)" in
+            *"s3://ossci-raw-job-status/claude_code_usage/"*) ;;
+            *) echo "FAIL: default bucket/prefix not used"; exit 1 ;;
+          esac
+          P=/tmp/aws-uploaded.json
+          check() {
+            actual="$(jq -r "$1" "$P")"
+            echo "$1 = $actual"
+            if [ "$actual" != "$2" ]; then echo "FAIL: expected '$2'"; exit 1; fi
+          }
+          check '.duration_ms' '999'
+          check '.duration_ms | type' 'number'
+          check '.num_turns' '0'
+          check '.input_tokens' '50'
+          check '.output_tokens' '0'
+          check '.total_cost_usd' '0'
+          check '.model' ''
+          echo "PASS"

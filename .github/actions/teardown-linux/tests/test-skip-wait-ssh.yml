@@ -1,0 +1,51 @@
+name: Test skip-wait-ssh
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/fake-docker.log /tmp/fake-who.log
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/fake-docker.log
+          case "$1" in
+            ps) echo "abc123" ;;
+          esac
+          exit 0
+          EOF
+          # who reports an active session; if the wait step ran it would hang
+          cat > /tmp/fakebin/who <<'EOF'
+          #!/bin/sh
+          echo "called" >> /tmp/fake-who.log
+          echo "user pts/0 2024-01-01 00:00 (1.2.3.4)"
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker /tmp/fakebin/who
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          skip-wait-ssh: "true"
+      - name: Assert ssh wait skipped and docker cleanup happened
+        run: |
+          echo "--- who log ---"; cat /tmp/fake-who.log 2>/dev/null || true
+          echo "--- docker log ---"; cat /tmp/fake-docker.log || true
+          if [ -s /tmp/fake-who.log ]; then
+            echo "FAIL: who was called, ssh wait step should have been skipped"
+            exit 1
+          fi
+          if ! grep -qx "stop abc123" /tmp/fake-docker.log; then
+            echo "FAIL: expected 'docker stop abc123'"
+            exit 1
+          fi
+          if ! grep -qx "system prune -af" /tmp/fake-docker.log; then
+            echo "FAIL: expected 'docker system prune -af'"
+            exit 1
+          fi
+          echo "PASS"

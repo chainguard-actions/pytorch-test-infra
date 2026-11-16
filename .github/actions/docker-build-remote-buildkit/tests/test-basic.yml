@@ -1,0 +1,55 @@
+name: Test basic build and push
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -rf /tmp/fake-docker && mkdir -p /tmp/fake-docker/bin
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" /tmp/fake-docker/bin/docker
+          chmod +x /tmp/fake-docker/bin/docker
+          echo success > /tmp/fake-docker/mode
+          echo /tmp/fake-docker/bin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: ghcr.io/example/img:abc123, ghcr.io/example/img:latest
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.source=https://example.com
+          connect-attempts: '2'
+          connect-delay: '0'
+      - name: Assert image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/img:abc123" ]; then
+            echo "FAIL: expected first tag"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert buildx invocation
+        run: |
+          set -e
+          echo "--- calls ---"; cat /tmp/fake-docker/calls.log
+          echo "--- build args ---"; cat /tmp/fake-docker/build-args-1
+          grep -q "buildx create --name remote-buildkit --driver remote --use" /tmp/fake-docker/calls.log || { echo "FAIL: builder not registered"; exit 1; }
+          [ "$(cat /tmp/fake-docker/build-count)" = "1" ] || { echo "FAIL: expected exactly one build"; exit 1; }
+          A=/tmp/fake-docker/build-args-1
+          for want in ghcr.io/example/img:abc123 ghcr.io/example/img:latest FOO=bar BAZ=qux \
+                      org.opencontainers.image.source=https://example.com --push linux/amd64; do
+            if [ "$want" = linux/amd64 ] && [ "$(uname -m)" = aarch64 ]; then want=linux/arm64; fi
+            grep -Fxq -- "$want" "$A" || { echo "FAIL: missing arg '$want'"; exit 1; }
+          done
+          [ "$(grep -cFx -- --tag "$A")" = "2" ] || { echo "FAIL: expected 2 --tag"; exit 1; }
+          [ "$(grep -cFx -- --build-arg "$A")" = "2" ] || { echo "FAIL: expected 2 --build-arg"; exit 1; }
+          grep -Fxq -- --label "$A" || { echo "FAIL: missing --label"; exit 1; }
+          [ "$(tail -n1 "$A")" = "." ] || { echo "FAIL: context should be last arg '.'"; exit 1; }
+          if grep -Fxq -- --file "$A" || grep -Fxq -- --target "$A"; then echo "FAIL: unexpected --file/--target"; exit 1; fi
+          echo "PASS"

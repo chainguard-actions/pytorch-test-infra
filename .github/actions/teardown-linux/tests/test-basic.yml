@@ -1,0 +1,50 @@
+name: Test basic teardown (default, waits for ssh)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/fake-docker.log /tmp/fake-who.log
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/fake-docker.log
+          case "$1" in
+            ps) echo "abc123"; echo "def456" ;;
+          esac
+          exit 0
+          EOF
+          cat > /tmp/fakebin/who <<'EOF'
+          #!/bin/sh
+          echo "called" >> /tmp/fake-who.log
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker /tmp/fakebin/who
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert ssh wait ran and docker cleanup happened
+        run: |
+          echo "--- who log ---"; cat /tmp/fake-who.log || true
+          echo "--- docker log ---"; cat /tmp/fake-docker.log || true
+          if [ ! -s /tmp/fake-who.log ]; then
+            echo "FAIL: expected ssh wait step to call who"
+            exit 1
+          fi
+          if ! grep -qx "ps -q" /tmp/fake-docker.log; then
+            echo "FAIL: expected 'docker ps -q'"
+            exit 1
+          fi
+          if ! grep -qx "stop abc123 def456" /tmp/fake-docker.log; then
+            echo "FAIL: expected 'docker stop abc123 def456'"
+            exit 1
+          fi
+          if ! grep -qx "system prune -af" /tmp/fake-docker.log; then
+            echo "FAIL: expected 'docker system prune -af'"
+            exit 1
+          fi
+          echo "PASS"

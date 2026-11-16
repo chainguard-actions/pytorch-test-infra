@@ -1,0 +1,48 @@
+name: Test no running containers (docker stop fails)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/fake-docker.log
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/fake-docker.log
+          case "$1" in
+            ps) exit 0 ;;
+            stop) echo "docker stop requires at least 1 argument" >&2; exit 1 ;;
+          esac
+          exit 0
+          EOF
+          cat > /tmp/fakebin/who <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker /tmp/fakebin/who
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert action succeeded and still pruned
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "--- docker log ---"; cat /tmp/fake-docker.log || true
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if ! grep -qx "stop" /tmp/fake-docker.log; then
+            echo "FAIL: expected bare 'docker stop' call"
+            exit 1
+          fi
+          if ! grep -qx "system prune -af" /tmp/fake-docker.log; then
+            echo "FAIL: expected 'docker system prune -af'"
+            exit 1
+          fi
+          echo "PASS"

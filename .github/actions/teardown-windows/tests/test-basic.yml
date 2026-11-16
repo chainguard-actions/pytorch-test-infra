@@ -1,0 +1,52 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install recording powershell shim
+        run: |
+          BIN="$RUNNER_TEMP/ps-shim-bin"
+          mkdir -p "$BIN"
+          rm -rf /tmp/ps-calls
+          mkdir -p /tmp/ps-calls
+          cat > "$BIN/powershell" <<'EOF'
+          #!/bin/bash
+          # Records the script passed by the runner instead of running Windows-only cmdlets
+          LOG=/tmp/ps-calls
+          mkdir -p "$LOG"
+          n=$(ls "$LOG" | wc -l)
+          all="$*"
+          path=$(printf '%s' "$all" | sed -n "s/.*'\(.*\)'.*/\1/p")
+          if [ -n "$path" ] && [ -f "$path" ]; then
+            cp "$path" "$LOG/$n.ps1"
+          else
+            for a in "$@"; do [ -f "$a" ] && path="$a"; done
+            if [ -n "$path" ] && [ -f "$path" ]; then cp "$path" "$LOG/$n.ps1"; else echo "$all" > "$LOG/$n.ps1"; fi
+          fi
+          echo "shim recorded call $n"
+          exit "${PS_SHIM_EXIT:-0}"
+          EOF
+          chmod +x "$BIN/powershell"
+          echo "$BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert both powershell steps ran with expected scripts
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          ls -la /tmp/ps-calls
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: expected success"; exit 1; fi
+          count=$(ls /tmp/ps-calls | wc -l)
+          echo "calls: $count"
+          if [ "$count" -ne 2 ]; then echo "FAIL: expected 2 powershell invocations"; exit 1; fi
+          cat /tmp/ps-calls/0.ps1
+          grep -q "Get-SSH-Users" /tmp/ps-calls/0.ps1 || { echo "FAIL: step 1 missing Get-SSH-Users"; exit 1; }
+          grep -q "Win32_SessionProcess" /tmp/ps-calls/0.ps1 || { echo "FAIL: step 1 missing session query"; exit 1; }
+          cat /tmp/ps-calls/1.ps1
+          grep -q "Get-SSH-Sessions" /tmp/ps-calls/1.ps1 || { echo "FAIL: step 2 missing Get-SSH-Sessions"; exit 1; }
+          grep -q "Stop-Process" /tmp/ps-calls/1.ps1 || { echo "FAIL: step 2 missing Stop-Process"; exit 1; }
+          echo "PASS"

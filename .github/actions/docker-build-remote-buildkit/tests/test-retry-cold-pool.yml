@@ -1,0 +1,30 @@
+name: Test retry while builder pool is cold
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -rf /tmp/fake-docker && mkdir -p /tmp/fake-docker/bin
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" /tmp/fake-docker/bin/docker
+          chmod +x /tmp/fake-docker/bin/docker
+          echo cold-then-success > /tmp/fake-docker/mode
+          echo /tmp/fake-docker/bin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: ghcr.io/example/retry:1
+          connect-attempts: '5'
+          connect-delay: '0'
+      - name: Assert retried until success
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          COUNT="$(cat /tmp/fake-docker/build-count)"
+          echo "build attempts: $COUNT image: $IMAGE"
+          if [ "$COUNT" != "3" ]; then echo "FAIL: expected 3 build attempts"; exit 1; fi
+          if [ "$IMAGE" != "ghcr.io/example/retry:1" ]; then echo "FAIL: wrong image output"; exit 1; fi
+          echo "PASS"

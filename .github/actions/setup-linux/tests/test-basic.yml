@@ -1,0 +1,66 @@
+name: Test basic setup-linux
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fakes
+        run: bash "$GITHUB_WORKSPACE/tests/fixtures/setup-fakes.sh" normal
+      - id: action
+        uses: .
+      - name: Assert runner env dirs exported and created
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          echo "RUNNER_DOCS_DIR=$RUNNER_DOCS_DIR"
+          for pair in "artifacts:$RUNNER_ARTIFACT_DIR" "test-results:$RUNNER_TEST_RESULTS_DIR" "docs:$RUNNER_DOCS_DIR"; do
+            name="${pair%%:*}"; dir="${pair#*:}"
+            if [ "$dir" != "${RUNNER_TEMP}/${name}" ]; then
+              echo "FAIL: expected ${RUNNER_TEMP}/${name}, got '$dir'"; exit 1
+            fi
+            if [ ! -d "$dir" ]; then
+              echo "FAIL: directory $dir not created"; exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert github env preserved
+        run: |
+          f="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          echo "file: $f"
+          if [ ! -f "$f" ]; then echo "FAIL: $f missing"; exit 1; fi
+          cat "$f" | cut -c1-80
+          for p in '^GITHUB' '^CI' '^RUNNER'; do
+            if ! grep -q "$p" "$f"; then echo "FAIL: no $p lines in $f"; exit 1; fi
+          done
+          echo "PASS"
+      - name: Assert ECR login performed with account and password
+        run: |
+          cat /tmp/fakes-log/docker.log
+          if ! grep -q -- "login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com" /tmp/fakes-log/docker.log; then
+            echo "FAIL: docker login not called with expected registry"; exit 1
+          fi
+          pw="$(cat /tmp/fakes-log/docker-login-stdin)"
+          echo "password: $pw"
+          if [ "$pw" != "fakepass" ]; then echo "FAIL: wrong password piped"; exit 1; fi
+          echo "PASS"
+      - name: Assert docker cleanup ran and nvidia not needed
+        run: |
+          if ! grep -q "system prune -af" /tmp/fakes-log/docker.log; then
+            echo "FAIL: docker system prune -af not called"; exit 1
+          fi
+          if [ -f /tmp/fakes-log/systemctl.log ] && grep -q "start docker" /tmp/fakes-log/systemctl.log; then
+            echo "FAIL: docker should not have been started (it was running)"; exit 1
+          fi
+          if [ -n "${GPU_FLAG:-}" ]; then echo "FAIL: GPU_FLAG unexpectedly set: $GPU_FLAG"; exit 1; fi
+          echo "PASS"
+      - name: Assert EC2 metadata queried
+        run: |
+          cat /tmp/fakes-log/curl.log
+          for c in ami-id instance-id instance-type; do
+            grep -q "meta-data/$c" /tmp/fakes-log/curl.log || { echo "FAIL: $c not queried"; exit 1; }
+          done
+          echo "PASS"

@@ -1,0 +1,38 @@
+name: Test cache-path set with cache miss runs script
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare build env file and script
+        run: |
+          mkdir -p "$RUNNER_TEMP/acttest"
+          echo 'export CONDA_RUN=""' > "$RUNNER_TEMP/acttest/build_env.sh"
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/acttest/build_env.sh" >> "$GITHUB_ENV"
+          echo "UNIQUE_KEY=acttest-miss-$(date +%s%N)-$RANDOM" >> "$GITHUB_ENV"
+          cat > cache-script.sh <<'EOF'
+          #!/bin/bash
+          mkdir -p cached-output
+          echo "built" > cached-output/result.txt
+          EOF
+      - id: action
+        uses: .
+        with:
+          script: cache-script.sh
+          cache-path: cached-output
+          cache-key: ${{ env.UNIQUE_KEY }}
+      - name: Assert script ran on cache miss
+        run: |
+          if [ ! -f cached-output/result.txt ]; then
+            echo "FAIL: script output not found (script should run on cache miss)"
+            exit 1
+          fi
+          ACTUAL="$(cat cached-output/result.txt)"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "built" ]; then
+            echo "FAIL: unexpected content"
+            exit 1
+          fi
+          echo "PASS"

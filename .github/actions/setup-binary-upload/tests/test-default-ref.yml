@@ -1,0 +1,38 @@
+name: Test default (empty) ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_TYPE: wheel
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide test-infra/tools/pkg-helpers under the workspace
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          path: test-infra
+          sparse-checkout: tools/pkg-helpers
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/test-infra
+          python-version: '3.12'
+          cuda-version: cpu
+          arch: x86_64
+      - name: Assert artifact name has empty ref segment
+        run: |
+          echo "ARTIFACT_NAME: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_test-infra__3.12_cpu_x86_64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert target repo checked out
+        run: |
+          if [ ! -d "$GITHUB_WORKSPACE/pytorch/test-infra/.git" ]; then
+            echo "FAIL: target repository not checked out"
+            exit 1
+          fi
+          echo "PASS"

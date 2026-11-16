@@ -1,0 +1,50 @@
+name: Test with cuda version
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install shims for Windows-only tools (powershell, cygpath) and EC2 metadata curl
+        run: |
+          set -eu
+          MOCKBIN="$RUNNER_TEMP/mockbin"
+          mkdir -p "$MOCKBIN"
+          REAL_CURL="$(command -v curl || true)"
+          cat > "$MOCKBIN/powershell" <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+          cat > "$MOCKBIN/cygpath" <<'EOF'
+          #!/bin/sh
+          echo "$1"
+          EOF
+          cat > "$MOCKBIN/curl" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *169.254.169.254*) echo "fake"; exit 0 ;;
+          esac
+          if [ -n "$REAL_CURL" ]; then exec "$REAL_CURL" "\$@"; fi
+          exit 1
+          EOF
+          chmod +x "$MOCKBIN"/*
+          echo "$MOCKBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: "12.1"
+      - name: Assert outputs of setup
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          if [ ! -d "$RUNNER_ARTIFACT_DIR" ] || [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+            echo "FAIL: directories not created"
+            exit 1
+          fi
+          got="$(git config --global --get core.longpaths || true)"
+          if [ "$got" != "true" ]; then
+            echo "FAIL: core.longpaths=$got"
+            exit 1
+          fi
+          echo "PASS"

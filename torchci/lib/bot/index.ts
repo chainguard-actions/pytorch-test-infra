@@ -1,0 +1,38 @@
+import { Probot } from "probot";
+import actionableIssueBot from "./actionableIssueBot";
+import autoCcBot from "./autoCcBot";
+import autoLabelBot from "./autoLabelBot";
+import autoLabelCodevTrunk from "./autoLabelCodevTrunk";
+import cancelWorkflowsOnCloseBot from "./cancelWorkflowsOnCloseBot";
+import checkLabelsBot from "./checkLabelsBot";
+import ciflowPushTrigger from "./ciflowPushTrigger";
+import codevNoWritePerm from "./codevNoWritePermBot";
+import drciBot from "./drciBot";
+import logUploader from "./logUploader";
+import nitpickBot from "./nitpickBot";
+import prStatusBot from "./prStatusBot";
+import pytorchBot from "./pytorchBot";
+import retryBot from "./retryBot";
+import stripApprovalBot from "./stripApprovalBot";
+import verifyDisableTestIssueBot from "./verifyDisableTestIssueBot";
+import webhookToDynamo from "./webhookToDynamo";
+
+export default function bot(app: Probot) {
+  actionableIssueBot(app);
+  autoCcBot(app);
+  autoLabelCodevTrunk(app);
+  autoLabelBot(app);
+  cancelWorkflowsOnCloseBot(app);
+  checkLabelsBot(app);
+  ciflowPushTrigger(app);
+  codevNoWritePerm(app);
+  drciBot(app);
+  logUploader(app);
+  nitpickBot(app);
+  prStatusBot(app);
+  pytorchBot(app);
+  retryBot(app);
+  stripApprovalBot(app);
+  verifyDisableTestIssueBot(app);
+  webhookToDynamo(app);
+}
