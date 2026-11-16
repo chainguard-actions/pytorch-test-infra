@@ -1,0 +1,29 @@
+name: Test basic pull (image not present locally)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: |
+          rm -f /tmp/fake-docker/image-present /tmp/fake-docker/pull-fail
+          bash tests/fixtures/setup-mocks.sh
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/my/image:abc123
+      - name: Assert login and pull happened
+        run: |
+          echo "--- docker calls ---"; cat /tmp/fake-docker/calls.log
+          echo "--- aws calls ---"; cat /tmp/fake-docker/aws.log
+          grep -q "^aws ecr get-login-password --region us-east-1$" /tmp/fake-docker/aws.log || { echo "FAIL: aws ecr login not called"; exit 1; }
+          grep -qx "docker login -u AWS --password-stdin 308535385114.dkr.ecr.us-east-1.amazonaws.com" /tmp/fake-docker/calls.log || { echo "FAIL: login to default registry not called"; exit 1; }
+          grep -q "fake-ecr-password" /tmp/fake-docker/login-stdin.log || { echo "FAIL: password not piped to docker login"; exit 1; }
+          grep -qx "docker manifest inspect example.com/my/image:abc123" /tmp/fake-docker/calls.log || { echo "FAIL: manifest inspect not called"; exit 1; }
+          grep -qx "docker inspect --type=image example.com/my/image:abc123" /tmp/fake-docker/calls.log || { echo "FAIL: local inspect not called"; exit 1; }
+          COUNT=$(grep -cx "docker pull example.com/my/image:abc123" /tmp/fake-docker/calls.log || true)
+          echo "pull count: $COUNT"
+          if [ "$COUNT" != "1" ]; then echo "FAIL: expected exactly 1 pull"; exit 1; fi
+          echo "PASS"

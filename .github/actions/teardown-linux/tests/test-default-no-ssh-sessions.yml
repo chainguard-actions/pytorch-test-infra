@@ -1,0 +1,50 @@
+name: Test default with no ssh sessions
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who
+        run: |
+          set -eu
+          BIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$BIN"
+          LOG="$RUNNER_TEMP/calls.log"
+          : > "$LOG"
+          cat > "$BIN/docker" <<EOF
+          #!/bin/sh
+          echo "docker \$*" >> "$LOG"
+          exit 0
+          EOF
+          cat > "$BIN/who" <<EOF
+          #!/bin/sh
+          echo "who" >> "$LOG"
+          exit 0
+          EOF
+          chmod +x "$BIN/docker" "$BIN/who"
+          echo "$BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert ssh check ran once and docker cleanup ran
+        run: |
+          LOG="$RUNNER_TEMP/calls.log"
+          echo "--- calls ---"; cat "$LOG"
+          WHO_COUNT=$(grep -c '^who$' "$LOG" || true)
+          echo "who count: $WHO_COUNT"
+          if [ "$WHO_COUNT" != "1" ]; then
+            echo "FAIL: expected who to be called exactly once"; exit 1
+          fi
+          if ! grep -q '^docker ps -q$' "$LOG"; then
+            echo "FAIL: docker ps -q not invoked"; exit 1
+          fi
+          if ! grep -q '^docker system prune -af$' "$LOG"; then
+            echo "FAIL: docker system prune -af not invoked"; exit 1
+          fi
+          # who must be checked before docker cleanup
+          FIRST=$(head -n1 "$LOG")
+          if [ "$FIRST" != "who" ]; then
+            echo "FAIL: expected ssh wait to run before cleanup, first call was '$FIRST'"; exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,37 @@
+name: Test basic script run without cache
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env file and script
+        run: |
+          mkdir -p "$RUNNER_TEMP/act-test"
+          cat > "$RUNNER_TEMP/act-test/build_env.sh" <<'EOF'
+          export CONDA_RUN=""
+          export MY_TEST_VAR="hello-from-env-file"
+          EOF
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/act-test/build_env.sh" >> "$GITHUB_ENV"
+          cat > "$GITHUB_WORKSPACE/act-test-script.sh" <<'EOF'
+          echo "script ran: ${MY_TEST_VAR}" > "$GITHUB_WORKSPACE/act-test-output.txt"
+          EOF
+          rm -f "$GITHUB_WORKSPACE/act-test-output.txt"
+      - id: action
+        uses: .
+        with:
+          script: act-test-script.sh
+      - name: Assert script ran and env file was sourced
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/act-test-output.txt" ]; then
+            echo "FAIL: output file not created"
+            exit 1
+          fi
+          ACTUAL="$(cat "$GITHUB_WORKSPACE/act-test-output.txt")"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "script ran: hello-from-env-file" ]; then
+            echo "FAIL: unexpected content"
+            exit 1
+          fi
+          echo "PASS"

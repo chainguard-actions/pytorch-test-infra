@@ -1,0 +1,46 @@
+name: Test long python version is shortened in artifact name
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: pytorch/test-infra
+      REF: feature/some-branch
+      PACKAGE_TYPE: wheel
+      GPU_ARCH_VERSION: cpu
+      CONDA_PLUGINS_AUTO_ACCEPT_TOS: "yes"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          submodules: "false"
+          setup-miniconda: "true"
+          python-version: "3.11.9"
+          cuda-version: cu124
+          arch: aarch64
+      - name: Assert ARTIFACT_NAME uses short python version and replaces slashes
+        run: |
+          echo "actual: ${ARTIFACT_NAME:-}"
+          if [ "${ARTIFACT_NAME:-}" != "pytorch_test-infra_feature_some-branch_3.11_cu124_aarch64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda env created
+        run: |
+          echo "CONDA_ENV: ${CONDA_ENV:-}"
+          if [ -z "${CONDA_ENV:-}" ] || [ ! -x "$CONDA_ENV/bin/python" ]; then
+            echo "FAIL: conda env missing"
+            exit 1
+          fi
+          "$CONDA_ENV/bin/python" --version 2>&1 | tee /dev/stderr | grep -q "Python 3.11.9" || { echo "FAIL: wrong python version"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,48 @@
+name: Test basic teardown (no ssh sessions)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install powershell shim (action is Windows-only)
+        run: |
+          mkdir -p "$RUNNER_TEMP/shim-bin"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/powershell-shim.sh" "$RUNNER_TEMP/shim-bin/powershell"
+          chmod +x "$RUNNER_TEMP/shim-bin/powershell"
+          echo "$RUNNER_TEMP/shim-bin" >> "$GITHUB_PATH"
+          echo "POWERSHELL_SHIM_LOG=$RUNNER_TEMP/powershell-shim.log" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/powershell-shim.log"
+      - id: action
+        uses: .
+      - name: Assert both teardown steps ran
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          LOG="$RUNNER_TEMP/powershell-shim.log"
+          if [ ! -f "$LOG" ]; then
+            echo "FAIL: powershell was never invoked"
+            exit 1
+          fi
+          cat "$LOG"
+          COUNT=$(grep -c '^=== INVOCATION' "$LOG")
+          echo "invocations: $COUNT"
+          if [ "$COUNT" -ne 2 ]; then
+            echo "FAIL: expected 2 powershell invocations"
+            exit 1
+          fi
+          if grep -q 'MISSING SCRIPT FILE' "$LOG"; then
+            echo "FAIL: a script file was missing"
+            exit 1
+          fi
+          grep -q 'Get-SSH-Users' "$LOG" || { echo "FAIL: drain step did not run"; exit 1; }
+          grep -q 'Holding runner until all ssh sessions have logged out' "$LOG" || { echo "FAIL: drain message missing"; exit 1; }
+          grep -q 'Get-SSH-Sessions' "$LOG" || { echo "FAIL: kill-sessions step did not run"; exit 1; }
+          grep -q 'Stop-Process' "$LOG" || { echo "FAIL: Stop-Process missing from kill step"; exit 1; }
+          echo "PASS"

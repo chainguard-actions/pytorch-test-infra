@@ -1,0 +1,84 @@
+name: Test nightly completed callback
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      MOCK_PORT: "18761"
+      MOCK_OUT: /tmp/mock-relay-nightly
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local mock OIDC + relay server
+        run: |
+          rm -rf "$MOCK_OUT"; mkdir -p "$MOCK_OUT"
+          nohup setsid python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" "$MOCK_PORT" "$MOCK_OUT" > /tmp/mock-relay-nightly.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:$MOCK_PORT/health" >/dev/null; then echo "server up"; break; fi
+            sleep 1
+          done
+          curl -sf "http://127.0.0.1:$MOCK_PORT/health" || { cat /tmp/mock-relay-nightly.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:$MOCK_PORT/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0123456789abcdef0123456789abcdef01234567
+          event-type: nightly
+          job-name: build-cpu
+          test-results: '{"passed": 10, "failed": 0, "skipped": 2}'
+          artifact-url: https://example.com/artifacts/123
+          triage-verdict: '{"schema_version": 1, "category": "infra", "confidence": "low", "summary": "nothing failed"}'
+          callback-url: http://127.0.0.1:18761/callback/
+      - name: Assert callback payload
+        run: |
+          cat /tmp/mock-relay-nightly.log || true
+          ls -la "$MOCK_OUT"
+          python3 - <<'EOF'
+          import json, os, sys
+          out = os.environ["MOCK_OUT"]
+          reqs = sorted(p for p in os.listdir(out) if p.endswith(".meta.json"))
+          if len(reqs) != 1:
+              sys.exit(f"FAIL: expected exactly 1 callback request, got {len(reqs)}")
+          meta = json.load(open(os.path.join(out, "request-0.meta.json")))
+          body = json.load(open(os.path.join(out, "request-0.json")))
+          print(json.dumps(meta, indent=2)); print(json.dumps(body, indent=2))
+          def check(cond, msg):
+              if not cond:
+                  sys.exit("FAIL: " + msg)
+          check(meta["path"] == "/callback", f"path {meta['path']!r} (trailing slash should be stripped)")
+          check(meta["authorization"] == "Bearer fake-oidc-token", "authorization header should carry minted OIDC token")
+          check(meta["content_type"] == "application/json", "content type")
+          sha = "0123456789abcdef0123456789abcdef01234567"
+          check(body["event_type"] == "nightly", "event_type")
+          check(body["delivery_id"] == sha, "delivery_id")
+          check(body["payload"]["head_sha"] == sha, "payload.head_sha")
+          check(body["payload"]["repository"]["full_name"] == "pytorch/pytorch", "payload.repository")
+          w = body["workflow"]
+          check(w["schema_version"] == "1", "schema_version")
+          check(w["status"] == "completed", "status")
+          check(w["conclusion"] == "success", "conclusion")
+          check(w["name"] == "Test nightly completed callback", f"workflow name {w['name']!r}")
+          check("/actions/runs/" in w["url"], "workflow url")
+          check(w["job_name"] == "build-cpu", "job_name")
+          check(bool(w["run_id"]) and bool(w["run_attempt"]) and bool(w["check_run_id"]), "run ids")
+          check(w["started_at"] and w["completed_at"], "timestamps set for self-report")
+          check(w["test_results"] == {"passed": 10, "failed": 0, "skipped": 2}, "test_results")
+          check(w["artifact_url"] == "https://example.com/artifacts/123", "artifact_url")
+          check(w["triage_verdict"]["category"] == "infra", "triage_verdict")
+          check("failed_tests_detail" not in w, "failed_tests_detail should be absent")
+          print("PASS")
+          EOF
+      - name: Assert OIDC token requested with relay audience
+        run: |
+          cat "$MOCK_OUT/token-requests.log"
+          if ! grep -q "audience=pytorch-cross-repo-ci-relay" "$MOCK_OUT/token-requests.log"; then
+            echo "FAIL: OIDC token not requested with expected audience"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,48 @@
+name: Test push false
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          rm -f /tmp/fake-docker.log
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/fake-docker.log
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: ghcr.io/example/img:nopush
+          push: 'false'
+          connect-delay: '0'
+      - name: Assert no --push and default context
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          cat /tmp/fake-docker.log
+          echo "image: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/img:nopush" ]; then
+            echo "FAIL: wrong image output"; exit 1
+          fi
+          line="$(grep '^buildx build' /tmp/fake-docker.log)"
+          if echo "$line" | grep -qF -- "--push"; then
+            echo "FAIL: --push present with push=false"; exit 1
+          fi
+          for pat in "--file" "--target" "--build-arg" "--label" "--cache-from" "--cache-to"; do
+            if echo "$line" | grep -qF -- "$pat"; then
+              echo "FAIL: unexpected '$pat'"; exit 1
+            fi
+          done
+          case "$line" in
+            *" .") ;;
+            *) echo "FAIL: default context '.' not last arg"; exit 1 ;;
+          esac
+          echo "PASS"

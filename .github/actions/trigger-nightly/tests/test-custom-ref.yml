@@ -1,0 +1,68 @@
+name: Test nightly commit from a non-default ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up local bare remote with main, release and nightly branches
+        run: |
+          set -euo pipefail
+          git config --global user.email "test@example.com"
+          git config --global user.name "Test User"
+          git config --global init.defaultBranch main
+          rm -rf /tmp/remote.git /tmp/seed
+          git init --bare /tmp/remote.git
+          git init /tmp/seed
+          cd /tmp/seed
+          echo "hello main" > file.txt
+          git add file.txt
+          git commit -m "main commit"
+          git push /tmp/remote.git HEAD:refs/heads/main
+          git checkout -b release-2.0
+          echo "release content" > release.txt
+          git add release.txt
+          git commit -m "release commit"
+          git push /tmp/remote.git HEAD:refs/heads/release-2.0
+          git checkout --orphan nightly
+          git rm -rf . >/dev/null
+          echo "old nightly" > nightly.txt
+          git add nightly.txt
+          git commit -m "old nightly"
+          git push /tmp/remote.git HEAD:refs/heads/nightly
+          git config --global url."file:///tmp/remote.git".insteadOf "https://github.com/example-org/nightly-test"
+          git config --global --add url."file:///tmp/remote.git".insteadOf "https://github.com/example-org/nightly-test.git"
+          echo "OLD_NIGHTLY=$(git --git-dir=/tmp/remote.git rev-parse refs/heads/nightly)" >> "$GITHUB_ENV"
+          echo "REL_SHA=$(git --git-dir=/tmp/remote.git rev-parse refs/heads/release-2.0)" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          token: ${{ github.token }}
+          repository: example-org/nightly-test
+          ref: release-2.0
+          path: release-checkout
+      - name: Assert release branch was checked out
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/release-checkout/release.txt" ]; then
+            echo "FAIL: release.txt not found"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert nightly is built from release branch tree
+        run: |
+          set -euo pipefail
+          R="git --git-dir=/tmp/remote.git"
+          PARENT=$($R rev-parse "refs/heads/nightly^1")
+          NEW_TREE=$($R rev-parse "refs/heads/nightly^{tree}")
+          REL_TREE=$($R rev-parse "refs/heads/release-2.0^{tree}")
+          MAIN_TREE=$($R rev-parse "refs/heads/main^{tree}")
+          MSG=$($R log -1 --format=%s refs/heads/nightly)
+          echo "parent=$PARENT tree=$NEW_TREE rel_tree=$REL_TREE msg=$MSG"
+          [ "$PARENT" = "$OLD_NIGHTLY" ] || { echo "FAIL: parent is not previous nightly"; exit 1; }
+          [ "$NEW_TREE" = "$REL_TREE" ] || { echo "FAIL: tree does not match release branch"; exit 1; }
+          [ "$NEW_TREE" != "$MAIN_TREE" ] || { echo "FAIL: tree unexpectedly matches main"; exit 1; }
+          case "$MSG" in
+            *"nightly release (${REL_SHA})") echo "PASS" ;;
+            *) echo "FAIL: message does not reference release sha $REL_SHA"; exit 1 ;;
+          esac

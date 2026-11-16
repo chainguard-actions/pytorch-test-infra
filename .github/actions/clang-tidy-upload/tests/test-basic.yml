@@ -1,0 +1,54 @@
+name: Test basic usage (no s3 upload)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock check_s3.py and dummy binaries
+        run: |
+          set -e
+          rm -f /tmp/check_s3_calls.log /tmp/check_s3_fail
+          mkdir -p tools/clang-tidy-checks
+          if [ -f tools/clang-tidy-checks/check_s3.py ]; then
+            cp tools/clang-tidy-checks/check_s3.py /tmp/check_s3.py.orig
+          fi
+          cp tests/fixtures/mock_check_s3.py tools/clang-tidy-checks/check_s3.py
+          echo "fake clang-tidy" > clang-tidy
+          echo "fake clang-format" > clang-format
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          platform: linux64
+          version: "17.0.6"
+          upload-to-s3: false
+      - name: Assert check_s3 was called with correct keys
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "calls:"; cat /tmp/check_s3_calls.log || true
+          printf '%s\n' "linux64/17.0.6/clang-tidy clang-tidy" "linux64/17.0.6/clang-format clang-format" > /tmp/expected.log
+          if ! diff /tmp/expected.log /tmp/check_s3_calls.log; then
+            echo "FAIL: check_s3 calls did not match expected"
+            exit 1
+          fi
+          # The later upload-artifact steps may fail under act without an
+          # artifact server; only success/failure are acceptable outcomes.
+          if [ "$OUTCOME" != "success" ] && [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f clang-tidy clang-format
+          if [ -f /tmp/check_s3.py.orig ]; then
+            cp /tmp/check_s3.py.orig tools/clang-tidy-checks/check_s3.py
+          else
+            rm -rf tools/clang-tidy-checks
+            rmdir tools 2>/dev/null || true
+          fi

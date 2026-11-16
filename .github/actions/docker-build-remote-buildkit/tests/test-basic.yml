@@ -1,0 +1,83 @@
+name: Test basic buildx invocation
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker (no daemon/BuildKit under act)
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          rm -f /tmp/fake-docker.log
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/fake-docker.log
+          echo "fake docker: $*"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: |
+            ghcr.io/example/img:one, ghcr.io/example/img:two
+            ghcr.io/example/img:three
+          context: tests/ctx-dir
+          file: tests/ctx-dir/Dockerfile.custom
+          target: final
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.title=test
+          cache-from: type=registry,ref=ghcr.io/example/cache
+          cache-to: type=registry,ref=ghcr.io/example/cache,mode=max
+          connect-attempts: '2'
+          connect-delay: '0'
+      - name: Assert image output is first tag
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/img:one" ]; then
+            echo "FAIL: expected 'ghcr.io/example/img:one'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert docker invocations
+        run: |
+          cat /tmp/fake-docker.log
+          if ! grep -q '^buildx create --name remote-buildkit --driver remote --use tcp://buildkitd-' /tmp/fake-docker.log; then
+            echo "FAIL: remote builder was not registered"
+            exit 1
+          fi
+          line="$(grep '^buildx build' /tmp/fake-docker.log)"
+          if [ "$(grep -c '^buildx build' /tmp/fake-docker.log)" != "1" ]; then
+            echo "FAIL: expected exactly one buildx build call"
+            exit 1
+          fi
+          for pat in \
+            "--tag ghcr.io/example/img:one --tag ghcr.io/example/img:two --tag ghcr.io/example/img:three" \
+            "--file tests/ctx-dir/Dockerfile.custom" \
+            "--target final" \
+            "--build-arg FOO=bar --build-arg BAZ=qux" \
+            "--label org.opencontainers.image.title=test" \
+            "--cache-from type=registry,ref=ghcr.io/example/cache" \
+            "--cache-to type=registry,ref=ghcr.io/example/cache,mode=max" \
+            "--push" ; do
+            if ! echo "$line" | grep -qF -- "$pat"; then
+              echo "FAIL: missing '$pat'"
+              exit 1
+            fi
+          done
+          if ! echo "$line" | grep -qE -- '--platform linux/(amd64|arm64)'; then
+            echo "FAIL: missing --platform"
+            exit 1
+          fi
+          case "$line" in
+            *" tests/ctx-dir") ;;
+            *) echo "FAIL: context not last arg"; exit 1 ;;
+          esac
+          echo "PASS"

@@ -1,0 +1,76 @@
+name: Test basic usage (mocked macOS + brew)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up fake macOS environment (platform preload, brew, python)
+        run: |
+          set -e
+          rm -rf /tmp/fakebrew
+          mkdir -p /tmp/fakebrew/bin /tmp/fakebrew/shim
+          # Preload that makes node report darwin
+          cat > /tmp/fakebrew/fake-darwin.js <<'JSEOF'
+          Object.defineProperty(process, 'platform', { value: 'darwin' });
+          JSEOF
+          # Fake brew
+          cat > /tmp/fakebrew/shim/brew <<'BREWEOF'
+          #!/bin/sh
+          echo "brew $*" >> /tmp/fakebrew/brew.log
+          if [ "$1" = "--prefix" ]; then echo /tmp/fakebrew; fi
+          exit 0
+          BREWEOF
+          chmod +x /tmp/fakebrew/shim/brew
+          # Fake brew python that creates a minimal venv
+          cat > /tmp/fakebrew/bin/python3.12 <<'PYEOF'
+          #!/bin/sh
+          echo "python3.12 $*" >> /tmp/fakebrew/python.log
+          if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+            mkdir -p "$3/bin"
+            printf '#!/bin/sh\necho "venv-python $*" >> /tmp/fakebrew/venv-python.log\nexit 0\n' > "$3/bin/python"
+            chmod +x "$3/bin/python"
+            touch "$3/pyvenv.cfg"
+            exit 0
+          fi
+          exit 1
+          PYEOF
+          chmod +x /tmp/fakebrew/bin/python3.12
+          echo "/tmp/fakebrew/shim" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require /tmp/fakebrew/fake-darwin.js
+        with:
+          python-version: "3.12"
+      - name: Assert venv created and exported
+        run: |
+          echo "VENV_PATH: $VENV_PATH"
+          echo "RUNNER_TEMP: $RUNNER_TEMP"
+          echo "PATH: $PATH"
+          echo "--- brew.log"; cat /tmp/fakebrew/brew.log || true
+          echo "--- python.log"; cat /tmp/fakebrew/python.log || true
+          if [ -z "$VENV_PATH" ]; then echo "FAIL: VENV_PATH not set"; exit 1; fi
+          case "$VENV_PATH" in
+            "$RUNNER_TEMP"/venv-3.12-*) ;;
+            *) echo "FAIL: VENV_PATH not under RUNNER_TEMP with venv-3.12- prefix"; exit 1 ;;
+          esac
+          if [ ! -f "$VENV_PATH/pyvenv.cfg" ]; then echo "FAIL: venv not created"; exit 1; fi
+          if ! grep -qx "brew install python@3.12" /tmp/fakebrew/brew.log; then
+            echo "FAIL: brew install python@3.12 not called"; exit 1
+          fi
+          if ! grep -qx "brew update" /tmp/fakebrew/brew.log; then
+            echo "FAIL: brew update not called"; exit 1
+          fi
+          if ! grep -qx "python3.12 -m venv $VENV_PATH" /tmp/fakebrew/python.log; then
+            echo "FAIL: venv not created with brew python"; exit 1
+          fi
+          case ":$PATH:" in
+            *":$VENV_PATH/bin:"*) ;;
+            *) echo "FAIL: venv bin not on PATH"; exit 1 ;;
+          esac
+          if [ -f /tmp/fakebrew/venv-python.log ]; then
+            echo "FAIL: pip should not run without a requirements file"; exit 1
+          fi
+          echo "PASS"

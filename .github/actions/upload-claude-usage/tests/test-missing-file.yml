@@ -1,0 +1,37 @@
+name: Test missing metrics file is skipped
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/bash
+          echo "$@" > /tmp/fake-aws-args
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/fake-aws-args
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/does-not-exist.json
+      - name: Assert step succeeded and no upload
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ -f /tmp/fake-aws-args ]; then
+            echo "FAIL: aws should not have been invoked: $(cat /tmp/fake-aws-args)"
+            exit 1
+          fi
+          echo "PASS"

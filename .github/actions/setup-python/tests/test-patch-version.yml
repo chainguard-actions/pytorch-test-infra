@@ -1,0 +1,60 @@
+name: Test patch version is truncated to major.minor
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up fake macOS environment (platform preload, brew, python)
+        run: |
+          set -e
+          rm -rf /tmp/fakebrew
+          mkdir -p /tmp/fakebrew/bin /tmp/fakebrew/shim
+          cat > /tmp/fakebrew/fake-darwin.js <<'JSEOF'
+          Object.defineProperty(process, 'platform', { value: 'darwin' });
+          JSEOF
+          cat > /tmp/fakebrew/shim/brew <<'BREWEOF'
+          #!/bin/sh
+          echo "brew $*" >> /tmp/fakebrew/brew.log
+          if [ "$1" = "--prefix" ]; then echo /tmp/fakebrew; fi
+          exit 0
+          BREWEOF
+          chmod +x /tmp/fakebrew/shim/brew
+          cat > /tmp/fakebrew/bin/python3.11 <<'PYEOF'
+          #!/bin/sh
+          echo "python3.11 $*" >> /tmp/fakebrew/python.log
+          if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+            mkdir -p "$3/bin"
+            printf '#!/bin/sh\necho "venv-python $*" >> /tmp/fakebrew/venv-python.log\nexit 0\n' > "$3/bin/python"
+            chmod +x "$3/bin/python"
+            touch "$3/pyvenv.cfg"
+            exit 0
+          fi
+          exit 1
+          PYEOF
+          chmod +x /tmp/fakebrew/bin/python3.11
+          echo "/tmp/fakebrew/shim" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require /tmp/fakebrew/fake-darwin.js
+        with:
+          python-version: "3.11.7"
+      - name: Assert version was truncated to 3.11
+        run: |
+          echo "VENV_PATH: $VENV_PATH"
+          echo "--- brew.log"; cat /tmp/fakebrew/brew.log || true
+          echo "--- python.log"; cat /tmp/fakebrew/python.log || true
+          case "$VENV_PATH" in
+            "$RUNNER_TEMP"/venv-3.11-*) ;;
+            *) echo "FAIL: expected VENV_PATH with venv-3.11- prefix"; exit 1 ;;
+          esac
+          if ! grep -qx "brew install python@3.11" /tmp/fakebrew/brew.log; then
+            echo "FAIL: expected brew install python@3.11"; exit 1
+          fi
+          if grep -q "python@3.11.7" /tmp/fakebrew/brew.log; then
+            echo "FAIL: full patch version passed to brew"; exit 1
+          fi
+          if [ ! -f "$VENV_PATH/pyvenv.cfg" ]; then echo "FAIL: venv not created"; exit 1; fi
+          echo "PASS"

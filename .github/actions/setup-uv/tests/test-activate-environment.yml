@@ -1,0 +1,37 @@
+name: Test activate-environment
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          activate-environment: "true"
+      - name: Assert virtual environment is activated
+        run: |
+          echo "VIRTUAL_ENV: ${VIRTUAL_ENV:-<unset>}"
+          if [ -z "${VIRTUAL_ENV:-}" ]; then
+            echo "FAIL: VIRTUAL_ENV not set"
+            exit 1
+          fi
+          if [ ! -f "$VIRTUAL_ENV/pyvenv.cfg" ]; then
+            echo "FAIL: no pyvenv.cfg in $VIRTUAL_ENV"
+            exit 1
+          fi
+          case ":$PATH:" in
+            *":$VIRTUAL_ENV/bin:"*) ;;
+            *) echo "FAIL: venv bin not on PATH: $PATH"; exit 1 ;;
+          esac
+          echo "PASS"
+      - name: Assert uv version output
+        env:
+          ACTUAL: ${{ steps.action.outputs.uv-version }}
+        run: |
+          echo "actual: $ACTUAL"
+          case "$ACTUAL" in
+            *0.11.14*) echo "PASS" ;;
+            *) echo "FAIL: expected 0.11.14"; exit 1 ;;
+          esac

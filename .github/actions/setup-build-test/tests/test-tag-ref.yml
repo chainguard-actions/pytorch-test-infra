@@ -1,0 +1,33 @@
+name: Test checkout of a tag ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: v4.0.0
+          submodules: "false"
+      - name: Assert tag commit checked out
+        working-directory: actions/checkout
+        run: |
+          git config --global --add safe.directory "$PWD" || true
+          ACTUAL="$(git rev-parse HEAD)"
+          echo "HEAD: $ACTUAL"
+          if [ ! -f action.yml ]; then
+            echo "FAIL: action.yml missing"
+            exit 1
+          fi
+          if ! grep -q '"version": "4.0.0"' package.json; then
+            echo "FAIL: package.json does not report version 4.0.0"
+            grep '"version"' package.json || true
+            exit 1
+          fi
+          echo "PASS"
+      - name: Cleanup
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/actions"

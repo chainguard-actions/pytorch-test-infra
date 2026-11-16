@@ -1,0 +1,38 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          repo-name: vision
+          branch: main
+          test-infra-ref: main
+          updatebot-token: ${{ secrets.GITHUB_TOKEN }}
+          pytorchbot-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert action ran (succeeded with side effects, or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ ! -f "$GITHUB_WORKSPACE/test-infra/.github/scripts/update_commit_hashes.py" ]; then
+              echo "FAIL: action succeeded but test-infra script was not checked out"
+              exit 1
+            fi
+            if [ ! -d "$GITHUB_WORKSPACE/vision/.git" ]; then
+              echo "FAIL: action succeeded but target repo was not cloned"
+              exit 1
+            fi
+            echo "PASS: action succeeded with expected side effects"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel source repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

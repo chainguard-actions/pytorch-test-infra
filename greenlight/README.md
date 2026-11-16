@@ -1,0 +1,772 @@
+# PyTorch Green Light
+
+A Python service that runs a periodic iteration from the CLI — a one-shot
+(cron-like) run by default, or a long-lived daemon with `--loop`. In production the
+scheduled scan runs as an AWS Lambda (`greenlight-scan`) on a 5-minute EventBridge
+schedule; the CLI one-shot and `--loop` daemon modes remain for local and other use.
+
+## Requirements
+
+- **mise** — the only manual prerequisite. See <https://mise.jdx.dev>.
+
+Everything else (Python 3.13, uv, just, and the non-Python linters) is provided
+by mise; `just setup` then installs the Python tools (ruff, mypy, pytest, yamllint).
+
+## Setup
+
+```bash
+mise trust      # trust greenlight/mise.toml on first use
+mise install    # install python 3.13, uv, just, and all tools
+just setup      # uv sync -> create .venv with deps
+```
+
+## Usage
+
+PyTorch Green Light has three subcommands. `review` scans the open PRs from the evaluation
+cohort in `pytorch/pytorch` (see "Who is evaluated, and whose verdict carries authority"
+below) and, for each one, computes its fingerprint
+(`eval_hash`), reads the PR's latest recorded state from ClickHouse
+`misc.greenlight_pr_state`, and dispatches the reviewer workflow
+(`greenlight-pr-review.yml` on `pytorch/test-infra`) for eligible PRs that are new or changed since
+their last review. A reverted PR is dropped from every path, permanently: greenlight revokes its
+own approving review, records a `REVERTED` row, and never reviews the PR again. A PR counts as
+reverted once it carries the `Reverted` label (matched case-insensitively) or has ever recorded a
+`REVERTED` row — removing the label does not restore eligibility, and an explicit `@greenlight
+recheck` (the `--pr` path) is not exempt, it is skipped silently with no comment posted. The
+revocation needs `BOT_LOGIN` and PR write access; a `BOT_LOGIN` that is not the App's
+`<slug>[bot]` fails the scan rather than silently revoking nothing.
+Draft PRs are dropped from the listing scan entirely — never fingerprinted or
+dispatched — though an explicit `@greenlight recheck` (the `--pr` path) still reviews a draft.
+A PR whose `updated_at` is older than
+`PYTORCH_GREENLIGHT_REVIEW_WINDOW_HOURS` (default 24), or that carries the `Stale` label, is
+skipped without fingerprinting unless it has an in-flight or retry-eligible (cancelled/failed)
+review to re-check; an explicit `@greenlight recheck` (the `--pr` path) reviews it regardless. An
+in-flight review — one marked `AI_REVIEW_STARTED` — is left alone until the `--timeout-minutes`
+re-dispatch window elapses.
+The listing scan also skips a PR a human has already decided — approved by a merge-authorized
+login (any `approved_by` in `pytorch/pytorch`'s `merge_rules.yaml`, taken across all rules
+regardless of the PR's changed paths, bots excluded) or with changes requested by any non-bot
+reviewer — without fingerprinting or dispatching it. No state is written for such a skip, so the
+scan resumes on its own once the situation changes (for example the changes-requested review is
+dismissed). `verdict` records a single
+PR-review verdict and acts on the PR, and `drci-poke` refreshes the Dr. CI comment that shows
+that verdict on `pytorch/pytorch` (both below).
+
+Which open PRs a listing scan reads depends on the tick. A **full tick** lists every open PR. It
+runs on every tick until one completes, and again 15 minutes (less 30 s of tolerance;
+`FULL_TICK_INTERVAL`, `FULL_TICK_TOLERANCE`) after the start of the last full tick that completed —
+one whose listing and fingerprint fan-out finished without a rate-limit abort, even if a PR then
+failed. A clock that steps back past the start of
+the last full tick counts as due. Every scan in between is a **fast tick**: it walks
+the open PRs most recently updated first, stops at the review window's edge, and adds every open PR
+labelled `Reverted`, at any age (one issues-endpoint listing per Reverted label). Every source
+drops drafts and authors outside the evaluation cohort. What a fast tick does not list waits for
+the next full tick: a PR whose place in GitHub's updated order lags its `updated_at`; an idle PR
+reverted only by its recorded row; and a PR idle longer than the review window (24 h by default)
+whose review is unfinished: a failed, cancelled or stuck one is retried at the first full tick after
+its `--timeout-minutes` timer (45 minutes by default), and an in-flight one whose fingerprint
+changed without bumping `updated_at` is re-dispatched there.
+
+A fast tick also reuses fingerprints. Once a listing tick's fan-out finishes, the process keeps only
+the fingerprint results that tick reused and those it fetched (a hash only when read at the listed
+head) when the listed `updated_at` was at least two minutes old (`FINGERPRINT_QUIET`) at the clock
+read after the listing, before the fan-out. Each is keyed on that `updated_at`, the listed head and
+the merge-authorized login set. A fast tick decides a PR whose key is unchanged on its kept result
+without fetching its fingerprint, and fingerprints afresh any PR that decision would dispatch, so
+every dispatch carries a head and hash read that tick. A PR whose author only path-scoped merge rules
+name still has its changed files read every tick, to decide whether that author is eligible for it.
+Each `updated_at` bump, a bot's comment edit such as Dr. CI's included, costs the PR a fresh fetch on
+every tick until one finds the bump at least two minutes old: at most two when ticks are two minutes
+or more apart, and more on a `--loop` daemon, whose ticks are 60 s apart by default. Each tick logs
+how many fingerprints it reused and how many it fetched fresh, and logs a decision taken from a kept
+result with a `cached` tag. The quiet age compares the host's clock with GitHub's `updated_at`, so a
+`--loop` host needs a synced clock.
+
+Full ticks never reuse a result, so what the key cannot see waits at most for the next full tick:
+
+- an edit of an inline review comment, which never bumps `updated_at` (the reviewer never sees
+  inline comments), or its deletion, whose effect on `updated_at` is unmeasured;
+- the deletion of a conversation comment, if it does not bump `updated_at` (unmeasured; the one
+  observed case bumped);
+- an approver's login rename or account deletion;
+- a review dismissal, if it does not bump `updated_at`.
+
+A bump that shows up only after the result was stored leaves the PR decided on that result until the
+bump becomes visible (one observed case lagged between 8 s and several minutes), and at most until
+the next full tick.
+
+A warm `greenlight-scan` Lambda and a `--loop` daemon keep the tick memory, kept fingerprints
+included, between scans; a CLI one-shot and a cold Lambda always list in full and start with nothing
+kept, and `--pr` never lists or touches the kept fingerprints.
+
+```bash
+just run review                      # scan + dispatch once, then exit
+just review                          # convenience alias for `just run review`
+just run review --loop               # scan + dispatch forever as a daemon
+just run review --loop --interval 30 # daemon, 30s between iterations
+just run review --pr 123             # scan only PR #123 (its author must be eligible for it)
+just run review --pr 123 --requester alice  # recheck PR #123 for alice (author eligible for it, alice in the evaluation cohort)
+just run review --max 5              # cap this iteration at 5 dispatches
+just run review --ref my-branch      # dispatch the reviewer workflow at this test-infra ref (default main)
+just run review --timeout-minutes 60 # re-dispatch an in-flight review after 60 min (default 45)
+just run review --pr 123 --allow-untrusted-author  # LOCAL ONLY: review an ineligible author's PR, in shadow
+```
+
+`review` requires `PYTORCH_GREENLIGHT_GITHUB_TOKEN`, and any scan that finds at least one
+cohort PR also reads ClickHouse, so the `CLICKHOUSE_*` credentials must be set in
+practice; without the token `review` exits non-zero.
+
+The default `--timeout-minutes` is 45, above the reviewer workflow's own ~37-40 min
+budget, so with the default the scanner lets a running review finish (or time out and
+record a verdict) before it re-dispatches, rather than cancelling and restarting one that
+is still running. Lower `--timeout-minutes` in the deployment if you need a stuck review
+reclaimed sooner.
+
+### Who is evaluated, and whose verdict carries authority
+
+Two independent questions, both answered in `cohort.py`.
+
+**Who is evaluated** is the *evaluation cohort*: `cohort.evaluation_cohort(authorized_logins)` —
+every `approved_by` login in `pytorch/pytorch`'s `merge_rules.yaml` (taken across all rules
+regardless of changed paths, team refs expanded to members via `merge_authz`), minus bots and
+minus greenlight's own App. That set is the listing scan's match rule. greenlight is excluded
+explicitly: `merge_rules.yaml` names bare logins, so its entry resolves to `pytorchgreenlight`,
+which is not bot-shaped and would otherwise put greenlight in its own cohort reviewing its own
+PRs.
+
+**Whose verdict carries authority** is decided per PR ([TRUSTED_AUTHORS.md](TRUSTED_AUTHORS.md)): the
+author must be named by one merge rule covering every file the PR changes, a path-scoped rule only
+on a PR based on `main`, on a ghstack PR or on a PR in a GitHub-native stack whose trunk is `main`.
+The listing scan fingerprints and dispatches only such eligible PRs, and applies that cut to the
+*fingerprint candidates*, after the revert guard and the state read, not to the listing. Every other
+listed PR is therefore still state-read and still reaches `revert_guard` — so it still loses a
+greenlight approval it should no longer hold and still gets its permanent `REVERTED` row — but is
+never dispatched; when it is inside the review window and not labelled `Stale`, and its latest
+recorded row is a `LAND`, the scan dismisses greenlight's approval.
+
+A review is recorded in **shadow** when the verdict's record-time merge-rule check fails, when
+`verdict` runs with `--shadow`, or when a local `--allow-untrusted-author` run reviews an ineligible
+PR. Its row is stamped `shadow`, and a shadow row
+
+- is never approved — and a `LAND` on a shadow PR additionally dismisses any prior greenlight
+  approval, because an approval collected while the PR was eligible is still live authority under
+  the wildcard Greenlight Review Bot merge rule, and withholding a new one does not take the old
+  one back;
+- is filtered out of both HUD readers — Dr. CI's Green Light render and the
+  `/api/greenlight/pr_state` route the land-time merge gate reads;
+- triggers no Dr. CI poke.
+
+A `REVERTED` row, which can only deny, is stamped non-shadow on a PR with a recorded row, and
+follows the PR's eligibility on one without.
+
+### Rechecking a PR (`@greenlight recheck`)
+
+`@greenlight recheck` on a `pytorch/pytorch` PR needs a `pytorch/pytorch` workflow to dispatch
+`greenlight-review.yml` with the PR number and the commenter's login. No such workflow exists, so
+the path runs only when a `pytorch/test-infra` writer dispatches it by hand. The scan re-checks
+that one PR through `--pr`, for a requester in the evaluation cohort.
+
+The scan is the single source of authorization and enforces two gates. A requester confers no
+authority: a review carries it only when its PR's author passes the merge-rule check.
+
+- **Target-author gate** — `--pr N` fetches PR `N` and refuses (no fingerprint, no dispatch, no
+  review) unless its author is eligible for `N`. The listing scan is at least filtered to the
+  evaluation cohort, whereas `--pr` names an arbitrary PR and is filtered by nothing, so this gate
+  is what stops an arbitrary PR from being reviewed or approved on request.
+- **Requester gate** — `--requester <login>`, when given, additionally requires `<login>` to be
+  in the evaluation cohort (case-insensitive). It needs no target PR, so it gates a listing scan
+  too; it refuses before any PR is fetched and logs the requester for audit.
+
+A refusal is a clean exit 0, but a refused target with an author login still goes through the revert
+guard, which can revoke and record, and a failure there fails the run. `--allow-untrusted-author` is a
+**local-only** flag that waives the target gate's refusal — but not its eligibility check, which
+still decides shadow. So an ineligible PR is reviewed and recorded **in shadow**: never approved,
+and its verdict dismisses any prior greenlight approval. An eligible PR behaves exactly as it does
+in production, flag or no flag. The flag is deliberately not exposed as a `greenlight-review.yml`
+input, is unreachable from the comment/dispatch path, and never affects the requester gate.
+
+The recheck path treats an existing human decision differently from the listing scan. An existing
+approval is ignored — greenlight reviews anyway, since a human approval may not authorize landing
+for the PR's paths and the author may still want the bot's verdict. If the PR has a
+changes-requested review, greenlight does not review; it posts a single comment that it will not
+re-review while a reviewer's requested changes stand, and reconsiders once the reviewer dismisses
+or resolves that review (not merely on the next push).
+
+The user-facing `@greenlight recheck` hint is not yet advertised in the status surface — Dr. CI's
+Green Light section on `pytorch/pytorch`, greenlight's own comment elsewhere (see "Who posts the
+status comment"); that is added once the `pytorch/pytorch` trigger is deployed.
+
+### Recording a verdict
+
+A privileged CI job records a review verdict with `verdict`. It runs once (never a
+daemon): it emits a gzipped single-line JSON row (whose `reason` must be a canonical
+`ALLOWED_REASONS` code) that the record workflow uploads to
+`s3://gha-artifacts/greenlight_pr_state/`, where the clickhouse-replicator-s3 path ingests
+it into `misc.greenlight_pr_state` — the command never writes ClickHouse directly. For
+`LAND`/`NO_LAND`, a `NO_LAND` first dismisses greenlight's prior approval; unless `--shadow`,
+[the record-time merge-rule check](TRUSTED_AUTHORS.md) decides shadow next, and a failed check writes
+no row; after the row, a `LAND` approves, or dismisses if shadow, and a non-shadow verdict sets its
+[`GL/*` label](STATUS_LABELS.md). `CANCELLED` and `FAILED` markers only emit the row. The model's
+message is asked for as a short markdown outline (see "How the verdict message is rendered") and is
+secret-scrubbed at a single point before it fans out to both the emitted row and the posted comment;
+whichever comment ultimately carries it — greenlight's own, or Dr. CI's Green Light section rendered
+from the row — additionally neutralizes its formatting and @-mentions on the way out.
+
+```bash
+just run verdict --pr 123 --head-sha "$SHA" --verdict-file verdict.json \
+  --eval-hash "$EVAL_HASH" --bot-login 'greenlight-app[bot]'   # LAND/NO_LAND
+just run verdict --pr 123 --head-sha "$SHA" --status CANCELLED  # marker: emit row only
+just run verdict --pr 123 --head-sha "$SHA" --verdict-file verdict.json \
+  --eval-hash "$EVAL_HASH" --dry-run                            # offline; logs only
+```
+
+### How the verdict message is rendered
+
+The greenlight-review skill asks the model for a short markdown outline — a few topic bullets,
+each with a few detail bullets. Nothing enforces that shape. The Stop hook and the `verdict`
+command both check `status`, `reason` and a non-empty `message` and no more, so a message written
+as a paragraph is as valid as one written as an outline and renders correctly either way. Three
+surfaces render it: `comment_format` builds greenlight's own comment as the verdict is recorded,
+`torchci/lib/greenlight/greenlightRender.ts` rebuilds Dr. CI's Green Light section from the stored
+row on every sweep, and `torchci/components/greenlight/GreenLightSection.tsx` shows that same row
+in the HUD's Green Light panel. The two comment surfaces emit markup, held by the raw HTML block
+described below. The panel emits none. `selectMessageView` in
+`torchci/lib/greenlight/greenlightHudState.ts` picks which of the two paths below a message takes,
+and `torchci/components/greenlight/GreenLightOutline.tsx` draws the list from the same parse the
+serializer reads — `parseOutline` in `torchci/lib/greenlight/greenlightOutline.ts`, which
+`renderOutlineHtml` serializes. A string handed to React as a child becomes a text node rather
+than markup, and that is the containment there, in place of the block. Two render paths are live,
+chosen per message rather than per deployment:
+
+- **Outline** — a message carrying at least two bullets with text after their markers becomes a
+  raw HTML `<ul><li>` block, every leaf HTML-escaped. Two rather than one because a paragraph
+  holding a single bullet-shaped line is still a paragraph, and routing it here would show the
+  reader one leaf clipped at 400 characters where the fence shows the whole message. Raw HTML
+  because CommonMark runs no inline parsing inside a type-6 HTML block: escaped text there cannot
+  open a tag, close the enclosing `<details>`, start a heading or a table, or autolink a bare URL
+  or email address — the last of which markdown escaping cannot prevent at all, since even a fully
+  backslash-escaped address still autolinks. The containment is positional as much as textual. The
+  block is emitted at column 0 with a blank line ahead of it and holds no line break anywhere
+  inside, because an indent stops CommonMark reading it as raw HTML and a blank line ends the
+  block, handing the rest of the comment back to the markdown parser.
+- **Fence** — a message with fewer than two bullets, any outline whose leaves all flatten away,
+  and one whose first item alone overruns the block budget, go out in a backtick code fence,
+  capped at the same 4,000 characters. This is the render
+  for prose, not a fallback from a failed one: nothing enforces the outline shape, so a paragraph
+  is a valid verdict, and it reads better fenced than forced into a one-item bullet list. Stored
+  rows keep the path alive independently of that — Dr. CI's query carries no time filter, and the
+  scan writes no newer row once a PR is human-decided, ages out of the review window, or is
+  labelled `Stale`, so a verdict recorded before the outline format existed re-renders unchanged
+  for as long as its PR stays open.
+
+Five bounds hold the outline block down: the message is read to 4,000 characters, each leaf
+clipped to 400, each topic held to 8 details, the block to 12 topics, and the finished markup to a
+12,000-character budget. Both character caps run *before* escaping, because escaping inflates text
+up to sixfold and capping after it would let a sixth of the message through. All five mark where
+they cut — a clipped leaf ends in an ellipsis, and a dropped detail, a dropped topic, an item the
+budget turned away or a message read past 4,000 characters each leave a `(truncated)` entry — so a
+reader never takes a cut list for a complete one. A bullet past 4,000 characters still neither
+reaches the block nor decides the route, since the two-bullet format test reads the same prefix the
+renderer does. The block budget is there because nothing downstream bounds the body —
+`torchci/lib/drciUtils.ts` hands the whole Dr. CI comment to `updateComment` with no length guard,
+and this section is one part of that body. What ceiling GitHub enforces on it is not established:
+Dr. CI comments well past 65,536 characters are live on `pytorch/pytorch` today. The 12,000 is a
+bound greenlight puts on its own contribution, not a measured limit.
+
+Four of those five act on the outline's structure rather than on finished markup, so every surface
+carries them. The block budget is not: it measures finished markup, and the panel produces none.
+Two things follow from that, and only the second is a change of shape. Where the budget stops a
+later item, the comments drop the topics behind it and mark the cut, while the panel shows them all
+and marks nothing for that reason — though a message heavy enough to reach the budget may
+separately have run past the 4,000-character cap or the twelve-topic clamp, either of which puts a
+`(truncated)` entry on the panel's list anyway, standing for what those clamps cut rather than for
+the topics the budget dropped. Where the first item alone overruns it, `renderOutlineHtml` produces
+nothing and the comments fall through to the fence, while the panel still shows a bullet list — a
+difference in shape, not just a missing marker.
+
+Neither is reachable by an ordinary verdict, and how close one comes depends on its shape as much
+as its length, so every figure below states the shape it was measured on. The largest message the
+reviewer skill's own format admits — four topics of three details, every bullet at its
+200-character ceiling, a 27-character backticked path and a 10-character backticked symbol in each
+— is 3,271 characters and renders 3,769 of markup. Filling the 4,000-character cap takes a shape
+the skill never asks for, and buys little: the widest list the clamps allow, twelve topics of eight
+details, renders 4,658 in plain prose, because escaping is what inflates text sixfold and ordinary
+prose has almost nothing to escape. Density is what moves this number rather than length — two
+ten-character code spans in each of those 108 bullets, three quarters of a line only thirty-two
+characters long, render 7,034 out of the same 4,000 characters.
+
+Crossing 12,000 takes a density no verdict has reason to reach, and how far past depends on which
+character inflates. Only `"` and `'` escape to six characters: on that twelve-by-eight shape the
+renderer first drops an item when 1,471 of the 4,000 characters are one of those two; `&` escapes
+to five and needs 1,838, and `<` and `>` escape to four and need 2,451. Each of those is a floor
+rather than a fixed point, because twelve topics of eight details is the layout that starts from
+the most markup of any that fills the cap — every other one needs more of the character to get
+there. Twelve topics of no details, also filled to the cap, needs 1,569. Below about ten bullets no
+single figure is worth quoting: a cap-filled message gives each leaf more than 400 characters, so
+the leaf cap clips every one of them, and how many of the substituted characters fall inside the
+surviving prefix rather than the discarded tail depends on where the word breaks land — enough to
+move the floor by a couple of hundred between constructions that answer to the same description.
+
+The other route holds none of the five escaped characters at all — one-character code spans, where
+`<code>x</code>` turns three characters into fourteen, each separated from the next by a non-space
+character. The separator is load-bearing: the backticks between two adjacent spans form a single
+maximal run, so ``` `a``b` ``` leaves an odd run count and the whole leaf goes out as literal text
+with its backticks showing, while ``` `a``b``c` ``` renders `a` and `c` as spans and `b` as prose
+between them. Filled that way, twelve topics of eight details reach 14,162 measured with the budget
+lifted — against the 11,828 the renderer actually emits, being ten topics and the marker — and a
+single topic with seven details, each filled to the 400-character leaf cap, reaches 12,097, enough
+that `renderOutlineHtml` returns nothing at all and the message goes out fenced.
+
+The panel's message block sits outside its status switch, while `greenlightRender.ts` renders a
+message only for `LAND` and `NO_LAND`. Nothing reaches the panel through that gap, because no other
+status can carry a message: `verdict` returns an empty reason and message for every marker status,
+whether the status came from the CLI or from a verdict file, and the scan's own `REVERTED` and
+`AI_REVIEW_DISPATCHED` rows are emitted with the field hardcoded empty. The outline path therefore
+runs on the panel for exactly the two statuses it runs on in the comments.
+
+Neither path lets a verdict ping a person or issue a bot command, but they arrive there
+differently. The fence replaces every `@` unconditionally, and that one replacement stops both.
+The outline guards `@` in text segments only, deliberately skipping code spans: `code` is in
+GitHub's `MentionFilter.IGNORE_PARENTS`, so an `@` inside one pings nobody, while a zero-width
+space inserted there would corrupt a path or a sha the reader copies out. What stops a bot command
+on that path is positional — `torchci/lib/bot/cliParser.ts` matches
+`/^ *@pytorch(merge|)bot .+$/m` against the raw comment body, which is line-anchored and admits
+only ASCII spaces before the `@`, and the whole outline is a single line opening `<ul>`. In
+those same text segments the outline also guards issue, `GH-` and commit-sha references, which
+GitHub would otherwise turn into cross-references and backlinks on unrelated issues. Dr. CI's
+renderer breaks, on both paths, the literals its own re-render sweep greps the comment body for: a
+verdict that merely mentions a pending job count would otherwise pin its PR into every sweep
+forever.
+
+The panel applies none of that, because none of those consumers reach it: it is a web page rather
+than a comment body, so GitHub's filters never see it, `cliParser.ts` never parses it, and the
+sweep greps neither it nor the table it reads. Dropping the guards there is a correctness gain and
+not a shortcut. Every one of them works by splicing an invisible zero-width space into the token
+it defuses — after each `@`, after a `#` or `gh-` that precedes a digit, after the opening colon
+of anything shortcode-shaped, which catches every `file.py:1234` written outside a code span — and
+it splits each 40-hex sha in two at column 20. All of that survives a copy, on a page whose whole
+job is showing commits and the paths they touch.
+
+One divergence runs the other way. The panel draws the `(truncated)` marker a clamp leaves behind
+in italic and a dimmer colour, so a leaf the model wrote reading `(truncated)` cannot pass for one
+the renderer added: the model authors text, never a presentation. In both comments that marker is
+an ordinary `<li>` and the two are indistinguishable. The panel and the comments therefore render
+one row deliberately differently, and nothing should assert the two agree.
+
+The escaper is written twice — `verdict_outline.py` and
+`torchci/lib/greenlight/greenlightOutline.ts` — because one stored row is rendered into a comment
+by a Python surface and a TypeScript one that have to agree character for character. Python is the
+source of truth, and three gates hold the mirror together:
+`greenlight/tests/outline_parity_cases.json`, a shared corpus both test suites assert identical
+output against; a literal scrape in `greenlight/tests/test_verdict_outline.py`, which also fails
+either implementation for using `\s`, `\d`, `\w` or `\b`, since each matches a different set of
+characters in the two languages; and `greenlight/tests/test_render_sync.py`, which fails when
+either side stops routing both formats.
+
+### Who posts the status comment
+
+Every status the `verdict` command records — reviewing, did-not-complete, LAND, NO_LAND —
+goes into one canonical greenlight comment, upserted in place, unless Dr. CI is showing that
+state instead. Delegating it to Dr. CI takes one condition: the repo must be in
+`constants.DRCI_STATUS_COMMENT_REPOS` (today only `pytorch/pytorch`). Then the upsert is skipped
+entirely, because Dr. CI already renders the same state from the emitted row inside its own
+comment and two comments saying the same thing is worse than one. The `LAND` approving review
+and the `NO_LAND` dismissal are the merge gate and are unaffected on every repo. Only the status
+comment is delegated: the scan's `@greenlight recheck` refusal (its own marker, see "Rechecking
+a PR") is still posted by greenlight on every repo, `pytorch/pytorch` included.
+
+The two surfaces are wired by separate allowlists that must agree: greenlight suppresses on
+`constants.DRCI_STATUS_COMMENT_REPOS`, and the HUD renders on `GREENLIGHT_REPOS`
+(`torchci/lib/greenlight/greenlightConfig.ts`). A repo in the first but not the second is
+auto-approved by the merge gate with its status shown nowhere, so add and remove repos in both
+at once; `greenlight/tests/test_render_sync.py` fails when the two lists drift apart.
+
+Delegating also widens what the PR shows, because Dr. CI renders from the state row rather than
+from the `verdict` command's calls. Two states that never had a comment surface now get one:
+`AI_REVIEW_DISPATCHED`, written straight to S3 by the scan the moment it dispatches, and an
+`AI_REVIEW_STARTED` row older than the in-flight window, which renders as "did not complete"
+with reason `stalled` instead of claiming a review is still running.
+
+Dr. CI otherwise rebuilds that comment only on a 15-minute sweep, and its probot handler
+blanks the results section on every push — so a just-pushed or just-reviewed PR would show
+nothing for up to a quarter of an hour. The `drci-poke` subcommand closes that window by
+asking the endpoint to rebuild one PR's comment now:
+
+```bash
+PYTORCH_GREENLIGHT_DRCI_TOKEN="$DRCI_BOT_KEY" just run drci-poke --pr 123
+```
+
+It waits `PYTORCH_GREENLIGHT_DRCI_POKE_DELAY_SECONDS` (default 10) first, because Dr. CI reads
+the state from ClickHouse and the row has only just been handed to the S3 -> replicator path.
+It swallows every failure: by the time it runs the merge gate has already fired and the row is uploaded,
+so failing would only turn the job that gates auto-landing red over a cosmetic refresh — and
+the sweep still backstops a lost poke. The reviewer workflow runs it from both the
+`announce_start` and `record` jobs, right after each uploads its row, with
+`continue-on-error: true`. The scan pokes for its own `AI_REVIEW_DISPATCHED` row too, calling
+`drci_poke.poke` in-process after each successful marker emit — with the delay forced to zero,
+because that delay covers the reviewer workflow's gap between writing the row to `/tmp` and a
+later step uploading it, whereas the scan has already put the object to S3 before it pokes.
+A failed emit is not poked: rebuilding the comment then would only re-render the state the
+marker was meant to replace.
+
+The scan's pokes are fire-and-forget. Each one is handed to a small background pool
+(`drci_poke.POKE_WORKERS`, 8 threads named `greenlight-poke`) and the scan moves straight on to the
+next PR, so a slow or hung Dr. CI costs the scan nothing but the outcome is still logged. Nothing
+reads a poke's result, and a poke that fails — including one the pool refuses to schedule — is
+logged and dropped rather than counted against the scan.
+
+The pool is entered on the scan's `ExitStack`, so `review.run` drains it on the way out. That drain
+runs to completion only where no per-iteration timeout is armed, which is the case that actually
+matters: under Lambda a thread left running is frozen the instant the handler returns and would
+thaw inside a later invocation, and the Lambda disables both hang guards. Under `--loop` or a
+local one-shot the SIGALRM soft timeout can land inside the pool's `shutdown(wait=True)`, interrupt
+the join, and propagate out of the block. The executor is not shut down with `cancel_futures`, so
+the queued pokes are not dropped — they keep running on non-daemon threads and log their outcomes
+into whatever runs next.
+
+The command writes the gzipped row to `/tmp/greenlight-verdict-row.json.gz` and its
+bucket-relative key to `/tmp/greenlight-verdict-key.txt`; the workflow `aws s3 cp`s the
+former to the latter. There is no direct ClickHouse write, so no `CLICKHOUSE_*` credentials
+are needed here; `verdict` needs `PYTORCH_GREENLIGHT_GITHUB_TOKEN` to post `LAND`/`NO_LAND`,
+and `--dry-run` needs nothing. `--bot-login` (the greenlight GitHub App's `<slug>[bot]`
+account) is required for `NO_LAND`.
+
+Configuration is read from the environment via `PYTORCH_GREENLIGHT_*` variables, plus the
+unprefixed `BOT_LOGIN`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BOT_LOGIN` | unset | The App's own `<slug>[bot]` login. Author-scopes the `--pr` recheck-refusal comment, and picks out greenlight's own approvals to revoke on a reverted or ineligible PR. Must be App-shaped when set; either revocation refuses the whole scan without it |
+| `PYTORCH_GREENLIGHT_GITHUB_TOKEN` | unset | GitHub token used by `review` and `verdict`; `review` needs Actions: write (`workflow_dispatch`) on `pytorch/test-infra`, PR write on `pytorch/pytorch` (to revoke its approval on a reverted or ineligible PR and to set the `GL/*` labels), and org Members: read (`read:org`) to expand `merge_rules.yaml` team refs; `verdict` needs PR write (its approval, dismissal and `GL/*` label), plus Contents: read on `pytorch/pytorch` and Members: read on the `pytorch` org for its merge-rule check |
+| `PYTORCH_GREENLIGHT_INTERVAL_SECONDS` | `60` | Seconds between iterations in `--loop` mode |
+| `PYTORCH_GREENLIGHT_LOG_LEVEL` | `INFO` | Logging level (e.g. `INFO`, `DEBUG`) |
+| `PYTORCH_GREENLIGHT_LOCK_PATH` | unset | Lock file path guarding against concurrent runs (unset = no lock) |
+| `PYTORCH_GREENLIGHT_MAX_RUNTIME_SECONDS` | `600` | Per-iteration hard cap on runtime (`0` = disabled) |
+| `PYTORCH_GREENLIGHT_BACKOFF_BASE_SECONDS` | `1` | Base backoff after a failed iteration (daemon mode) |
+| `PYTORCH_GREENLIGHT_BACKOFF_MAX_SECONDS` | `60` | Maximum backoff between retries (daemon mode) |
+| `PYTORCH_GREENLIGHT_MERGE_RULES_TTL_SECONDS` | `600` | How long the scan caches a resolved `merge_rules.yaml` snapshot — the authorized-login set and the rules its eligibility checks read — before refetching. The verdict is outside this cache and re-reads the rules for each `LAND`/`NO_LAND` recorded without `--shadow` |
+| `PYTORCH_GREENLIGHT_REVIEW_WINDOW_HOURS` | `24` | `review` skips a PR whose `updated_at` is older than this many hours, unless it has an in-flight or retry-eligible (cancelled/failed) review to re-check; a fast tick's walk stops at the same edge |
+| `PYTORCH_GREENLIGHT_DRCI_POKE_DELAY_SECONDS` | `10` | How long `drci-poke` waits for the emitted row to reach ClickHouse before requesting the rebuild (`0` = no wait). Does not apply to `review`'s own dispatch poke, which always waits zero |
+| `PYTORCH_GREENLIGHT_DRCI_TOKEN` | unset | Dr. CI endpoint key used by `drci-poke` and by `review`'s dispatch poke, sent as a raw `Authorization` value (the `DRCI_BOT_KEY` secret); unset skips the poke |
+| `PYTORCH_GREENLIGHT_DRCI_INTERNAL_TOKEN` | unset | Optional `x-hud-internal-bot` header value for either poke (the `HUD_API_TOKEN` secret). Not an endpoint credential — Dr. CI authenticates on `Authorization` alone; this clears HUD's bot challenge, the same pairing `update-drci-comments.yml` already sends |
+| `PYTORCH_GREENLIGHT_MAX_DISPATCHES_PER_SCAN` | `30` | Read only by the `greenlight-scan` Lambda handler, which passes it through as `review --max`; every other path takes the `--max` flag instead. Caps how many PRs one scheduled pass dispatches so the pass fits the 300 s function timeout — the practical ceiling is roughly 30 at the slow end of the dispatch cost and roughly 50 at the fast end (see Deployment). `0` is a pause switch: the scan still lists its candidates, reads their state, revokes its approval on a reverted or ineligible PR, and runs its [`GL/*` label pass](STATUS_LABELS.md), but the capped fan-out stops before submitting anything, so nothing is fingerprinted afresh or dispatched. Must be a non-negative integer; blank or unset is the default, and the ceiling is documented rather than enforced |
+
+`review` additionally reads ClickHouse — any scan that finds at least one cohort
+PR looks up `misc.greenlight_pr_state` — via the standard `CLICKHOUSE_*` connection
+variables (`CLICKHOUSE_HOST` or its `CLICKHOUSE_ENDPOINT` alias, `CLICKHOUSE_USERNAME`,
+`CLICKHOUSE_PASSWORD`, and `CLICKHOUSE_PORT`, default `8443`).
+
+`PYTORCH_GREENLIGHT_MAX_RUNTIME_SECONDS` (default `600`, `0` = disabled) bounds every iteration in
+both one-shot and `--loop` mode — `runner._bounded_iteration` is shared by `execute_once` and
+`run_forever`, so a plain local `greenlight review` arms both guards too. The scheduled Lambda is
+the only path that runs without them, setting `PYTORCH_GREENLIGHT_MAX_RUNTIME_SECONDS=0`.
+
+Neither guard bounds the scan's Dr. CI pokes. Those run on the background pool, and the soft
+timeout is a SIGALRM delivered to the main thread only. Where the guards are off, the drain simply
+runs to completion, and because `shutdown(wait=True)` waits out the whole queue rather than only
+what is in flight, its worst case is `ceil(queued / workers)` rounds of `drci_poke`'s connect plus
+read timeout (10 s + 30 s per round, and the connect timeout does not bound DNS) — not one poke's
+40 s. Where they are on, a SIGALRM landing in that drain aborts the iteration instead; the queued
+pokes survive it, as above. In `--loop` mode, SIGTERM/SIGINT are observed only between iterations,
+so the per-iteration timeout is what interrupts a hung run.
+
+## Deployment
+
+In production the scheduled scan runs as an AWS Lambda, `greenlight-scan`, in the
+`pytorch-gha-infra-2` account (`us-east-1`), triggered by an EventBridge `rate(5 minutes)`
+schedule. The function runs `python3.13` with handler `greenlight.lambda_handler.handler`, a
+300 s timeout, and `reserved_concurrent_executions = 1`. It runs the same one-shot
+`execute_once` / `review.run` path as `greenlight review` — no scan-logic change — after minting a
+least-privilege GitHub App installation token in-process, resolving `BOT_LOGIN` from the App's own
+`GET /app` slug, and reading the App PEM and ClickHouse
+password from AWS Secrets Manager (`pytorch-greenlight-secrets`) at runtime. The handler sets
+`PYTORCH_GREENLIGHT_MAX_RUNTIME_SECONDS=0`, so it runs with no single-instance lock and both
+hang-guard layers off (the SIGALRM soft timeout and the `os._exit` hard watchdog, which is wrong
+under the Lambda runtime); single-instance and hang-bounding come from
+`reserved_concurrent_executions = 1` and the Lambda function timeout instead. A warm execution
+environment keeps the scan's tick memory, kept fingerprints included, between invocations, so the
+Lambda alternates full and fast ticks; a CLI one-shot always lists in full (see Usage). The scan's
+GitHub token must be able to list the repository's issues (`GET /repos/{owner}/{repo}/issues`,
+through public read access or the Issues: read permission); if it cannot, every fast tick fails
+loudly while full ticks still run.
+
+The handler caps each pass at `--max 30` (`_DEFAULT_MAX_DISPATCHES_PER_SCAN`, changeable on the
+function through `PYTORCH_GREENLIGHT_MAX_DISPATCHES_PER_SCAN` without a redeploy), and
+`greenlight-review.yml`'s `max` input defaults to the same 30. A dispatch costs 3-8 s of serial
+main-thread work, so an uncapped pass over the whole evaluation cohort would both run the Lambda
+out of its 300 s clock and fire an unbounded burst of `workflow_dispatch` POSTs on one token —
+what GitHub's secondary rate limit punishes hardest. Deferring is free: no state row is written
+for a PR the cap never reaches, so the next scan that lists it re-evaluates and dispatches it.
+
+The cap also has to cover the poke drain, which is what actually sets the pass's worst case. Taking
+every one of the 30 pokes to `drci_poke`'s full 40 s timeout, across 8 pool workers, against the
+3-8 s dispatch gap `D`:
+
+| `D` | Poke queue | Dispatch phase | Residual drain | Total |
+| --- | --- | --- | --- | --- |
+| 3 s | grows: pokes arrive faster than 8 workers retire them | 87 s | 88 s | 175 s |
+| 5 s | balance point — arrivals match the 8-worker service rate | 145 s | 40 s | 185 s |
+| 8 s | never queues | 232 s | 40 s | 272 s |
+
+At the slow end that leaves about 28 s of the 300 s function timeout for the rest of the pass — the
+PR listing, the ClickHouse state read, the revert guard, and the fingerprint fan-out — so 30 is
+close to the practical ceiling there. At the fast end the same arithmetic puts the ceiling near 50.
+`_max_dispatches_from_env` enforces neither: it validates non-negative and nothing more, so a cap
+set above that range buys extra dispatches at the price of a pass killed mid-flight.
+
+For proportion, the alternative is far worse: taking those same 30 pokes serially in-line, one
+worst-case 40 s each on top of the dispatch gap, puts the pass at roughly 1290-1440 s. The drain is
+a bound worth stating, not a cost the pool introduced.
+
+The scan's Dr. CI poke needs `PYTORCH_GREENLIGHT_DRCI_TOKEN` (and optionally
+`PYTORCH_GREENLIGHT_DRCI_INTERNAL_TOKEN`) wherever the scan runs: the Lambda reads both from its
+function environment, provisioned by the gha-infra terraform, and the manual /
+`@greenlight recheck` entry point (`greenlight-review.yml`) passes them from the `DRCI_BOT_KEY`
+and `HUD_API_TOKEN` secrets. Without the token every poke logs a warning and no-ops, leaving the
+`AI_REVIEW_DISPATCHED` state to surface on Dr. CI's 15-minute sweep — the scan itself still
+succeeds.
+
+The zip ships in test-infra's shared lambda release alongside every other lambda:
+
+1. `just package` builds `dist/greenlight-scan.zip` (linux x86_64 / cp313 wheels); the
+   `build-greenlight-lambda` job in `_lambda-do-release-runners.yml` runs the same recipe.
+2. Any push to `main` touching `greenlight/**` makes `lambda-release-tag-runners.yml` cut a
+   `v<timestamp>` tag, which publishes one GitHub Release carrying `greenlight-scan.zip` next to
+   the other lambda zips. `workflow_dispatch` on that workflow cuts a release on demand.
+3. An operator pins that release tag in `pytorch-gha-infra-2`'s `runners/common/Terrafile` (the
+   `greenlight-scan` entry).
+4. `terraform apply` in `runners/regions/us-east-1` rolls it out.
+
+The greenlight build leg is `continue-on-error`, so a broken package step omits
+`greenlight-scan.zip` from the release rather than blocking the other lambdas — check that the
+asset is present before pinning a tag.
+
+Create the [`GL/*` labels](STATUS_LABELS.md) in `pytorch/pytorch` before merging code that writes them.
+
+## Reviewer checkout sanitizing
+
+The reviewer workflow (`greenlight-pr-review.yml`) checks the PR's `pytorch/pytorch` tree
+out under `./pytorch`, which is untrusted: a PR could plant AI-assistant instruction files
+that Claude Code auto-loads as steering — its own `CLAUDE.md`, `CLAUDE.local.md`, and
+`.claude/rules`, plus defense-in-depth `AGENTS.md`, `.cursorrules`, and
+`.github/copilot-instructions.md` — and thereby override the reviewer's task. Two layers,
+both before the model runs and neither ever `continue-on-error`, close this off:
+
+- **Sanitize, restore skills only** — `sanitize-untrusted-checkout.sh` strips every such
+  instruction file from `./pytorch`, then restores only `.claude/skills/` from a separate
+  sparse checkout of trusted pytorch `main`. The model then runs with none of the PR's
+  steering loadable, so it judges pytorch PRs code-only and does not auto-load pytorch's own
+  `CLAUDE.md` conventions as context. A PR's edits to these files still appear in the reviewed
+  diff (`/tmp/greenlight-pr.diff`, produced by `gh api` compare) and are reviewed as data. The
+  forbidden-name set is single-sourced in the script and must be re-verified on any
+  `claude-code-action` / Claude Code CLI bump (last verified CLI 2.1.169 / action v1.0.141).
+- **Deny-root runtime detector** — `assert-loaded-instructions.py` reads the manifest an
+  `InstructionsLoaded` hook records plus a `SessionStart` sentinel, and fails the review job
+  if any instruction file loaded from under `./pytorch`, or if the hooks never ran. It runs
+  `if: always()` before any verdict handoff, so a poisoned-but-successful model run is still
+  caught; because `record` gates LAND/NO_LAND on `review` success, a failed review records
+  only a FAILED marker, never a LAND.
+
+Both scripts live at `.claude/hooks/greenlight/`, alongside the reviewer's existing
+`restrict-read.py` (read-path guard), `restrict-write.sh` (write-path guard),
+`validate-on-stop.sh` (verdict-schema guard), and `budget-reminder.sh` (advisory
+time-budget nudge, see below).
+
+The detector depends on the hooks firing, so the first live dispatch must confirm the
+`SessionStart` and `InstructionsLoaded` hooks actually fire under the pinned
+`claude-code-action` — the detector fails closed if they do not, surfacing a misfire as a
+failed review rather than a silent gap.
+
+Two further controls narrow the residual data-exfiltration gap — a data-injection payload in
+the diff or tree coaxing the model to read a credential and emit it in the verdict — though
+both are best-effort defense-in-depth, not guarantees:
+
+- **Read confinement** — a `restrict-read.py` PreToolUse hook confines the model's
+  `Read`/`Glob`/`Grep` by `os.path.realpath` to `./pytorch`, the trusted `.claude/skills` and
+  `.claude/hooks`, and the `/tmp/greenlight-*` scratch files, denying everything else (the OIDC
+  credentials under `/proc`, the `$GITHUB_ENV` file, `./pytorch/.git`). `persist-credentials: false`
+  on the `./pytorch` checkout additionally keeps the scoped token out of `./pytorch/.git/config`.
+- **Message scrubbing** — the verdict `message` is secret-scrubbed at a single fan-out point
+  before it reaches both the posted comment and the `misc.greenlight_pr_state` row, so a message
+  Dr. CI later renders back out of that row is scrubbed too (either comment additionally contains
+  the message's own formatting and @-mentions, through whichever of the two render paths its
+  format selects — see "How the verdict message is rendered"). Nothing bypasses the scrub by
+  being long: text past the input
+  cap is dropped rather than left unread, and the cap retreats to a whitespace boundary — the one
+  cut point that cannot fall inside a credential value — so the run it would otherwise sever is
+  redacted whole. A message with no whitespace to retreat to keeps its run minus any
+  credential-shaped tail.
+
+An oversized diff is also declined before the model runs: the reviewer gates on line count (the
+model's ~2000-line read window) with a byte-size backstop, and on a 200-file cap
+(`constants.MAX_DIFF_FILES`), emitting a `scope_too_large` NO_LAND. That canned verdict is written
+as an outline, so the declined PR shows the same shape of comment a reviewed one does.
+
+### Review time budget
+
+The reviewer has no Bash and so no clock; the workflow paces it. `greenlight-pr-review.yml` is the
+source of truth for the budget, declaring `GREENLIGHT_REVIEW_TARGET_BUDGET_MIN` (today 20 minutes),
+`GREENLIGHT_REVIEW_SOFT_BUDGET_MIN` (25) and `GREENLIGHT_REVIEW_HARD_BUDGET_MIN` (33), all clear of
+the model step's 37-minute timeout; the step immediately before the model step resolves them to
+absolute epochs in `$GITHUB_ENV`, and is skipped on the oversized-diff path above.
+`budget-reminder.sh` pushes the current tier to the model as `hookSpecificOutput.additionalContext`
+on `PostToolUse`, rate-limited through `$RUNNER_TEMP/greenlight-budget-reminder-last` to one nudge
+per `GREENLIGHT_REVIEW_REMINDER_INTERVAL_SEC` (180s), or per `GREENLIGHT_REVIEW_URGENT_INTERVAL_SEC`
+(60s) in the final tier, while the tier holds — escalating to a higher tier always nudges
+immediately, so a crossing never inherits the previous tier's cooldown. Tier 1 additionally stays
+silent for the first half of the target window (10 minutes today): the state file starts absent, so
+without that floor every run would nudge on its first tool call, and a review that finishes inside
+the floor sees no reminder at all. Neither interval is set by the workflow, nor is
+`GREENLIGHT_REVIEW_VERDICT_FILE` (default `/tmp/greenlight-verdict.json`),
+which the final tier stats to tell a verdict still due from one already written. The hook is
+advisory and always exits 0, but the final tier is not cosmetic: past the hard deadline the skill
+has the model decide on what it knows, NO_LAND if a critical question is still open — a review
+criterion it never examined counts as one — and LAND if only nits remain.
+
+## Current status
+
+Works today: the CLI runs the `review` phase once (cron-like) or as a `--loop` daemon, with a
+single-instance lock, a per-iteration soft timeout plus a hard watchdog, backoff on failure, and
+clean signal shutdown — all built and tested. `review` scans the open PRs from the evaluation cohort
+in `pytorch/pytorch`, computes each PR's fingerprint (`eval_hash`), reads the PR's latest recorded
+state from `misc.greenlight_pr_state`, and dispatches the reviewer workflow
+(`greenlight-pr-review.yml` on `pytorch/test-infra`) for eligible PRs that are new or changed. It
+lists every open PR on a full tick, and on the fast ticks in between only the recently updated ones
+plus the open `Reverted`-labelled ones, reusing the fingerprint of a PR unchanged since an earlier
+tick (see Usage). Reverted PRs — those carrying the `Reverted` label or with a `REVERTED` row
+already recorded — are excluded permanently on every path: greenlight revokes its own approving
+review, records the `REVERTED` row unless it is already the PR's latest row, and pokes Dr. CI when
+either changed. The exclusion survives removal of the label, and `@greenlight recheck` is not exempt
+(it is skipped silently). A listed ineligible PR inside the review window and not labelled `Stale`,
+whose latest recorded row is a `LAND`, has greenlight's approval dismissed, with nothing recorded or
+dispatched. Both paths write to `pytorch/pytorch`, so `review` needs PR write and the App's
+`BOT_LOGIN`. Draft PRs are dropped from the listing scan entirely — never fingerprinted or
+dispatched — though an explicit `@greenlight recheck` (the `--pr` path) still reviews a draft. PRs
+whose `updated_at` is older than the review window (`PYTORCH_GREENLIGHT_REVIEW_WINDOW_HOURS`,
+default 24), or that carry the `Stale` label, are skipped without fingerprinting unless a review is
+in-flight or retry-eligible (cancelled/failed); an explicit `@greenlight recheck` (the `--pr` path)
+reviews such a PR regardless. PRs a human has already decided — approved by a merge-authorized login
+(bots excluded) or with changes requested by any non-bot reviewer — are also skipped without
+fingerprinting, and no state is written, so the scan resumes if that changes. An `AI_REVIEW_STARTED`
+marker is treated as an in-flight review and left alone until the `--timeout-minutes` window
+(default 45) elapses. The listing scan also supersedes and restores
+[`GL/*` labels](STATUS_LABELS.md). `review` requires `PYTORCH_GREENLIGHT_GITHUB_TOKEN`, and any scan
+with at least one PR reads ClickHouse (`CLICKHOUSE_*`).
+
+Also works: the reviewer workflow's `announce_start` job emits the `AI_REVIEW_STARTED`
+marker at run start; the `verdict` subcommand emits a PR-review verdict row (with the
+passed-in `eval_hash` verbatim) for the record workflow to upload to
+`s3://gha-artifacts/greenlight_pr_state/`, where the clickhouse-replicator-s3 path ingests
+it into `misc.greenlight_pr_state`; for LAND/NO_LAND it also acts on the PR — approve, or
+dismiss greenlight's prior approval — and sets its `GL/*` label unless shadow. A shadow verdict is
+never approved and always dismisses. `verdict` is a one-shot call for a privileged CI job and never
+writes ClickHouse directly. The `drci-poke` subcommand asks Dr. CI to rebuild one PR's comment,
+which is where the status is shown on the repos that delegate it. The service reads ClickHouse via
+`clickhouse_client.connect()` for both the review scan and its other SELECTs.
+
+`misc.greenlight_pr_state` is append-only-equivalent: it keeps its `SharedReplacingMergeTree`
+engine, but no verdict emit is ever collapsed because the sort key
+`(repo, pr_number, run_id, emit_id)` ends in a per-emit UUID (`emit_id`) that no two rows
+share. greenlight picks the authoritative row per PR at read time by highest `run_id`, then
+latest `version` (`state.read_latest_states`). Ordering by `run_id` before `version` is
+race-proof — a superseded slower dispatch that finishes with a later `version` still loses to
+the newer dispatch's higher `run_id`. Each emitted row carries those `run_id` and `emit_id`
+columns, added by a single in-place `ALTER` (`greenlight/sql/004`) that also extends the sort
+key — no new table, backfill, or `EXCHANGE`. At go-live that DDL and the
+clickhouse-replicator-s3 Lambda adapter must land together, since a schema skew between them
+drops rows.
+
+### Land-time verification
+
+The land-time gate lives on `pytorch/pytorch`, not in this repo. `.github/scripts/greenlight_guard.py`,
+called from `trymerge.py`, decides on every merge whether the commit about to land is one
+greenlight actually reviewed; `.github/scripts/greenlight_ledger.py` is the client that reads the
+recorded state, and `.github/scripts/greenlight_preflight.py` refuses early on PRs greenlight
+will never produce a verdict for at all.
+
+The ledger is read over HTTP from `https://hud.pytorch.org/api/greenlight/pr_state`, not by a
+direct ClickHouse query — the merge path holds no ClickHouse credentials. Row selection lives
+server-side in that route and mirrors `state.read_latest_states` (highest `run_id`, then latest
+`version`, `LIMIT 1 BY pr_number`), with one deliberate divergence: the route also filters
+`shadow = false`, so a shadow evaluation is invisible to the gate.
+
+The gate keys on `head_sha`, not on `eval_hash` — it compares the head SHA greenlight recorded
+against the PR's current head, both required to be full 40-hex shas so that two empty strings
+cannot compare equal and wave a merge through. The recorded `eval_hash` is not read back at land
+time. The gate also engages only where it is load-bearing: greenlight must be among the PR's
+approvers *and* no merge rule may still authorize the PR once greenlight's approval is dropped.
+On a match it allows a `LAND` and refuses a `NO_LAND` or `REVERTED`; on a SHA mismatch, a missing
+row, or a review still in flight it waits, up to a 60-minute budget, and refuses once that is
+spent. An unreadable ledger gets its own, much shorter 15-minute budget — that one buys the route
+time to recover, not a review time to finish. The [`GL/*` labels](STATUS_LABELS.md) follow this gate.
+
+Looking state up by `(repo, pr_number)` and comparing the head SHA is what stops one PR's
+approval replaying onto another; a lookup by `eval_hash` alone could not, because the fingerprint
+deliberately omits both repo and PR number.
+
+The fingerprint itself covers only comments authored by `pytorch/pytorch`'s merge-authorized
+set — every `approved_by` login in `.github/merge_rules.yaml`, with team refs expanded to members
+(see `merge_authz`). `greenlight_preflight.py` mirrors that same flat, lowercased, all-rules union
+when it judges whether a human approval has already put the PR out of greenlight's reach, and it
+must not reuse pytorch's own `trymerge.py` authorization check, which is case-sensitive and scoped
+to the rules whose file patterns match a single PR. Drift between the two costs a merge a full
+wait for a verdict that was never coming, or refuses a PR greenlight would in fact have reviewed.
+A login entering or leaving the set changes the fingerprint only of the PRs where that login has
+commented, but the next tick refetches every PR's fingerprint: the set is part of each kept result's
+key (see Usage).
+
+## Development
+
+```bash
+just lint        # ruff, markdownlint, shellcheck, shfmt, yamllint, taplo
+just lint-fix    # auto-fix what the linters can
+just typecheck   # mypy (strict)
+just test        # pytest + coverage (>=97%)
+```
+
+All gates must pass before a change is complete.
+
+## Layout
+
+```text
+src/greenlight/
+  __init__.py      # package exports (Config, __version__)
+  __main__.py      # `python -m greenlight` entry point
+  cli.py           # CLI parsing (review + verdict + drci-poke subcommands), dispatch, exit codes
+  lambda_handler.py # AWS Lambda entry point: load secrets, mint App token, run one review scan via cli.main
+  runner.py        # run_forever(): resilient daemon loop; execute_once(): one-shot phase run
+  review.py        # scan evaluation-cohort PRs: fingerprint, read state, dispatch reviewer workflow for new/changed, run the GL/* label pass; raises on failure
+  pr_listing.py    # list the scan's open PRs: a full listing, or a fast one (recently updated, plus open Reverted-labelled PRs)
+  scan_memory.py   # what a process carries between listing scans: when the last full tick that completed started, and the fingerprint results a fast tick reuses
+  scan_runner.py   # the scan's fingerprint fan-out, which decides cache hits without a fingerprint, and recheck-refusal posting
+  scan_dispatch.py # the scan's dispatch loop: the --max cap, the AI_REVIEW_DISPATCHED marker, and the Dr. CI poke
+  authz_gates.py   # the scan's two authz gates: the --requester login and the --pr target
+  cohort.py        # who greenlight evaluates (evaluation_cohort) and whose verdict carries authority (assess_rules)
+  authority.py     # the scan's lazy per-PR eligibility lookup, REVERTED-row stamp and moved-head deferral
+  candidate_filter.py # prune listed PRs the scan can leave alone this iteration (recency window, excluded labels)
+  review_gate.py   # detect PRs a human already decided, so the scan skips fingerprint + dispatch
+  revert_guard.py  # permanently exclude reverted PRs: revoke greenlight's approval, record the REVERTED row
+  ineligible_approvals.py # revoke greenlight's approval on a listed PR whose author is no longer eligible for it
+  merge_authz.py   # resolve merge_rules.yaml: the authorized-login set (the fingerprint comment allowlist) and each rule's approvers and trymerge file patterns, with TTL cache; list a PR's changed files
+  state.py         # read a PR's latest recorded state from misc.greenlight_pr_state (deliberately shadow-unfiltered), and, for the GL/* labels, the non-shadow rows pytorch's land gate reads
+  state_emit.py    # build and emit a state row to S3 for replicator ingestion; single source of the row schema and object key
+  decision.py      # decide which scanned PRs need a (re-)dispatch (new/changed vs. in-flight AI_REVIEW_STARTED)
+  dispatch.py      # trigger the reviewer workflow on pytorch/test-infra via workflow_dispatch
+  verdict.py       # one-shot: emit a verdict row for S3->replicator, then approve/dismiss, set the GL/* label and (unless Dr. CI renders it) comment
+  verdict_input.py # resolve and validate the verdict command's input: its status, and a LAND/NO_LAND's reason and message
+  verdict_labels.py # greenlight's GL/* status labels: each PR's desired set, applied at verdict time and by the scan's label pass
+  comment_format.py # render greenlight's PR comment bodies; pick the outline or fenced message renderer per row
+  verdict_outline.py # render a model-authored verdict outline as one contained HTML bullet list (mirrored in TypeScript)
+  redact.py        # scrub credential-shaped substrings out of untrusted, model-authored text
+  drci_poke.py     # ask Dr. CI to rebuild one PR's comment (drci-poke subcommand and the scan's dispatch poke); swallows its own failures
+  github_client.py # GitHub PR access: build clients, read fingerprint inputs + post verdict actions
+  github_types.py  # structural (Protocol) contracts the GitHub client speaks
+  clickhouse_client.py # ClickHouse connection helper for the service's read (SELECT) queries
+  pr_hash.py       # eval_hash land-guard: deterministic PR fingerprint hash
+  config.py        # PYTORCH_GREENLIGHT_* environment configuration
+  constants.py     # shared constants for the review scan/dispatch flow
+  guards.py        # single-instance lock + per-iteration SIGALRM timeout + hard watchdog
+  log.py           # logging setup
+  exit_codes.py    # process exit codes
+tests/             # unit tests mirroring the modules above
+```

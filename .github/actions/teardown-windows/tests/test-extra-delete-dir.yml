@@ -1,0 +1,43 @@
+name: Test teardown with extra-delete-dir input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install powershell shim (action is Windows-only)
+        run: |
+          mkdir -p "$RUNNER_TEMP/shim-bin"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/powershell-shim.sh" "$RUNNER_TEMP/shim-bin/powershell"
+          chmod +x "$RUNNER_TEMP/shim-bin/powershell"
+          echo "$RUNNER_TEMP/shim-bin" >> "$GITHUB_PATH"
+          echo "POWERSHELL_SHIM_LOG=$RUNNER_TEMP/powershell-shim.log" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/powershell-shim.log"
+          mkdir -p "$RUNNER_TEMP/extra-dir"
+          echo keep > "$RUNNER_TEMP/extra-dir/file.txt"
+      - id: action
+        uses: .
+        with:
+          extra-delete-dir: ${{ runner.temp }}/extra-dir
+      - name: Assert teardown succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          LOG="$RUNNER_TEMP/powershell-shim.log"
+          [ -f "$LOG" ] || { echo "FAIL: powershell was never invoked"; exit 1; }
+          cat "$LOG"
+          COUNT=$(grep -c '^=== INVOCATION' "$LOG")
+          echo "invocations: $COUNT"
+          if [ "$COUNT" -ne 2 ]; then
+            echo "FAIL: expected 2 powershell invocations"
+            exit 1
+          fi
+          grep -q 'Get-SSH-Users' "$LOG" || { echo "FAIL: drain step did not run"; exit 1; }
+          grep -q 'Get-SSH-Sessions' "$LOG" || { echo "FAIL: kill-sessions step did not run"; exit 1; }
+          echo "PASS"

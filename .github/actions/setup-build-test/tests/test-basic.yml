@@ -1,0 +1,37 @@
+name: Test basic checkout into repository subdirectory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          submodules: "false"
+      - name: Assert repository checked out under its own path
+        run: |
+          ls -la "$GITHUB_WORKSPACE/actions/checkout" || true
+          if [ ! -f "$GITHUB_WORKSPACE/actions/checkout/action.yml" ]; then
+            echo "FAIL: expected actions/checkout/action.yml to exist"
+            exit 1
+          fi
+          if [ ! -d "$GITHUB_WORKSPACE/actions/checkout/.git" ]; then
+            echo "FAIL: expected a git repository in actions/checkout"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert RUNNER_ARTIFACT_DIR exported
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "${RUNNER_TEMP}/artifacts" ]; then
+            echo "FAIL: expected RUNNER_ARTIFACT_DIR=${RUNNER_TEMP}/artifacts"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Cleanup
+        if: always()
+        run: rm -rf "$GITHUB_WORKSPACE/actions"

@@ -1,0 +1,39 @@
+name: Test no GPU on plain runner
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Hide any GPU and container markers
+        run: |
+          SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+          $SUDO rm -f /.inarc /.incontainer
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          # Fake lspci reporting only non-NVIDIA hardware
+          printf '#!/bin/sh\necho "00:00.0 Host bridge: Intel Corporation 440FX"\n' > "$RUNNER_TEMP/fakebin/lspci"
+          chmod +x "$RUNNER_TEMP/fakebin/lspci"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          ls /dev/nvidia* 2>/dev/null || echo "no /dev/nvidia* devices"
+      - id: action
+        uses: .
+      - name: Assert outputs
+        env:
+          HAS: ${{ steps.action.outputs.has-nvidia }}
+          INC: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "has-nvidia: $HAS"
+          echo "in-container-runner: $INC"
+          echo "HAS_NVIDIA_GPU: $HAS_NVIDIA_GPU"
+          echo "GPU_FLAG: ${GPU_FLAG:-}"
+          if command -v nvidia-smi >/dev/null 2>&1 || ls /dev/nvidia* >/dev/null 2>&1; then
+            echo "Host exposes a real NVIDIA device; only checking consistency"
+            [ "$HAS" = "$HAS_NVIDIA_GPU" ] || { echo "FAIL: env mismatch"; exit 1; }
+          else
+            [ "$HAS" = "false" ] || { echo "FAIL: expected has-nvidia=false"; exit 1; }
+            [ "$HAS_NVIDIA_GPU" = "false" ] || { echo "FAIL: expected HAS_NVIDIA_GPU=false"; exit 1; }
+            [ -z "${GPU_FLAG:-}" ] || { echo "FAIL: GPU_FLAG should be unset"; exit 1; }
+          fi
+          [ "$INC" = "false" ] || { echo "FAIL: expected in-container-runner=false"; exit 1; }
+          echo "PASS"

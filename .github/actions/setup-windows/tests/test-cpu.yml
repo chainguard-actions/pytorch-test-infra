@@ -1,0 +1,88 @@
+name: Test setup-windows with cuda-version cpu
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake Windows tools (powershell, cygpath) and EC2 metadata curl shim
+        run: |
+          set -eu
+          FAKEBIN=/tmp/fakebin
+          mkdir -p "$FAKEBIN"
+          rm -f /tmp/fake-powershell.log
+          cat > "$FAKEBIN/powershell" <<'EOF'
+          #!/bin/sh
+          # Fake powershell: record the invocation and the script content, succeed.
+          echo "CALL: $*" >> /tmp/fake-powershell.log
+          for a in "$@"; do
+            f=$(echo "$a" | sed -e "s/^'//" -e "s/'$//")
+            if [ -f "$f" ]; then
+              cat "$f" >> /tmp/fake-powershell.log
+              echo "" >> /tmp/fake-powershell.log
+            fi
+          done
+          exit 0
+          EOF
+          cat > "$FAKEBIN/cygpath" <<'EOF'
+          #!/bin/sh
+          # Fake cygpath: identity conversion on Linux
+          echo "$1"
+          EOF
+          cat > "$FAKEBIN/curl" <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            *169.254.169.254*) echo "fake-metadata"; exit 0 ;;
+          esac
+          for c in /usr/bin/curl /bin/curl /usr/local/bin/curl; do
+            if [ -x "$c" ]; then exec "$c" "$@"; fi
+          done
+          exit 127
+          EOF
+          chmod +x "$FAKEBIN"/*
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: cpu
+      - name: Assert environment variables exported
+        run: |
+          echo "RUNNER_TEMP=$RUNNER_TEMP"
+          echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR:-}"
+          echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR:-}"
+          if [ "${RUNNER_ARTIFACT_DIR:-}" != "${RUNNER_TEMP}/artifacts" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR should be ${RUNNER_TEMP}/artifacts"
+            exit 1
+          fi
+          if [ "${RUNNER_TEST_RESULTS_DIR:-}" != "${RUNNER_TEMP}/test-results" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR should be ${RUNNER_TEMP}/test-results"
+            exit 1
+          fi
+          [ -d "$RUNNER_ARTIFACT_DIR" ] || { echo "FAIL: artifact dir missing"; exit 1; }
+          [ -d "$RUNNER_TEST_RESULTS_DIR" ] || { echo "FAIL: test-results dir missing"; exit 1; }
+          echo "PASS"
+      - name: Assert git global config set
+        run: |
+          for kv in core.longpaths=true core.symlinks=true core.fsmonitor=false; do
+            k="${kv%%=*}"; v="${kv#*=}"
+            actual="$(git config --global --get "$k" || true)"
+            echo "$k: $actual"
+            if [ "$actual" != "$v" ]; then
+              echo "FAIL: expected $k=$v"
+              exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert powershell steps were invoked
+        run: |
+          cat /tmp/fake-powershell.log || true
+          n=$(grep -o 'CALL:' /tmp/fake-powershell.log | wc -l | tr -d ' ')
+          echo "powershell calls: $n"
+          if [ "$n" -lt 2 ]; then
+            echo "FAIL: expected at least 2 powershell invocations"
+            exit 1
+          fi
+          grep -q 'LongPathsEnabled' /tmp/fake-powershell.log || { echo "FAIL: long paths script not run"; exit 1; }
+          grep -q 'Add-MpPreference' /tmp/fake-powershell.log || { echo "FAIL: defender exclusion script not run"; exit 1; }
+          echo "PASS"

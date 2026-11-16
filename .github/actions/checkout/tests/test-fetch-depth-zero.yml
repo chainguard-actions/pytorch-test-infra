@@ -1,0 +1,29 @@
+name: Test full history fetch
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          path: full-target
+          fetch-depth: 0
+      - name: Assert full history
+        run: |
+          T="$GITHUB_WORKSPACE/full-target"
+          COUNT="$(git -C "$T" rev-list --count HEAD)"
+          echo "commit count: $COUNT"
+          if [ "$COUNT" -le 10 ]; then
+            echo "FAIL: expected full history"
+            exit 1
+          fi
+          if ! git -C "$T" rev-parse --verify -q "refs/tags/v4.0.0" >/dev/null; then
+            echo "FAIL: expected tag v4.0.0 to be fetched"
+            exit 1
+          fi
+          echo "PASS"

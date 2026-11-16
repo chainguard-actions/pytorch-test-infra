@@ -1,0 +1,71 @@
+name: Test basic nightly commit
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up local bare remote with main and nightly branches
+        run: |
+          set -euo pipefail
+          git config --global user.email "test@example.com"
+          git config --global user.name "Test User"
+          git config --global init.defaultBranch main
+          rm -rf /tmp/remote.git /tmp/seed
+          git init --bare /tmp/remote.git
+          git init /tmp/seed
+          cd /tmp/seed
+          echo "hello main" > file.txt
+          git add file.txt
+          git commit -m "main commit"
+          git push /tmp/remote.git HEAD:refs/heads/main
+          git checkout --orphan nightly
+          git rm -rf . >/dev/null
+          echo "old nightly" > nightly.txt
+          git add nightly.txt
+          git commit -m "old nightly"
+          git push /tmp/remote.git HEAD:refs/heads/nightly
+          # Redirect the GitHub URL that actions/checkout uses to the local bare repo
+          git config --global url."file:///tmp/remote.git".insteadOf "https://github.com/example-org/nightly-test"
+          git config --global --add url."file:///tmp/remote.git".insteadOf "https://github.com/example-org/nightly-test.git"
+          echo "OLD_NIGHTLY=$(git --git-dir=/tmp/remote.git rev-parse refs/heads/nightly)" >> "$GITHUB_ENV"
+          echo "MAIN_SHA=$(git --git-dir=/tmp/remote.git rev-parse refs/heads/main)" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          token: ${{ github.token }}
+          repository: example-org/nightly-test
+          ref: main
+          path: nightly-checkout
+      - name: Assert checkout landed in path
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/nightly-checkout/file.txt" ]; then
+            echo "FAIL: file.txt not found in checkout path"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert nightly branch was updated correctly
+        run: |
+          set -euo pipefail
+          R="git --git-dir=/tmp/remote.git"
+          NEW=$($R rev-parse refs/heads/nightly)
+          PARENT=$($R rev-parse "refs/heads/nightly^1")
+          NEW_TREE=$($R rev-parse "refs/heads/nightly^{tree}")
+          MAIN_TREE=$($R rev-parse "refs/heads/main^{tree}")
+          MSG=$($R log -1 --format=%s refs/heads/nightly)
+          AUTHOR=$($R log -1 --format=%ae refs/heads/nightly)
+          echo "new=$NEW parent=$PARENT old=$OLD_NIGHTLY"
+          echo "tree=$NEW_TREE main_tree=$MAIN_TREE"
+          echo "msg=$MSG author=$AUTHOR"
+          [ "$NEW" != "$OLD_NIGHTLY" ] || { echo "FAIL: nightly not updated"; exit 1; }
+          [ "$PARENT" = "$OLD_NIGHTLY" ] || { echo "FAIL: parent is not previous nightly"; exit 1; }
+          [ "$NEW_TREE" = "$MAIN_TREE" ] || { echo "FAIL: tree does not match main"; exit 1; }
+          TODAY=$(date +"%Y-%m-%d")
+          EXPECTED="${TODAY} nightly release (${MAIN_SHA})"
+          if [ "$MSG" != "$EXPECTED" ]; then
+            echo "FAIL: expected message '$EXPECTED'"
+            exit 1
+          fi
+          [ "$AUTHOR" = "pytorchbot@pytorch.com" ] || { echo "FAIL: unexpected author email"; exit 1; }
+          echo "PASS"

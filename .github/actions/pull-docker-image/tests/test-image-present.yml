@@ -1,0 +1,27 @@
+name: Test skip pull when image present locally
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks (image present)
+        run: |
+          rm -f /tmp/fake-docker/pull-fail
+          bash tests/fixtures/setup-mocks.sh
+          touch /tmp/fake-docker/image-present
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/my/image:present
+      - name: Assert no pull happened
+        run: |
+          cat /tmp/fake-docker/calls.log
+          rm -f /tmp/fake-docker/image-present
+          grep -qx "docker inspect --type=image example.com/my/image:present" /tmp/fake-docker/calls.log || { echo "FAIL: local inspect not called"; exit 1; }
+          if grep -q "^docker pull" /tmp/fake-docker/calls.log; then
+            echo "FAIL: docker pull should not be called when image exists locally"
+            exit 1
+          fi
+          echo "PASS"

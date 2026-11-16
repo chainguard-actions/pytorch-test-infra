@@ -1,0 +1,47 @@
+name: Test command mode
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          rm -f /tmp/fake-docker.log /tmp/command-marker
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/fake-docker.log
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          command: echo "custom build ran" > /tmp/command-marker && docker buildx build --tag custom:tag --push .
+          tags: ghcr.io/example/ignored:tag
+          connect-delay: '0'
+      - name: Assert command ran and image output empty
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          cat /tmp/fake-docker.log
+          echo "image: '$ACTUAL'"
+          if [ -n "$ACTUAL" ]; then
+            echo "FAIL: image output should be empty in command mode"; exit 1
+          fi
+          if ! grep -q "custom build ran" /tmp/command-marker; then
+            echo "FAIL: command did not run"; exit 1
+          fi
+          if ! grep -q '^buildx create --name remote-buildkit' /tmp/fake-docker.log; then
+            echo "FAIL: builder not registered"; exit 1
+          fi
+          if ! grep -qx 'buildx build --tag custom:tag --push .' /tmp/fake-docker.log; then
+            echo "FAIL: command's docker invocation not found"; exit 1
+          fi
+          if grep -q 'ghcr.io/example/ignored' /tmp/fake-docker.log; then
+            echo "FAIL: tags input should be ignored in command mode"; exit 1
+          fi
+          echo "PASS"

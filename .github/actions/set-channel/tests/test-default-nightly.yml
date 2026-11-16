@@ -1,0 +1,29 @@
+name: Test default channel is nightly
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert CHANNEL is nightly
+        run: |
+          echo "event: ${{ github.event_name }} ref: ${{ github.ref }}"
+          echo "CHANNEL: ${CHANNEL:-<unset>}"
+          if [ "${CHANNEL:-}" != "nightly" ]; then
+            echo "FAIL: expected CHANNEL=nightly"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert CHANNEL written exactly once to GITHUB_ENV
+        run: |
+          count=$(grep -c '^CHANNEL=' "$GITHUB_ENV" || true)
+          echo "CHANNEL entries in GITHUB_ENV: $count"
+          cat "$GITHUB_ENV" || true
+          if [ "$count" -gt 1 ]; then
+            echo "FAIL: expected at most one CHANNEL entry"
+            exit 1
+          fi
+          echo "PASS"

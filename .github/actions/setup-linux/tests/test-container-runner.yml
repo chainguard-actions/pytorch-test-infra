@@ -1,0 +1,120 @@
+name: Test container runner path
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks and mark as container runner
+        run: |
+          set -eu
+          MOCK="$RUNNER_TEMP/mockbin"
+          LOGS="$RUNNER_TEMP/mock-logs"
+          mkdir -p "$MOCK" "$LOGS"
+          REAL_CURL="$(command -v curl || true)"
+
+          cat > "$MOCK/curl" <<EOF
+          #!/bin/bash
+          case "\$*" in
+            *169.254.169.254*) echo "fake-value"; exit 0 ;;
+          esac
+          if [ -n "$REAL_CURL" ]; then exec "$REAL_CURL" "\$@"; fi
+          exit 1
+          EOF
+
+          cat > "$MOCK/aws" <<EOF
+          #!/bin/bash
+          echo "aws \$*" >> "$LOGS/aws.log"
+          case "\$1 \$2" in
+            "sts get-caller-identity")
+              printf '{\n    "Account": "210987654321"\n}\n' ;;
+            "ecr get-login-password")
+              echo "container-password" ;;
+          esac
+          exit 0
+          EOF
+
+          cat > "$MOCK/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOGS/docker.log"
+          if [ "\$1" = login ]; then cat > "$LOGS/docker-login-stdin"; fi
+          exit 0
+          EOF
+
+          cat > "$MOCK/sudo" <<'EOF'
+          #!/bin/bash
+          exec "$@"
+          EOF
+
+          cat > "$MOCK/systemctl" <<EOF
+          #!/bin/bash
+          echo "systemctl \$*" >> "$LOGS/systemctl.log"
+          exit 0
+          EOF
+
+          cat > "$MOCK/lspci" <<'EOF'
+          #!/bin/bash
+          exit 0
+          EOF
+
+          chmod +x "$MOCK"/*
+          echo "$MOCK" >> "$GITHUB_PATH"
+
+          if [ "$(id -u)" = "0" ]; then
+            touch /.incontainer
+          else
+            "$MOCK/sudo" true
+            command sudo touch /.incontainer
+          fi
+          ls -la /.incontainer
+
+      - id: action
+        uses: .
+
+      - name: Assert ECR login happened
+        run: |
+          LOGS="$RUNNER_TEMP/mock-logs"
+          cat "$LOGS/docker.log"
+          if ! grep -q "docker login --username AWS --password-stdin 210987654321.dkr.ecr.us-east-1.amazonaws.com" "$LOGS/docker.log"; then
+            echo "FAIL: docker login not called with expected registry"; exit 1
+          fi
+          if [ "$(cat "$LOGS/docker-login-stdin")" != "container-password" ]; then
+            echo "FAIL: wrong password on stdin"; exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert docker cleanup skipped in container runner
+        run: |
+          LOGS="$RUNNER_TEMP/mock-logs"
+          if grep -q "docker system prune" "$LOGS/docker.log"; then
+            echo "FAIL: docker prune should be skipped in container runner"; exit 1
+          fi
+          if grep -q "docker version" "$LOGS/docker.log"; then
+            echo "FAIL: docker start step should be skipped in container runner"; exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert runner directories exported
+        run: |
+          for d in "$RUNNER_ARTIFACT_DIR" "$RUNNER_TEST_RESULTS_DIR" "$RUNNER_DOCS_DIR"; do
+            echo "dir: $d"
+            if [ -z "$d" ] || [ ! -d "$d" ]; then echo "FAIL: missing dir '$d'"; exit 1; fi
+          done
+          echo "PASS"
+
+      - name: Assert GPU_FLAG matches device presence
+        run: |
+          echo "GPU_FLAG='${GPU_FLAG:-}'"
+          if compgen -G "/dev/nvidia[0-9]" >/dev/null; then
+            [ "${GPU_FLAG:-}" = "--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all" ] || { echo "FAIL: GPU_FLAG expected"; exit 1; }
+          else
+            [ -z "${GPU_FLAG:-}" ] || { echo "FAIL: GPU_FLAG should be unset"; exit 1; }
+          fi
+          echo "PASS"
+
+      - name: Cleanup marker
+        if: always()
+        run: rm -f /.incontainer 2>/dev/null || sudo rm -f /.incontainer || true

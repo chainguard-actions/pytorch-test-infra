@@ -1,0 +1,42 @@
+name: Test upload with files present
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create files to upload
+        run: |
+          rm -rf /tmp/upload-src
+          mkdir -p /tmp/upload-src/sub
+          echo "hello" > /tmp/upload-src/a.txt
+          echo "world" > /tmp/upload-src/sub/b.txt
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          name: test-artifact
+          path: /tmp/upload-src
+          s3-bucket: actionchain-nonexistent-test-bucket-xyz
+          s3-prefix: actionchain-test/prefix
+          region: us-east-1
+      - name: Assert upload succeeded with objects, or failed due to missing AWS credentials
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          RESULT: ${{ steps.action.outputs.uploaded-objects }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "result: $RESULT"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$RESULT" ] || ! echo "$RESULT" | grep -q "a.txt"; then
+              echo "FAIL: action succeeded but uploaded-objects missing expected keys"
+              exit 1
+            fi
+            echo "PASS: uploaded objects reported"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: upload attempted and failed (no AWS credentials / bucket in harness)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

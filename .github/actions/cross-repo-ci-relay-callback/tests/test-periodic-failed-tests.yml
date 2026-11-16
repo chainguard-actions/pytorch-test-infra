@@ -1,0 +1,65 @@
+name: Test periodic failure callback
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      MOCK_PORT: "18762"
+      MOCK_OUT: /tmp/mock-relay-periodic
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local mock OIDC + relay server
+        run: |
+          rm -rf "$MOCK_OUT"; mkdir -p "$MOCK_OUT"
+          nohup setsid python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" "$MOCK_PORT" "$MOCK_OUT" > /tmp/mock-relay-periodic.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf "http://127.0.0.1:$MOCK_PORT/health" >/dev/null; then echo "server up"; break; fi
+            sleep 1
+          done
+          curl -sf "http://127.0.0.1:$MOCK_PORT/health" || { cat /tmp/mock-relay-periodic.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:$MOCK_PORT/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: failure
+          delivery-id: fedcba9876543210fedcba9876543210fedcba98
+          event-type: periodic
+          max-time: 20
+          failed-tests-detail: '[{"name": "test_foo", "classname": "TestBar", "message": "AssertionError"}, {"name": "test_baz"}]'
+          triage-verdict: '["not", "an", "object"]'
+          callback-url: http://127.0.0.1:18762/callback
+      - name: Assert callback payload
+        run: |
+          cat /tmp/mock-relay-periodic.log || true
+          python3 - <<'EOF'
+          import json, os, sys
+          out = os.environ["MOCK_OUT"]
+          reqs = sorted(p for p in os.listdir(out) if p.endswith(".meta.json"))
+          if len(reqs) != 1:
+              sys.exit(f"FAIL: expected exactly 1 callback request, got {len(reqs)}")
+          body = json.load(open(os.path.join(out, "request-0.json")))
+          print(json.dumps(body, indent=2))
+          def check(cond, msg):
+              if not cond:
+                  sys.exit("FAIL: " + msg)
+          check(body["event_type"] == "periodic", "event_type")
+          check(body["delivery_id"] == "fedcba9876543210fedcba9876543210fedcba98", "delivery_id")
+          w = body["workflow"]
+          check(w["status"] == "completed", "status")
+          check(w["conclusion"] == "failure", "conclusion")
+          check(w["job_name"] == "test", f"default job_name should be github.job, got {w['job_name']!r}")
+          ftd = w.get("failed_tests_detail")
+          check(isinstance(ftd, list) and len(ftd) == 2, "failed_tests_detail length")
+          check(ftd[0]["name"] == "test_foo" and ftd[0]["classname"] == "TestBar", "failed_tests_detail[0]")
+          check(ftd[1]["name"] == "test_baz", "failed_tests_detail[1]")
+          check("triage_verdict" not in w, "invalid (non-object) triage_verdict must be dropped")
+          check("test_results" not in w, "test_results should be absent")
+          check("artifact_url" not in w, "artifact_url should be absent")
+          print("PASS")
+          EOF

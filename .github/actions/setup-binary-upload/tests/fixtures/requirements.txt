@@ -1,0 +1,1 @@
+# Fixture so actions/setup-python (cache: pip) finds a dependency file.

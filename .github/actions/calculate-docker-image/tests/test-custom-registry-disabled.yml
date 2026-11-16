@@ -1,0 +1,25 @@
+name: Test custom registry disabled
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          docker-image-name: my-image:my-tag
+          docker-build-dir: tests/fixtures/docker
+          use-custom-docker-registry: "false"
+          repo-name: pytorch
+      - name: Assert docker-image passthrough
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "my-image:my-tag" ]; then
+            echo "FAIL: expected 'my-image:my-tag'"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,44 @@
+name: Test basic chown
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/chown-target/sub"
+          echo hello > "$GITHUB_WORKSPACE/chown-target/sub/file.txt"
+          docker version || echo "docker version failed"
+      - id: action
+        uses: .
+        with:
+          directory: ${{ github.workspace }}/chown-target
+          ALPINE_IMAGE: alpine:3.20
+      - name: Assert step succeeded and ownership is current user
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          f="$GITHUB_WORKSPACE/chown-target/sub/file.txt"
+          if [ ! -f "$f" ]; then
+            echo "FAIL: file missing after chown"
+            exit 1
+          fi
+          owner="$(stat -c '%u:%g' "$f")"
+          expected="$(id -u):$(id -g)"
+          echo "owner: $owner expected: $expected"
+          if [ "$owner" != "$expected" ]; then
+            echo "FAIL: ownership mismatch"
+            exit 1
+          fi
+          if [ "$(cat "$f")" != "hello" ]; then
+            echo "FAIL: file content changed"
+            exit 1
+          fi
+          echo "PASS"

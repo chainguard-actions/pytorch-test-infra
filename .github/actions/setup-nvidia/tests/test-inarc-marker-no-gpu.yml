@@ -1,0 +1,38 @@
+name: Test ARC marker without GPU and with driver-version
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create /.inarc marker and hide GPU
+        run: |
+          SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo
+          $SUDO rm -f /.incontainer
+          $SUDO touch /.inarc
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          printf '#!/bin/sh\necho "00:02.0 VGA compatible controller: Cirrus Logic GD 5446"\n' > "$RUNNER_TEMP/fakebin/lspci"
+          chmod +x "$RUNNER_TEMP/fakebin/lspci"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          driver-version: 570.133.20
+      - name: Assert outputs
+        env:
+          HAS: ${{ steps.action.outputs.has-nvidia }}
+          INC: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "has-nvidia: $HAS"
+          echo "in-container-runner: $INC"
+          echo "HAS_NVIDIA_GPU: $HAS_NVIDIA_GPU"
+          [ "$INC" = "true" ] || { echo "FAIL: expected in-container-runner=true"; exit 1; }
+          if command -v nvidia-smi >/dev/null 2>&1 || ls /dev/nvidia* >/dev/null 2>&1; then
+            echo "Real NVIDIA device present; only checking consistency"
+            [ "$HAS" = "$HAS_NVIDIA_GPU" ] || { echo "FAIL: env mismatch"; exit 1; }
+          else
+            [ "$HAS" = "false" ] || { echo "FAIL: expected has-nvidia=false"; exit 1; }
+            [ "$HAS_NVIDIA_GPU" = "false" ] || { echo "FAIL: expected HAS_NVIDIA_GPU=false"; exit 1; }
+          fi
+          echo "PASS"
