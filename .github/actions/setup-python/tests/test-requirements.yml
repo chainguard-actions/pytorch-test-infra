@@ -1,0 +1,27 @@
+name: Test pip requirements file installation (simulated macOS)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake brew and requirements file
+        run: |
+          sh "$GITHUB_WORKSPACE/tests/fixtures/setup-fake-brew.sh"
+          echo "six==1.16.0" > "$RUNNER_TEMP/requirements.txt"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/tests/fixtures/fake-darwin.js
+        with:
+          python-version: "3.12"
+          pip-requirements-file: ${{ runner.temp }}/requirements.txt
+      - name: Assert requirements installed with venv python
+        run: |
+          echo "VENV_PATH: $VENV_PATH"
+          cat "$VENV_PATH/pip-calls.log" || true
+          [ -f "$VENV_PATH/pip-calls.log" ] || { echo "FAIL: venv python never invoked"; exit 1; }
+          grep -qx -- "-m pip install -r $RUNNER_TEMP/requirements.txt" "$VENV_PATH/pip-calls.log" || {
+            echo "FAIL: expected pip install -r requirements.txt"; exit 1; }
+          echo "PASS"

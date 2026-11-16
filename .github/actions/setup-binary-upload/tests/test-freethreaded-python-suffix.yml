@@ -1,0 +1,37 @@
+name: Test free-threaded python suffix
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide pkg-helpers at the path the action expects
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/test-infra"
+          mkdir -p "$GITHUB_WORKSPACE/test-infra/tools"
+          cp -r "$GITHUB_WORKSPACE/tests/fixtures/pkg-helpers" "$GITHUB_WORKSPACE/test-infra/tools/pkg-helpers"
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: v4
+          python-version: '3.13t'
+          cuda-version: rocm6.3
+          arch: x86_64
+      - name: Assert ARTIFACT_NAME keeps 't' suffix
+        run: |
+          echo "actual: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "actions_checkout_v4_3.13t_rocm6.3_x86_64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert BUILD_ENV_FILE generated
+        run: |
+          if [ -z "$BUILD_ENV_FILE" ] || [ ! -f "$BUILD_ENV_FILE" ]; then
+            echo "FAIL: BUILD_ENV_FILE missing"
+            exit 1
+          fi
+          grep -qxF "export FAKE_PYTHON_VERSION=3.13t" "$BUILD_ENV_FILE" || { echo "FAIL: python version"; exit 1; }
+          echo "PASS"

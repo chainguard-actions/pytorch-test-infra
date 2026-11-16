@@ -1,0 +1,71 @@
+name: Test teardown with extra-delete-dir input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install a 'powershell' shim (Linux container has no Windows PowerShell)
+        run: |
+          set -e
+          rm -f /tmp/powershell-invocations.log /tmp/powershell-scripts.log
+          cat > /tmp/ps-stubs.ps1 <<'EOF'
+          function Get-CimInstance { param([Parameter(ValueFromRemainingArguments=$true)]$Rest) }
+          function Get-CimAssociatedInstance { param([Parameter(ValueFromPipeline=$true)]$InputObject, [Parameter(ValueFromRemainingArguments=$true)]$Rest) process { } }
+          EOF
+          cat > /tmp/powershell-shim <<'EOF'
+          #!/bin/bash
+          echo "ARGS: $*" >> /tmp/powershell-invocations.log
+          script=""
+          for a in "$@"; do
+            cand="${a#. }"; cand="${cand//\'/}"
+            if [ -f "$cand" ]; then script="$cand"; fi
+          done
+          if [ -z "$script" ]; then
+            echo "shim: could not locate script file in args: $*" >&2
+            exit 1
+          fi
+          echo "=== $script ===" >> /tmp/powershell-scripts.log
+          cat "$script" >> /tmp/powershell-scripts.log
+          if command -v pwsh >/dev/null 2>&1; then
+            exec pwsh -NoProfile -NonInteractive -Command ". '/tmp/ps-stubs.ps1'; . '$script'; exit 0"
+          fi
+          echo "shim: pwsh not available; recorded script only"
+          exit 0
+          EOF
+          chmod +x /tmp/powershell-shim
+          mkdir -p "$RUNNER_TEMP/psbin"
+          cp /tmp/powershell-shim "$RUNNER_TEMP/psbin/powershell"
+          echo "$RUNNER_TEMP/psbin" >> "$GITHUB_PATH"
+          if ! command -v powershell >/dev/null 2>&1; then
+            cp /tmp/powershell-shim /usr/local/bin/powershell 2>/dev/null || \
+              sudo cp /tmp/powershell-shim /usr/local/bin/powershell 2>/dev/null || true
+          fi
+          mkdir -p "$RUNNER_TEMP/extra-dir"
+          echo keep > "$RUNNER_TEMP/extra-dir/file.txt"
+
+      - id: action
+        uses: .
+        with:
+          extra-delete-dir: ${{ runner.temp }}/extra-dir
+
+      - name: Assert teardown ran and completed successfully
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/powershell-invocations.log || true
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          count=$(grep -c '^ARGS:' /tmp/powershell-invocations.log)
+          if [ "$count" -lt 2 ]; then
+            echo "FAIL: expected 2 powershell invocations, got $count"
+            exit 1
+          fi
+          grep -q 'Get-SSH-Users' /tmp/powershell-scripts.log || { echo "FAIL: drain step not run"; exit 1; }
+          grep -q 'Get-SSH-Sessions' /tmp/powershell-scripts.log || { echo "FAIL: kill step not run"; exit 1; }
+          echo "PASS"

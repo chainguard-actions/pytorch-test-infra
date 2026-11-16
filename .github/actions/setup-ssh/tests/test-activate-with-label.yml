@@ -1,0 +1,35 @@
+name: Test activate-with-label skips outside labeled PR
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Seed an existing authorized_keys file
+        run: |
+          mkdir -p "$HOME/.ssh"
+          echo "ssh-ed25519 AAAATESTSENTINELKEY sentinel@test" > "$HOME/.ssh/authorized_keys"
+          cp "$HOME/.ssh/authorized_keys" /tmp/authorized_keys.orig
+      - id: action
+        uses: .
+        with:
+          github-secret: ${{ secrets.GITHUB_TOKEN }}
+          activate-with-label: "true"
+          label: with-ssh
+          remove-existing-keys: "true"
+      - name: Assert action succeeded and did not touch keys
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          cat "$HOME/.ssh/authorized_keys"
+          if ! cmp -s "$HOME/.ssh/authorized_keys" /tmp/authorized_keys.orig; then
+            echo "FAIL: authorized_keys was modified although the label was not applied"
+            exit 1
+          fi
+          echo "PASS"

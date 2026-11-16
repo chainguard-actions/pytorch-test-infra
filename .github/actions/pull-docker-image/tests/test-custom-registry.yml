@@ -1,0 +1,22 @@
+name: Test custom registry
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: bash tests/fixtures/setup-mocks.sh
+      - id: action
+        uses: .
+        with:
+          docker-image: registry.example.org/team/img:v1
+          docker-registry: registry.example.org
+      - name: Assert custom registry login
+        run: |
+          cat /tmp/mock/docker.log
+          grep -qx "docker login -u AWS --password-stdin registry.example.org" /tmp/mock/docker.log || { echo "FAIL: login to custom registry missing"; exit 1; }
+          if grep -q "308535385114" /tmp/mock/docker.log; then echo "FAIL: default registry used"; exit 1; fi
+          grep -qx "docker pull registry.example.org/team/img:v1" /tmp/mock/docker.log || { echo "FAIL: pull missing"; exit 1; }
+          echo "PASS"

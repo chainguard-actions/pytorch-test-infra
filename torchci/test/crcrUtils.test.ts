@@ -1,0 +1,653 @@
+import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
+import {
+  ApiError,
+  conclusionColor,
+  conclusionLabel,
+  CrcrWorkflowJobRecord,
+  extractDynamoRecord,
+  RelayPayload,
+  validatePayloadSize,
+  writeToDynamo,
+} from "../lib/crcr/crcrUtils";
+
+const mockUpdate = jest.fn();
+jest.mock("lib/dynamo", () => ({
+  getDynamoClient: () => ({ update: mockUpdate }),
+}));
+
+function makePayload(
+  overrides: {
+    trusted?: any;
+    workflow?: any;
+    callback?: any;
+  } = {}
+): RelayPayload {
+  return {
+    trusted: {
+      verified_repo: "Ascend/pytorch",
+      downstream_repo_level: "L2",
+      ci_metrics: { queue_time: 12.5, execution_time: null },
+      ...overrides.trusted,
+    },
+    untrusted: {
+      callback_payload: {
+        event_type: "workflow_job",
+        delivery_id: "delivery-abc-123",
+        payload: {
+          pull_request: { number: 12345, head: { sha: "abcdef1234567890" } },
+          repository: { full_name: "pytorch/pytorch" },
+        },
+        workflow: {
+          schema_version: "1",
+          status: "in_progress",
+          name: "npu-ci",
+          url: "https://github.com/Ascend/pytorch/actions/runs/123",
+          job_name: "build-and-test",
+          check_run_id: "99001",
+          run_id: "123456",
+          run_attempt: 1,
+          started_at: "2026-05-20T10:00:00Z",
+          ...overrides.workflow,
+        },
+        ...overrides.callback,
+      },
+    },
+  };
+}
+
+describe("extractDynamoRecord", () => {
+  test("extracts correct dynamoKey format", () => {
+    const record = extractDynamoRecord(makePayload());
+    expect(record.dynamoKey).toBe(
+      "Ascend/pytorch/delivery-abc-123/npu-ci/build-and-test/99001"
+    );
+  });
+
+  test("maps all basic fields correctly", () => {
+    const record = extractDynamoRecord(makePayload());
+    expect(record.status).toBe("in_progress");
+    expect(record.downstream_repo).toBe("Ascend/pytorch");
+    expect(record.upstream_repo).toBe("pytorch/pytorch");
+    expect(record.pr_number).toBe(12345);
+    expect(record.pytorch_head_sha).toBe("abcdef1234567890");
+    expect(record.delivery_id).toBe("delivery-abc-123");
+    expect(record.workflow_name).toBe("npu-ci");
+    expect(record.job_name).toBe("build-and-test");
+    expect(record.check_run_id).toBe("99001");
+    expect(record.run_id).toBe("123456");
+    expect(record.run_attempt).toBe(1);
+  });
+
+  test("sets downstream_repo_level from trusted payload", () => {
+    const record = extractDynamoRecord(makePayload());
+    expect(record.downstream_repo_level).toBe("L2");
+  });
+
+  test("omits downstream_repo_level when not provided", () => {
+    const record = extractDynamoRecord(
+      makePayload({ trusted: { downstream_repo_level: undefined } })
+    );
+    expect(record.downstream_repo_level).toBeUndefined();
+  });
+
+  test("sets event_type from callback payload", () => {
+    const record = extractDynamoRecord(makePayload());
+    expect(record.event_type).toBe("workflow_job");
+  });
+
+  test("sets event_type for nightly callback", () => {
+    const record = extractDynamoRecord(
+      makePayload({ callback: { event_type: "nightly" } })
+    );
+    expect(record.event_type).toBe("nightly");
+  });
+
+  test("sets event_type for periodic callback", () => {
+    const record = extractDynamoRecord(
+      makePayload({ callback: { event_type: "periodic" } })
+    );
+    expect(record.event_type).toBe("periodic");
+  });
+
+  test("omits event_type when empty", () => {
+    const record = extractDynamoRecord(
+      makePayload({ callback: { event_type: "" } })
+    );
+    expect(record.event_type).toBeUndefined();
+  });
+
+  test("sets queue_time from ci_metrics when non-null", () => {
+    const record = extractDynamoRecord(makePayload());
+    expect(record.queue_time).toBe(12.5);
+  });
+
+  test("omits execution_time when ci_metrics value is null", () => {
+    const record = extractDynamoRecord(makePayload());
+    expect(record.execution_time).toBeUndefined();
+  });
+
+  test("sets execution_time when provided", () => {
+    const record = extractDynamoRecord(
+      makePayload({
+        trusted: { ci_metrics: { queue_time: null, execution_time: 45.2 } },
+      })
+    );
+    expect(record.execution_time).toBe(45.2);
+    expect(record.queue_time).toBeUndefined();
+  });
+
+  test("sets started_at from workflow", () => {
+    const record = extractDynamoRecord(makePayload());
+    expect(record.started_at).toBe("2026-05-20T10:00:00Z");
+  });
+
+  test("sets artifact_url when provided", () => {
+    const record = extractDynamoRecord(
+      makePayload({
+        workflow: { artifact_url: "https://example.com/artifacts.zip" },
+      })
+    );
+    expect(record.artifact_url).toBe("https://example.com/artifacts.zip");
+  });
+
+  test("omits artifact_url when not provided", () => {
+    const record = extractDynamoRecord(makePayload());
+    expect(record.artifact_url).toBeUndefined();
+  });
+
+  test("coerces string run_attempt to number", () => {
+    const record = extractDynamoRecord(
+      makePayload({ workflow: { run_attempt: "3" } })
+    );
+    expect(record.run_attempt).toBe(3);
+  });
+
+  test("defaults run_attempt to 1 when missing", () => {
+    const record = extractDynamoRecord(
+      makePayload({ workflow: { run_attempt: undefined } })
+    );
+    expect(record.run_attempt).toBe(1);
+  });
+
+  test("defaults upstream_repo to pytorch/pytorch when missing", () => {
+    const record = extractDynamoRecord(
+      makePayload({ callback: { payload: {} } })
+    );
+    expect(record.upstream_repo).toBe("pytorch/pytorch");
+  });
+
+  test("defaults pr_number to 0 when no pull_request", () => {
+    const record = extractDynamoRecord(
+      makePayload({
+        callback: { payload: { repository: { full_name: "pytorch/pytorch" } } },
+      })
+    );
+    expect(record.pr_number).toBe(0);
+    expect(record.pytorch_head_sha).toBe("delivery-abc-123");
+  });
+
+  test("push event with ciflow/trunk/<pr> ref recovers pr_number and head_sha", () => {
+    const record = extractDynamoRecord(
+      makePayload({
+        callback: {
+          event_type: "push",
+          payload: {
+            repository: { full_name: "pytorch/pytorch" },
+            ref: "refs/tags/ciflow/trunk/12345",
+            after: "def4567890abcdef",
+          },
+        },
+      })
+    );
+    expect(record.pr_number).toBe(12345);
+    expect(record.pytorch_head_sha).toBe("def4567890abcdef");
+  });
+
+  test("push event to a non-ciflow ref (e.g. landed merge on main) has no PR", () => {
+    const record = extractDynamoRecord(
+      makePayload({
+        callback: {
+          event_type: "push",
+          payload: {
+            repository: { full_name: "pytorch/pytorch" },
+            ref: "refs/heads/main",
+            after: "def4567890abcdef",
+          },
+        },
+      })
+    );
+    expect(record.pr_number).toBe(0);
+    expect(record.pytorch_head_sha).toBe("def4567890abcdef");
+  });
+
+  test("uses payload.head_sha for nightly callbacks", () => {
+    const record = extractDynamoRecord(
+      makePayload({
+        callback: {
+          event_type: "nightly",
+          delivery_id: "abc123def456",
+          payload: {
+            repository: { full_name: "pytorch/pytorch" },
+            head_sha: "abc123def456",
+          },
+        },
+      })
+    );
+    expect(record.pytorch_head_sha).toBe("abc123def456");
+    expect(record.pr_number).toBe(0);
+    expect(record.event_type).toBe("nightly");
+  });
+
+  // --- completed status ---
+
+  test("sets conclusion and completed_at for completed status", () => {
+    const record = extractDynamoRecord(
+      makePayload({
+        workflow: {
+          status: "completed",
+          conclusion: "success",
+          completed_at: "2026-05-20T10:30:00Z",
+        },
+      })
+    );
+    expect(record.conclusion).toBe("success");
+    expect(record.completed_at).toBe("2026-05-20T10:30:00Z");
+  });
+
+  test("does not set conclusion for in_progress status", () => {
+    const record = extractDynamoRecord(makePayload());
+    expect(record.conclusion).toBeUndefined();
+    expect(record.completed_at).toBeUndefined();
+  });
+
+  // --- test_results ---
+
+  test("extracts test results with explicit total", () => {
+    const record = extractDynamoRecord(
+      makePayload({
+        workflow: {
+          status: "completed",
+          conclusion: "failure",
+          test_results: { passed: 100, failed: 5, skipped: 10, total: 115 },
+        },
+      })
+    );
+    expect(record.passed_tests).toBe(100);
+    expect(record.failed_tests).toBe(5);
+    expect(record.skipped_tests).toBe(10);
+    expect(record.total_tests).toBe(115);
+  });
+
+  test("computes total_tests from passed+failed+skipped when total absent", () => {
+    const record = extractDynamoRecord(
+      makePayload({
+        workflow: {
+          status: "completed",
+          conclusion: "failure",
+          test_results: { passed: 80, failed: 3, skipped: 7 },
+        },
+      })
+    );
+    expect(record.total_tests).toBe(90);
+  });
+
+  test("does not set test results for in_progress status", () => {
+    const record = extractDynamoRecord(
+      makePayload({
+        workflow: { test_results: { passed: 10, failed: 0, skipped: 0 } },
+      })
+    );
+    expect(record.passed_tests).toBeUndefined();
+    expect(record.total_tests).toBeUndefined();
+  });
+
+  // --- validation errors ---
+
+  test("throws 400 when job_name is missing", () => {
+    expect(() =>
+      extractDynamoRecord(makePayload({ workflow: { job_name: "" } }))
+    ).toThrow(ApiError);
+    try {
+      extractDynamoRecord(makePayload({ workflow: { job_name: undefined } }));
+    } catch (e: any) {
+      expect(e).toBeInstanceOf(ApiError);
+      expect(e.statusCode).toBe(400);
+      expect(e.message).toContain("job_name");
+    }
+  });
+
+  test("throws 400 when check_run_id is missing", () => {
+    expect(() =>
+      extractDynamoRecord(
+        makePayload({ workflow: { check_run_id: undefined } })
+      )
+    ).toThrow(ApiError);
+    try {
+      extractDynamoRecord(makePayload({ workflow: { check_run_id: null } }));
+    } catch (e: any) {
+      expect(e).toBeInstanceOf(ApiError);
+      expect(e.statusCode).toBe(400);
+      expect(e.message).toContain("check_run_id");
+    }
+  });
+
+  // A nightly/periodic self-report has no upstream check run to point at, so
+  // requiring check_run_id 400s every job in the build. The existing nightly
+  // tests above all inherit check_run_id from makePayload's base workflow,
+  // which is why this went unnoticed -- these drop it explicitly.
+  test.each(["nightly", "periodic"])(
+    "accepts a %s callback with no check_run_id",
+    (eventType) => {
+      const record = extractDynamoRecord(
+        makePayload({
+          callback: { event_type: eventType },
+          workflow: { check_run_id: undefined },
+        })
+      );
+      expect(record.check_run_id).toBe("");
+      expect(record.event_type).toBe(eventType);
+    }
+  );
+
+  test("still requires check_run_id for non-nightly callbacks", () => {
+    try {
+      extractDynamoRecord(
+        makePayload({
+          callback: { event_type: "workflow_job" },
+          workflow: { check_run_id: undefined },
+        })
+      );
+      throw new Error("expected extractDynamoRecord to throw");
+    } catch (e: any) {
+      expect(e).toBeInstanceOf(ApiError);
+      expect(e.statusCode).toBe(400);
+      expect(e.message).toContain("check_run_id");
+    }
+  });
+
+  test("keeps nightly rows distinct without a check_run_id", () => {
+    // delivery_id is per-job for a Buildkite nightly, so it carries the
+    // uniqueness that check_run_id carries on the GitHub Actions path.
+    const keyFor = (deliveryId: string) =>
+      extractDynamoRecord(
+        makePayload({
+          callback: { event_type: "nightly", delivery_id: deliveryId },
+          workflow: { check_run_id: undefined },
+        })
+      ).dynamoKey;
+    expect(keyFor("buildkite-89891-jobA")).not.toBe(
+      keyFor("buildkite-89891-jobB")
+    );
+  });
+});
+
+describe("validatePayloadSize", () => {
+  test("accepts payload under 2MB", () => {
+    expect(() => validatePayloadSize("short payload")).not.toThrow();
+  });
+
+  test("throws 413 for payload exceeding 2MB", () => {
+    const largePayload = "x".repeat(2 * 1024 * 1024 + 1);
+    expect(() => validatePayloadSize(largePayload)).toThrow(ApiError);
+    try {
+      validatePayloadSize(largePayload);
+    } catch (e: any) {
+      expect(e.statusCode).toBe(413);
+    }
+  });
+
+  test("accepts payload exactly at 2MB boundary", () => {
+    const exactPayload = "x".repeat(2 * 1024 * 1024);
+    expect(() => validatePayloadSize(exactPayload)).not.toThrow();
+  });
+});
+
+describe("conclusionColor", () => {
+  test("returns info for in_progress", () => {
+    expect(conclusionColor("in_progress", "")).toBe("info");
+  });
+
+  test("returns success for success", () => {
+    expect(conclusionColor("completed", "success")).toBe("success");
+  });
+
+  test("returns error for failure", () => {
+    expect(conclusionColor("completed", "failure")).toBe("error");
+  });
+
+  test("returns warning for cancelled", () => {
+    expect(conclusionColor("completed", "cancelled")).toBe("warning");
+  });
+
+  test("returns warning for timed_out", () => {
+    expect(conclusionColor("completed", "timed_out")).toBe("warning");
+  });
+
+  test("returns default for unknown conclusion", () => {
+    expect(conclusionColor("completed", "unknown")).toBe("default");
+  });
+});
+
+describe("conclusionLabel", () => {
+  test("returns running for in_progress", () => {
+    expect(conclusionLabel("in_progress", "")).toBe("running");
+  });
+
+  test("returns conclusion when completed", () => {
+    expect(conclusionLabel("completed", "success")).toBe("success");
+    expect(conclusionLabel("completed", "failure")).toBe("failure");
+  });
+
+  test("falls back to status when conclusion is empty", () => {
+    expect(conclusionLabel("completed", "")).toBe("completed");
+  });
+});
+
+describe("ApiError", () => {
+  test("has correct statusCode and message", () => {
+    const err = new ApiError(404, "Not found");
+    expect(err).toBeInstanceOf(Error);
+    expect(err.statusCode).toBe(404);
+    expect(err.message).toBe("Not found");
+  });
+});
+
+describe("extractDynamoRecord - failed_tests_detail", () => {
+  test("does not set failed_tests_json when field is absent", () => {
+    const payload = makePayload({
+      workflow: { status: "completed", conclusion: "failure" },
+    });
+    const record = extractDynamoRecord(payload);
+    expect(record.failed_tests_json).toBeUndefined();
+  });
+
+  test("populates failed_tests_json from valid array", () => {
+    const payload = makePayload({
+      workflow: {
+        status: "completed",
+        conclusion: "failure",
+        failed_tests_detail: [
+          { name: "test_foo", classname: "TestBar", message: "AssertionError" },
+          { name: "test_baz", duration: 1.5 },
+        ],
+      },
+    });
+    const record = extractDynamoRecord(payload);
+    expect(record.failed_tests_json).toBeDefined();
+    const parsed = JSON.parse(record.failed_tests_json!);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0].name).toBe("test_foo");
+    expect(parsed[0].classname).toBe("TestBar");
+    expect(parsed[0].message).toBe("AssertionError");
+    expect(parsed[1].name).toBe("test_baz");
+    expect(parsed[1].duration).toBe(1.5);
+  });
+
+  test("truncates message longer than 1024 chars", () => {
+    const longMessage = "x".repeat(2000);
+    const payload = makePayload({
+      workflow: {
+        status: "completed",
+        conclusion: "failure",
+        failed_tests_detail: [{ name: "test_msg", message: longMessage }],
+      },
+    });
+    const record = extractDynamoRecord(payload);
+    const parsed = JSON.parse(record.failed_tests_json!);
+    expect(parsed[0].message).toHaveLength(1024);
+  });
+
+  test("truncates stacktrace longer than 4096 chars", () => {
+    const longStacktrace = "s".repeat(5000);
+    const payload = makePayload({
+      workflow: {
+        status: "completed",
+        conclusion: "failure",
+        failed_tests_detail: [
+          { name: "test_stack", stacktrace: longStacktrace },
+        ],
+      },
+    });
+    const record = extractDynamoRecord(payload);
+    const parsed = JSON.parse(record.failed_tests_json!);
+    expect(parsed[0].stacktrace).toHaveLength(4096);
+  });
+
+  test("filters out non-object elements", () => {
+    const payload = makePayload({
+      workflow: {
+        status: "completed",
+        conclusion: "failure",
+        failed_tests_detail: [
+          1,
+          "string",
+          null,
+          { name: "valid_test" },
+          undefined,
+        ],
+      },
+    });
+    const record = extractDynamoRecord(payload);
+    const parsed = JSON.parse(record.failed_tests_json!);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].name).toBe("valid_test");
+  });
+
+  test("stops accumulating when byte budget (256 KB) is exceeded", () => {
+    const bigMessage = "m".repeat(1024);
+    const bigStacktrace = "s".repeat(4096);
+    const entries = Array.from({ length: 200 }, (_, i) => ({
+      name: `test_${i}`,
+      message: bigMessage,
+      stacktrace: bigStacktrace,
+    }));
+    const payload = makePayload({
+      workflow: {
+        status: "completed",
+        conclusion: "failure",
+        failed_tests_detail: entries,
+      },
+    });
+    const record = extractDynamoRecord(payload);
+    expect(record.failed_tests_json).toBeDefined();
+    const byteLen = Buffer.byteLength(record.failed_tests_json!, "utf-8");
+    expect(byteLen).toBeLessThanOrEqual(256 * 1024);
+    const parsed = JSON.parse(record.failed_tests_json!);
+    expect(parsed.length).toBeLessThan(200);
+    expect(parsed.length).toBeGreaterThan(0);
+  });
+
+  test("handles element with missing name gracefully", () => {
+    const payload = makePayload({
+      workflow: {
+        status: "completed",
+        conclusion: "failure",
+        failed_tests_detail: [{ classname: "TestNoName", message: "oops" }],
+      },
+    });
+    const record = extractDynamoRecord(payload);
+    const parsed = JSON.parse(record.failed_tests_json!);
+    expect(parsed[0].name).toBe("");
+    expect(parsed[0].classname).toBe("TestNoName");
+  });
+});
+
+describe("writeToDynamo - write-once guard", () => {
+  const baseRecord: CrcrWorkflowJobRecord = {
+    dynamoKey: "repo/delivery/wf/job/cr1",
+    status: "completed",
+    downstream_repo: "Ascend/pytorch",
+    upstream_repo: "pytorch/pytorch",
+    pr_number: 0,
+    pytorch_head_sha: "abc123",
+    delivery_id: "delivery-1",
+    workflow_run_url: "https://example.com",
+    workflow_name: "nightly-ci",
+    job_name: "build-and-test",
+    check_run_id: "cr1",
+    run_id: "100",
+    run_attempt: 1,
+    conclusion: "success",
+  };
+
+  beforeEach(() => {
+    mockUpdate.mockReset();
+  });
+
+  test("includes ConditionExpression in DynamoDB update", async () => {
+    mockUpdate.mockResolvedValueOnce({});
+    await writeToDynamo(baseRecord);
+
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+    const args = mockUpdate.mock.calls[0][0];
+    expect(args.ConditionExpression).toBe(
+      "attribute_not_exists(#guard_status) OR #guard_status <> :guard_completed"
+    );
+    expect(args.ExpressionAttributeNames["#guard_status"]).toBe("status");
+    expect(args.ExpressionAttributeValues[":guard_completed"]).toBe(
+      "completed"
+    );
+  });
+
+  test("throws ApiError(409) on ConditionalCheckFailedException", async () => {
+    mockUpdate.mockRejectedValueOnce(
+      new ConditionalCheckFailedException({
+        message: "The conditional request failed",
+        $metadata: {},
+      })
+    );
+
+    await expect(writeToDynamo(baseRecord)).rejects.toThrow(ApiError);
+    try {
+      mockUpdate.mockRejectedValueOnce(
+        new ConditionalCheckFailedException({
+          message: "The conditional request failed",
+          $metadata: {},
+        })
+      );
+      await writeToDynamo(baseRecord);
+    } catch (e: any) {
+      expect(e).toBeInstanceOf(ApiError);
+      expect(e.statusCode).toBe(409);
+      expect(e.message).toContain("already finalized");
+    }
+  });
+
+  test("re-throws non-conditional DynamoDB errors", async () => {
+    const genericError = new Error("DynamoDB unavailable");
+    mockUpdate.mockRejectedValueOnce(genericError);
+
+    await expect(writeToDynamo(baseRecord)).rejects.toThrow(
+      "DynamoDB unavailable"
+    );
+  });
+
+  test("succeeds for in_progress record when no prior exists", async () => {
+    mockUpdate.mockResolvedValueOnce({});
+    const record = { ...baseRecord, status: "in_progress" };
+    delete (record as any).conclusion;
+
+    await expect(writeToDynamo(record)).resolves.toBeUndefined();
+    expect(mockUpdate).toHaveBeenCalledTimes(1);
+  });
+});

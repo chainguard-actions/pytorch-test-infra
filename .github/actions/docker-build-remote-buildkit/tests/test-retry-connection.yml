@@ -1,0 +1,31 @@
+name: Test retry on connection-phase failure
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker CLI (fails to connect twice)
+        run: |
+          rm -rf /tmp/fake-docker /tmp/fake-docker-bin
+          mkdir -p /tmp/fake-docker /tmp/fake-docker-bin
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker/docker" /tmp/fake-docker-bin/docker
+          chmod +x /tmp/fake-docker-bin/docker
+          echo "flaky:2" > /tmp/fake-docker/mode
+          echo /tmp/fake-docker-bin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: example.com/retry:1
+          connect-attempts: '5'
+          connect-delay: '0'
+      - name: Assert build retried and succeeded
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          count=$(cat /tmp/fake-docker/count)
+          echo "builds: $count image: $IMAGE"
+          if [ "$count" != "3" ]; then echo "FAIL: expected 3 build attempts"; exit 1; fi
+          if [ "$IMAGE" != "example.com/retry:1" ]; then echo "FAIL: wrong image output"; exit 1; fi
+          echo "PASS"

@@ -1,0 +1,44 @@
+name: Test waits for ssh sessions to drain
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who on PATH
+        run: |
+          MOCK="$RUNNER_TEMP/mockbin"
+          mkdir -p "$MOCK"
+          cat > "$MOCK/docker" <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/docker-calls.log
+          exit 0
+          EOF
+          # First call reports a session, subsequent calls report none
+          cat > "$MOCK/who" <<'EOF'
+          #!/bin/bash
+          echo "called" >> /tmp/who-calls.log
+          if [ "$(wc -l < /tmp/who-calls.log)" -le 1 ]; then
+            echo "user pts/0 2024-01-01 00:00 (10.0.0.1)"
+          fi
+          exit 0
+          EOF
+          chmod +x "$MOCK/docker" "$MOCK/who"
+          rm -f /tmp/docker-calls.log /tmp/who-calls.log
+          echo "$MOCK" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        timeout-minutes: 5
+      - name: Assert loop waited once then exited, and cleanup ran
+        run: |
+          echo "--- who calls ---"; cat /tmp/who-calls.log || true
+          echo "--- docker calls ---"; cat /tmp/docker-calls.log || true
+          COUNT="$(wc -l < /tmp/who-calls.log)"
+          echo "who call count: $COUNT"
+          if [ "$COUNT" -ne 2 ]; then
+            echo "FAIL: expected who to be called exactly 2 times"
+            exit 1
+          fi
+          grep -qx "system prune -af" /tmp/docker-calls.log || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          echo "PASS"

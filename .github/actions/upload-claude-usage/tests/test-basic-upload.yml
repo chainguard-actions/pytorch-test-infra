@@ -1,0 +1,74 @@
+name: Test basic upload with valid metrics
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI and metrics file
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<EOF
+          #!/bin/sh
+          echo "\$@" > "$RUNNER_TEMP/aws-args.txt"
+          cp "\$3" "$RUNNER_TEMP/aws-payload.json"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f "$RUNNER_TEMP/aws-args.txt" "$RUNNER_TEMP/aws-payload.json"
+          cat > "$RUNNER_TEMP/metrics.json" <<'EOF'
+          [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"content": "hi"}},
+            {"type": "result", "duration_ms": 12345, "num_turns": 7, "total_cost_usd": 0.5,
+             "usage": {"input_tokens": 100, "output_tokens": 200, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 400},
+             "modelUsage": {"claude-sonnet-4": {"inputTokens": 100}},
+             "result": "done"}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+      - name: Assert payload uploaded with expected fields
+        env:
+          EXPECTED_ACTOR: ${{ github.actor }}
+        run: |
+          set -e
+          if [ ! -f "$RUNNER_TEMP/aws-payload.json" ]; then
+            echo "FAIL: aws was not called"
+            exit 1
+          fi
+          echo "args: $(cat "$RUNNER_TEMP/aws-args.txt")"
+          cat "$RUNNER_TEMP/aws-payload.json"
+          P="$RUNNER_TEMP/aws-payload.json"
+          check() {
+            actual=$(jq -r "$1" "$P")
+            if [ "$actual" != "$2" ]; then
+              echo "FAIL: $1 = '$actual', expected '$2'"
+              exit 1
+            fi
+            echo "ok: $1 = $actual"
+          }
+          check '.duration_ms' 12345
+          check '.num_turns' 7
+          check '.total_cost_usd' 0.5
+          check '.input_tokens' 100
+          check '.output_tokens' 200
+          check '.cache_read_input_tokens' 300
+          check '.cache_creation_input_tokens' 400
+          check '.model' 'claude-sonnet-4'
+          check '.event_name' 'workflow_dispatch'
+          check '.pr_number' 0
+          check '.actor' "$EXPECTED_ACTOR"
+          check '.result // "absent"' 'absent'
+          check '.run_id | type' 'number'
+          check '.timestamp | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.000$")' 'true'
+          ARGS=$(cat "$RUNNER_TEMP/aws-args.txt")
+          case "$ARGS" in
+            "s3 cp /tmp/claude_usage.json s3://ossci-raw-job-status/claude_code_usage/"*.json) echo "ok: destination" ;;
+            *) echo "FAIL: unexpected aws args: $ARGS"; exit 1 ;;
+          esac
+          echo "PASS"

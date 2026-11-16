@@ -1,0 +1,29 @@
+name: Test no files found (warn default)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          name: no-files-warn
+          path: this-path-does-not-exist-12345/**
+      - name: Assert step succeeded and nothing was uploaded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          ACTUAL: ${{ steps.action.outputs.uploaded-objects }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "uploaded-objects: '$ACTUAL'"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ -n "$ACTUAL" ]; then
+            echo "FAIL: expected no uploaded objects"
+            exit 1
+          fi
+          echo "PASS"

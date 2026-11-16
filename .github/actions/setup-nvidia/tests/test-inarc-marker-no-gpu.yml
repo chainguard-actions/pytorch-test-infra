@@ -1,0 +1,43 @@
+name: Test ARC container marker without GPU
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create ARC marker
+        run: |
+          touch /.inarc 2>/dev/null || sudo touch /.inarc
+          ls -l /.inarc
+      - id: action
+        uses: .
+        with:
+          driver-version: 580.65.06
+      - name: Assert in-container-runner is true
+        env:
+          ACTUAL: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "true" ]; then
+            echo "FAIL: expected 'true'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert has-nvidia is false
+        env:
+          ACTUAL: ${{ steps.action.outputs.has-nvidia }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "false" ]; then
+            echo "FAIL: expected 'false'"
+            exit 1
+          fi
+          if [ "${HAS_NVIDIA_GPU:-}" != "false" ]; then
+            echo "FAIL: expected HAS_NVIDIA_GPU=false, got '${HAS_NVIDIA_GPU:-}'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Cleanup marker
+        if: always()
+        run: rm -f /.inarc 2>/dev/null || sudo rm -f /.inarc || true

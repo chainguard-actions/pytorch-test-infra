@@ -1,0 +1,63 @@
+name: Test fake GPU inside container runner
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake nvidia-smi and container marker
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/nvidia-smi" <<'EOF'
+          #!/bin/sh
+          if [ "$1" = "-L" ]; then
+            echo "GPU 0: Fake NVIDIA A10G (UUID: GPU-00000000-0000-0000-0000-000000000000)"
+            exit 0
+          fi
+          echo "fake nvidia-smi $*"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/nvidia-smi"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          touch /.incontainer 2>/dev/null || sudo touch /.incontainer
+          ls -l /.incontainer
+      - id: action
+        uses: .
+        with:
+          driver-version: 570.86.15
+      - name: Assert has-nvidia is true
+        env:
+          ACTUAL: ${{ steps.action.outputs.has-nvidia }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "true" ]; then
+            echo "FAIL: expected 'true'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert in-container-runner is true
+        env:
+          ACTUAL: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "true" ]; then
+            echo "FAIL: expected 'true'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert exported env
+        run: |
+          echo "HAS_NVIDIA_GPU=${HAS_NVIDIA_GPU:-<unset>} GPU_FLAG=${GPU_FLAG:-<unset>}"
+          if [ "${HAS_NVIDIA_GPU:-}" != "true" ]; then
+            echo "FAIL: expected HAS_NVIDIA_GPU=true"
+            exit 1
+          fi
+          if [ "${GPU_FLAG:-}" != "--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all" ]; then
+            echo "FAIL: unexpected GPU_FLAG"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Cleanup marker
+        if: always()
+        run: rm -f /.incontainer 2>/dev/null || sudo rm -f /.incontainer || true

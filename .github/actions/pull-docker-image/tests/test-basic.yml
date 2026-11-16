@@ -1,0 +1,25 @@
+name: Test basic pull
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: bash tests/fixtures/setup-mocks.sh
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/my/image:abc123
+      - name: Assert behavior
+        run: |
+          echo "--- docker.log"; cat /tmp/mock/docker.log
+          echo "--- aws.log"; cat /tmp/mock/aws.log
+          grep -q "ecr get-login-password --region us-east-1" /tmp/mock/aws.log || { echo "FAIL: aws login not called"; exit 1; }
+          grep -qx "docker login -u AWS --password-stdin 308535385114.dkr.ecr.us-east-1.amazonaws.com" /tmp/mock/docker.log || { echo "FAIL: login to default registry missing"; exit 1; }
+          grep -qx "docker manifest inspect example.com/my/image:abc123" /tmp/mock/docker.log || { echo "FAIL: manifest inspect missing"; exit 1; }
+          grep -qx "docker inspect --type=image example.com/my/image:abc123" /tmp/mock/docker.log || { echo "FAIL: local inspect missing"; exit 1; }
+          n=$(grep -cx "docker pull example.com/my/image:abc123" /tmp/mock/docker.log || true)
+          if [ "$n" != "1" ]; then echo "FAIL: expected exactly 1 pull, got $n"; exit 1; fi
+          echo "PASS"

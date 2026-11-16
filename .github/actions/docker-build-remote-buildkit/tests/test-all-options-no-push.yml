@@ -1,0 +1,46 @@
+name: Test optional inputs with push disabled
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker CLI
+        run: |
+          rm -rf /tmp/fake-docker /tmp/fake-docker-bin
+          mkdir -p /tmp/fake-docker /tmp/fake-docker-bin
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker/docker" /tmp/fake-docker-bin/docker
+          chmod +x /tmp/fake-docker-bin/docker
+          echo success > /tmp/fake-docker/mode
+          echo /tmp/fake-docker-bin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: example.com/opts:1
+          context: subdir
+          file: subdir/Custom.Dockerfile
+          target: builder
+          push: 'false'
+          cache-from: |
+            type=registry,ref=example.com/cache:a
+            type=registry,ref=example.com/cache:b
+          cache-to: type=inline
+          connect-delay: '0'
+      - name: Assert assembled arguments
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          f=/tmp/fake-docker/args-1.txt
+          cat "$f"
+          if [ "$IMAGE" != "example.com/opts:1" ]; then echo "FAIL: wrong image '$IMAGE'"; exit 1; fi
+          for want in --file subdir/Custom.Dockerfile --target builder --cache-from \
+                      type=registry,ref=example.com/cache:a type=registry,ref=example.com/cache:b \
+                      --cache-to type=inline; do
+            if ! grep -Fxq -- "$want" "$f"; then echo "FAIL: missing '$want'"; exit 1; fi
+          done
+          n=$(grep -Fxc -- "--cache-from" "$f")
+          if [ "$n" != "2" ]; then echo "FAIL: expected 2 --cache-from, got $n"; exit 1; fi
+          if grep -Fxq -- "--push" "$f"; then echo "FAIL: --push must not be set when push=false"; exit 1; fi
+          if [ "$(tail -n1 "$f")" != "subdir" ]; then echo "FAIL: context should be 'subdir'"; exit 1; fi
+          echo "PASS"

@@ -1,0 +1,435 @@
+/**
+ * Represents the individual job information returned by queries.
+ */
+export interface BasicJobData {
+  name?: string;
+  time?: string;
+  conclusion?: string;
+  status?: string;
+  runnerName?: string;
+  authorEmail?: string;
+}
+
+// Used by HUD
+export interface JobData extends BasicJobData {
+  workflowName?: string;
+  jobName?: string;
+  sha?: string;
+  id?: string;
+  branch?: string;
+  workflowId?: string;
+  githubArtifactUrl?: string;
+  htmlUrl?: string;
+  logUrl?: string;
+  durationS?: number;
+  queueTimeS?: number;
+  failureLines?: string[];
+  failureLineNumbers?: number[];
+  failureCaptures?: string[];
+  failureContext?: string[];
+  repo?: string;
+  failureAnnotation?: string;
+  failedPreviousRun?: boolean;
+  runAttempt?: number;
+  // Where this run came from. "autorevert" for a restart dispatched against a trunk/<sha> ref
+  // ("autorevert" matches the source_type spelling in queued_jobs/query.sql), "retry" for a re-run
+  // attempt, empty for a plain push — the default and overwhelming majority. REPORTED only: origin
+  // must never affect how runs are aggregated (see mergeCellRuns). Compare against the value rather
+  // than testing for presence.
+  // Both `null` and `undefined` occur and mean the same run: hud_query's rows reach the client with
+  // the key stripped, while commit_jobs_query ships a real SQL NULL.
+  runOrigin?: string | null;
+  // Login that dispatched the autorevert restart run.
+  restartDispatchedBy?: string | null;
+  // Login that triggered the latest attempt, set only when it differs from restartDispatchedBy —
+  // i.e. someone re-ran the restart.
+  restartRerunBy?: string;
+  // Attempt number of the autorevert restart run. Separate from runAttempt on purpose: that field
+  // carries the JOB's run_attempt from commit_jobs_query, and the HUD's crcr merge reads it.
+  restartRunAttempt?: number;
+  // Every run behind this cell, set by mergeCellRuns only when a cell really had more than one.
+  // The cell renders ONE run's per-row fields (see CellRun.isRepresentative), so without this the
+  // other runs have no route from the grid -- and on a flaky "F" cell, neither does the failure.
+  cellRuns?: CellRun[];
+}
+
+/**
+ * One run behind a HUD cell, carried so the tooltip can name it and show ITS diagnostics.
+ *
+ * Deliberately a compact subset of JobData rather than a nested JobData: it is only read by the
+ * cell tooltip, and embedding whole jobs would both grow the grid payload and couple the cell
+ * format to consumers (Dr.CI, the commit page) that have nothing to do with cell aggregation.
+ *
+ * The failure fields are the load-bearing ones. They are per-run, so a cell rendering a success
+ * holds none of the failed run's classification -- carrying them here is what lets the tooltip
+ * show the failure's log and captures rather than the passing run's (see detailJobForRun).
+ */
+export interface CellRun {
+  runOrigin?: string;
+  conclusion?: string;
+  id?: string;
+  htmlUrl?: string;
+  logUrl?: string;
+  durationS?: number;
+  // The autorevert restart RUN's attempt. There is deliberately no counterpart for the JOB's own
+  // run_attempt: hud_query does not project it, because the HUD page reads `runAttempt` when
+  // merging crcr rows and relies on it being undefined here (see the comment on that column in
+  // hud_query). So a "re-run attempt" line names the origin without an attempt number.
+  restartRunAttempt?: number;
+  restartDispatchedBy?: string;
+  restartRerunBy?: string;
+  failureLines?: string[];
+  failureLineNumbers?: number[];
+  failureCaptures?: string[];
+  failureContext?: string[];
+  // Carried so that picking a run rebinds EVERY id-bearing affordance in the tooltip, not just the
+  // ones on the row itself. `canShowODCCommand` reads (workflowId, id, failureLineNumbers) as one
+  // run's identity: with only `id` per-run, picking a sibling produced an ODC command pairing that
+  // run's job id with the REPRESENTATIVE's workflow id. `failureAnnotation` drives the classified
+  // styling, which is per-run for the same reason the classification text is.
+  workflowId?: string;
+  failureAnnotation?: string;
+  // The run whose per-row fields the cell itself renders. The cell's CONCLUSION is a function of
+  // the whole set, not of this run alone -- a mixed cell renders flaky "F" while this run passed.
+  // It is also what the tooltip shows before the reader picks anything, so the run list can render a
+  // default selection instead of a third "nothing is selected" state.
+  isRepresentative?: boolean;
+}
+
+// Used by Dr.CI
+export interface RecentWorkflowsData extends BasicJobData {
+  // only included if this is a job and not a workflow, if it is a workflow, the name is in the name field
+  name: string; // In BasicJobData, but required here
+  workflowId: number;
+  // Each workflow file has an id. In the webhook this is workflow_id.
+  // This can be used to group normal workflows (ex trunk) and those that failed
+  // to run (ex .github/workflows/trunk.yml) together even when they have
+  // different names.
+  workflowUniqueId: number;
+  jobName: string;
+  id: number;
+  completed_at: string;
+  html_url: string;
+  logUrl?: string;
+  head_sha: string;
+  head_sha_timestamp: string;
+  head_branch: string;
+  pr_number: number;
+  failure_captures: string[];
+  failure_lines: string[];
+  failure_context: string[];
+  /** CRCR downstream repo level ("L3" or "L4") — set by fetchCrcrWorkflows. */
+  downstreamLevel?: string;
+}
+
+export interface Artifact {
+  name: string;
+  kind: string;
+  expired: boolean;
+  sizeInBytes: number;
+  url: string;
+}
+
+export interface GroupData {
+  groupName: string;
+  jobs: JobData[];
+}
+
+export interface CommitData {
+  sha: string;
+  time: string;
+  prNum: number | null;
+  diffNum: string | null;
+  commitUrl: string;
+  commitTitle: string;
+  commitMessageBody: string;
+  author: string;
+  authorUrl: string | null;
+}
+
+export interface Highlight {
+  sha?: string;
+  name?: string;
+}
+
+interface RowDataBase extends CommitData {
+  isForcedMerge: boolean | false;
+  isForcedMergeWithFailures: boolean | false;
+  isAutoreverted: boolean | false;
+  autorevertWorkflows?: string[];
+  autorevertSignals?: string[];
+}
+
+export interface RowData extends RowDataBase {
+  nameToJobs: Map<string, JobData>;
+}
+
+// Returned by the API instead of the above type because it results in a smaller
+// response size
+export interface RowDataAPIResponse extends RowDataBase {
+  jobs: JobData[];
+}
+
+export interface HudDataAPIResponse {
+  shaGrid: RowDataAPIResponse[];
+  jobNames: string[];
+}
+
+export interface IssueData {
+  number: number;
+  title: string;
+  html_url: string;
+  state: "open" | "closed";
+  body: string;
+  updated_at: string;
+  author_association: string;
+  labels: string[];
+}
+
+export interface HudParams {
+  repoOwner: string;
+  repoName: string;
+  branch: string;
+  page: number;
+  per_page: number;
+  nameFilter?: string;
+  filter_reruns: boolean;
+  filter_unstable: boolean;
+  mergeEphemeralLF?: boolean;
+  mergeOSDC?: boolean;
+  useRegexFilter?: boolean;
+}
+
+export function isPyTorchPyTorchRepo(params: HudParams): boolean {
+  return params.repoOwner === "pytorch" && params.repoName === "pytorch";
+}
+
+export interface PRData {
+  title: string;
+  body: string;
+  shas: { sha: string; title: string }[];
+}
+
+export interface PRandJobs extends PRData {
+  head_sha: string;
+  head_sha_timestamp?: string;
+  pr_number: number;
+  jobs: RecentWorkflowsData[];
+  merge_base: string;
+  merge_base_date: string;
+  owner: string;
+  repo: string;
+}
+
+export interface FlakyTestData {
+  file: string;
+  suite: string;
+  name: string;
+  invoking_file: string;
+  numGreen?: number;
+  numRed?: number;
+  workflowIds: string[];
+  workflowNames: string[];
+  jobIds: number[];
+  jobNames: string[];
+  branches: string[];
+  eventTimes?: string[];
+  sampleTraceback?: string;
+}
+
+export interface DisabledNonFlakyTestData {
+  name: string;
+  classname: string;
+  filename: string;
+  flaky: boolean;
+  num_green: number;
+  num_red: number;
+}
+
+export interface TTSChange {
+  name: string | undefined;
+  htmlUrl: string | undefined;
+  duration: string;
+  color: string;
+  percentChangeString: string;
+  absoluteChangeString: string;
+}
+
+export interface JobsPerCommitData {
+  sha: string;
+  author: string;
+  body?: string;
+  time: string;
+  failures: string[];
+  successes: string[];
+}
+
+export interface CompilerPerformanceData {
+  abs_latency: number;
+  accuracy: string;
+  compilation_latency: number;
+  compiler: string;
+  compression_ratio: number;
+  dynamo_peak_mem: number;
+  eager_peak_mem: number;
+  granularity_bucket: string;
+  name: string;
+  speedup: number;
+  suite: string;
+  workflow_id: number;
+  job_id?: number;
+  branch?: string;
+  commit?: string;
+  device?: string;
+  dtype?: string;
+  mode?: string;
+  arch?: string;
+}
+
+export interface TritonBenchPerformanceData {
+  metric_name: string;
+  metric_value: number;
+  granularity_bucket: string;
+  name: string;
+  workflow_id: number;
+  head_branch: string;
+  operator: string;
+  suite: string;
+  mode: string;
+  dtype: string;
+  backend: string;
+}
+
+export interface BenchmarkData {
+  extra_info: { [key: string]: string };
+  granularity_bucket: string;
+  job_id: number;
+  metric: string;
+  model: string;
+  quantization?: string;
+  backend?: string;
+  suite: string;
+  value: number;
+  workflow_id: number;
+  commit?: string;
+  branch?: string;
+  device?: string;
+  dtype?: string;
+  mode?: string;
+  arch?: string;
+}
+
+export interface RepoBranchAndCommit {
+  repo: string;
+  branch: string;
+  commit: string;
+  date?: string;
+}
+
+export interface BranchAndCommit {
+  branch: string;
+  commit: string;
+  date?: string;
+}
+
+export enum JobAnnotation {
+  NULL = "None",
+  BROKEN_TRUNK = "Broken Trunk",
+  TEST_FLAKE = "Test Flake",
+  INFRA_BROKEN = "Broken Infra",
+  INFRA_FLAKE = "Infra Flake",
+  NETWORK = "Network Error",
+  OTHER = "Other",
+}
+
+export enum LogAnnotation {
+  NULL = "None",
+  PREFER_TOP_LOG = "Prefer Top Log",
+  PREFER_BOTTOM_LOG = "Prefer Bottom Log",
+  PREFER_NEITHER = "Prefer Neither",
+  SIMILAR_LOGS = "Similar Logs",
+}
+
+export function packHudParams(input: any) {
+  return {
+    repoOwner: input.repoOwner as string,
+    repoName: input.repoName as string,
+    branch: input.branch as string,
+    page: parseInt((input.page as string) ?? 1) || 1,
+    per_page: parseInt((input.per_page as string) ?? 50),
+    nameFilter: input.name_filter as string | undefined,
+    filter_reruns: input.filter_reruns ?? (false as boolean),
+    filter_unstable: input.filter_unstable ?? (false as boolean),
+    mergeEphemeralLF: input.mergeEphemeralLF as boolean,
+    mergeOSDC: input.mergeOSDC as boolean,
+    useRegexFilter: input.useRegexFilter === "true",
+  };
+}
+
+export function formatHudUrlForFetch(
+  urlPrefix: string,
+  params: HudParams
+): string {
+  return formatHudURL(urlPrefix, params, /*keepFilter=*/ false);
+}
+
+export function formatHudUrlForRoute(
+  urlPrefix: string,
+  params: HudParams
+): string {
+  return formatHudURL(urlPrefix, params, /*keepFilter=*/ true);
+}
+
+function formatHudURL(
+  urlPrefix: string,
+  params: HudParams,
+  keepFilter: boolean
+): string {
+  let base = `/${urlPrefix}/${params.repoOwner}/${
+    params.repoName
+  }/${encodeURIComponent(params.branch)}/${params.page}`;
+
+  base += `?per_page=${params.per_page}`;
+
+  if (params.filter_reruns) {
+    base += `&filter_reruns=true`;
+  }
+
+  if (params.filter_unstable) {
+    base += `&filter_unstable=true`;
+  }
+
+  if (params.nameFilter != null && keepFilter) {
+    base += `&name_filter=${encodeURIComponent(params.nameFilter)}`;
+  }
+
+  if (params.useRegexFilter && keepFilter) {
+    base += `&useRegexFilter=true`;
+  }
+
+  if (params.mergeEphemeralLF) {
+    base += `&mergeEphemeralLF=true`;
+  }
+
+  if (params.mergeOSDC) {
+    base += `&mergeOSDC=true`;
+  }
+
+  // Preserve autorevert view params so router.push doesn't strip them.
+  // Check both query params (legacy) and path segment (clean URL).
+  if (typeof window !== "undefined") {
+    const path = window.location.pathname;
+    const current = new URLSearchParams(window.location.search);
+    const isAutorevertPath = path.endsWith("/autorevert");
+    if (isAutorevertPath || current.get("autorevert") === "1") {
+      for (const key of ["autorevert", "ar_ts", "ar_wf", "ar_sf"]) {
+        const val = current.get(key);
+        if (val !== null) {
+          base += `&${key}=${encodeURIComponent(val)}`;
+        }
+      }
+    }
+  }
+
+  return base;
+}

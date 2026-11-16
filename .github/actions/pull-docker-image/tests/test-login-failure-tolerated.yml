@@ -1,0 +1,23 @@
+name: Test login failure tolerated
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: |
+          bash tests/fixtures/setup-mocks.sh
+          touch /tmp/mock/login-fail
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/my/image:nologin
+      - name: Assert retries and pull
+        run: |
+          cat /tmp/mock/docker.log
+          n=$(grep -c "^docker login" /tmp/mock/docker.log || true)
+          if [ "$n" != "3" ]; then echo "FAIL: expected 3 login attempts, got $n"; exit 1; fi
+          grep -qx "docker pull example.com/my/image:nologin" /tmp/mock/docker.log || { echo "FAIL: pull missing"; exit 1; }
+          echo "PASS"

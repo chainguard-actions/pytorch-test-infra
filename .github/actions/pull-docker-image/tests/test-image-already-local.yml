@@ -1,0 +1,25 @@
+name: Test image already local
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: |
+          bash tests/fixtures/setup-mocks.sh
+          touch /tmp/mock/image-local
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/my/image:local
+      - name: Assert no pull
+        run: |
+          cat /tmp/mock/docker.log
+          grep -qx "docker inspect --type=image example.com/my/image:local" /tmp/mock/docker.log || { echo "FAIL: local inspect missing"; exit 1; }
+          if grep -q "^docker pull" /tmp/mock/docker.log; then
+            echo "FAIL: pull should not run when image is local"
+            exit 1
+          fi
+          echo "PASS"

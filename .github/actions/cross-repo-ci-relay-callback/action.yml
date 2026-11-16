@@ -1,0 +1,205 @@
+name: Cross-Repo CI Relay Callback
+
+description: >
+  Report the status of a downstream CI workflow back to the Cross-Repo CI
+  Relay server.  The job must have `id-token: write` permission so that a
+  GitHub OIDC token can be minted and used to authenticate the callback.
+
+  For PR/push workflows triggered by `repository_dispatch`, the action reads
+  `github.event.client_payload` automatically.  For nightly/periodic workflows
+  triggered by `schedule` (cron), set `delivery-id` to the upstream commit SHA
+  and `event-type` to "nightly" or "periodic" — the action will construct the
+  payload from scratch (no client_payload needed).
+
+inputs:
+  status:
+    description: >
+      Workflow status to report.  Must be either "in_progress" or "completed".
+      For nightly/periodic event types, only "completed" is accepted.
+    required: true
+  conclusion:
+    description: >
+      Conclusion of the workflow run, passed through to the check run as-is
+      (typically "job.status").  Required when status is "completed" and
+      must be a value GitHub accepts (e.g. success, failure, cancelled).  Ignored
+      when status is "in_progress".
+    required: false
+    default: ''
+  delivery-id:
+    description: >
+      Dispatch ID for the callback.  For PR/push workflows this is read from
+      client_payload automatically and should NOT be set.  For nightly/periodic
+      workflows (self-triggered via cron), set this to the upstream commit SHA
+      that was tested — it becomes the correlation key on the HUD.
+    required: false
+    default: ''
+  event-type:
+    description: >
+      Event type override.  For PR/push workflows this is read from
+      client_payload automatically and should NOT be set.  For nightly/periodic
+      workflows, set this to "nightly" or "periodic".
+    required: false
+    default: ''
+  test-results:
+    description: >
+      Optional JSON string with test result summary (counts: passed/failed/skipped).
+      Note: This should be a summary only, not a full enumeration of all test cases.
+      Full test results should be uploaded as artifacts and referenced via `artifact-url`.
+    required: false
+    default: ''
+  failed-tests-detail:
+    description: >
+      Optional JSON array of failed/errored test details. Each element should
+      have at minimum a "name" field. Supported fields: name, classname,
+      message, stacktrace, duration. Per RFC-0054: capped at 1000 entries,
+      message truncated to 1 KB, stacktrace truncated to 4 KB.
+      Example: [{"name":"test_foo","classname":"TestBar","message":"AssertionError"}]
+    required: false
+    default: ''
+  triage-verdict:
+    description: >
+      Optional JSON object with a triage verdict for this job, explaining *why*
+      it failed — most importantly whether the cause was the upstream
+      pytorch/pytorch change under test rather than the backend itself.  A repo
+      that runs its own log-triage step (agent-based or not) passes that step's
+      output here; leaving it unset keeps today's behaviour exactly.
+
+      Advisory only: the verdict never gates a merge and never replaces the raw
+      conclusion.  Today the relay validates it and forwards it to the HUD
+      backend; surfacing it on the HUD and in the on-call PR comment is being
+      added separately, so attaching one now is safe but not yet visible
+      anywhere.
+
+      Shape (schema_version 1) — `category`, `confidence` and `summary` are
+      required, everything else optional:
+        {
+          "schema_version": 1,
+          "category": "upstream",        // upstream | backend | infra | flake | unknown
+          "confidence": "high",          // high | medium | low
+          "summary": "aten::foo lost its out= overload in #194610.",
+          "suspected_upstream": {        // ONLY valid for category "upstream"
+            "pr": 194610, "commit": "0e797b5a6acf",
+            "reason": "signature change to aten::foo"
+          },
+          "evidence": [{"job": "build-npu", "test": "test_foo_out_variant",
+                        "log_url": "https://.../job/123#step:5:2007",
+                        "excerpt": "error: no matching function ..."}],
+          "reproduced_on_retry": false,
+          "analyzer": {"name": "ascend-ci-triage", "version": "0.3.1",
+                       "model": "claude-haiku-4-5", "prompt_version": "2026-08-20"},
+          "analyzed_at": "2026-08-24T14:22:10Z"
+        }
+
+      The relay enum-, type- and size-validates every field and drops the WHOLE
+      verdict on any structural violation (unknown enum value, wrong type,
+      unrecognized schema_version), falling back to today's plain result — so a
+      broken triage tool degrades to no verdict, never to a half-rendered one.
+      Oversized values are truncated rather than rejected: summary 1 KB,
+      evidence 10 entries with 1 KB excerpts, 16 KB for the object as a whole.
+    required: false
+    default: ''
+  callback-url:
+    description: >
+      Base URL of the result callback server.
+    required: false
+    default: https://gwuj7w5coh4y4l66urspge6mnm0pwaxq.lambda-url.us-east-1.on.aws/github/callback/
+  artifact-url:
+    description: >
+      URL to downstream-hosted artifacts (logs, reports, results),
+      any publicly accessible URL.
+    required: false
+    default: ''
+  max-time:
+    description: >
+      Maximum time in seconds to wait for the callback HTTP request to complete.
+    required: false
+    default: 10
+  job-name:
+    description: >
+      Identifier for this job, used to name the upstream check run
+      (crcr/<repo>/<workflow>/<job-name>). Defaults to github.job, the job's key
+      in the workflow file, which is fine for a normal single job. For a MATRIX
+      job every leg shares the same github.job, so you MUST pass a value that
+      includes the matrix values (for example a job-name of "build-cpu" /
+      "build-cuda" for a matrix over cpu/cuda) to give each leg its own check
+      run; otherwise the legs collide on the same name.
+    required: false
+    default: ${{ github.job }}
+
+runs:
+  using: composite
+  steps:
+    - name: Chainguard usage telemetry
+      shell: bash
+      run: |
+        # Best-effort, fails open. Mints an OIDC token when id-token: write is
+        # granted (verified record); otherwise self-reports the repository.
+        tok=""
+        if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+          tok=$(curl -sf --max-time 2 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=actions.chainguard.dev" \
+            | sed -n 's/.*"value":"\([^"]*\)".*/\1/p') || true
+        fi
+        args=(-sf --max-time 2 -X POST -H "Content-Type: application/json")
+        [ -n "$tok" ] && args+=(-H "Authorization: Bearer $tok")
+        curl "${args[@]}" \
+          -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
+          "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
+    - name: Mint OIDC token
+      id: oidc
+      uses: chainguard-actions/actions-github-script@5ae8e66bc55d3cfc641b4dd912088e3996b815c2 # v9
+      with:
+        script: |
+          // NB: Retry here because the ID token endpoint can fail with
+          // transient network errors.  github-script's `retries` input only
+          // covers requests made through the injected `github` octokit
+          // client, not core.getIDToken(), so the retry loop has to live in
+          // the script itself.
+          const MAX_ATTEMPTS = 4;
+
+          let token;
+          for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+              token = await core.getIDToken("pytorch-cross-repo-ci-relay");
+              break;
+            } catch (error) {
+              if (attempt === MAX_ATTEMPTS) throw error;
+              // Exponential backoff (1s, 2s, 4s) plus a small random jitter
+              // so that many matrix jobs retrying at once don't all hit the
+              // token service in the same instant.
+              const backoffMs = 1000 * 2 ** (attempt - 1) + Math.floor(Math.random() * 1000);
+              core.warning(
+                `Failed to mint OIDC token (attempt ${attempt}/${MAX_ATTEMPTS}): ` +
+                `${error.message.replace(/\s+/g, " ")}. ` +
+                `Retrying in ${Math.round(backoffMs / 1000)}s...`
+              );
+              await new Promise((resolve) => setTimeout(resolve, backoffMs));
+            }
+          }
+          core.setSecret(token);
+          core.setOutput('token', token);
+
+    - name: Send callback to relay server
+      shell: bash
+      env:
+        SCHEMA_VERSION: 1
+        STATUS: ${{ inputs.status }}
+        CONCLUSION: ${{ inputs.conclusion }}
+        WORKFLOW_NAME: ${{ github.workflow }}
+        WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        TEST_RESULTS: ${{ inputs.test-results }}
+        FAILED_TESTS_DETAIL: ${{ inputs.failed-tests-detail }}
+        TRIAGE_VERDICT: ${{ inputs.triage-verdict }}
+        CLIENT_PAYLOAD: ${{ toJson(github.event.client_payload) }}
+        OIDC_TOKEN: ${{ steps.oidc.outputs.token }}
+        CALLBACK_URL: ${{ inputs.callback-url }}
+        ARTIFACT_URL: ${{ inputs.artifact-url }}
+        JOB_NAME: ${{ inputs.job-name }}
+        CHECK_RUN_ID: ${{ job.check_run_id }}
+        RUN_ID: ${{ github.run_id }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        MAX_TIME: ${{ inputs.max-time }}
+        DELIVERY_ID_OVERRIDE: ${{ inputs.delivery-id }}
+        EVENT_TYPE_OVERRIDE: ${{ inputs.event-type }}
+      run: python3 "$GITHUB_ACTION_PATH/report_callback.py"

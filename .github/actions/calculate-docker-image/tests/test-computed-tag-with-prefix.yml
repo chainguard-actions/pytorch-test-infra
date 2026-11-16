@@ -1,0 +1,68 @@
+name: Test computed tag with custom prefix
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "fake-password"
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "fake docker $*" >> /tmp/fake-docker-calls.txt
+          case "$1" in
+            login) cat >/dev/null; echo "Login Succeeded"; exit 0 ;;
+            manifest) exit 1 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - name: Prepare
+        id: prep
+        run: |
+          chmod +x tests/fixtures/docker/build.sh
+          rm -f /tmp/fake-docker-build-args.txt
+          echo "hash=$(git rev-parse HEAD:tests/fixtures/docker)" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: myimage
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: registry.example.com
+          custom-tag-prefix: pre
+          repo-name: myrepo
+          always-rebuild: "true"
+      - name: Assert docker-image computed from tree hash
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+          HASH: ${{ steps.prep.outputs.hash }}
+        run: |
+          EXPECTED="registry.example.com/myrepo/myimage:pre-${HASH}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ -z "$HASH" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert fake build script was invoked
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          cat /tmp/fake-docker-build-args.txt
+          if ! grep -qF -- "-t ${ACTUAL}" /tmp/fake-docker-build-args.txt; then
+            echo "FAIL: build script not invoked with -t ${ACTUAL}"
+            exit 1
+          fi
+          if ! grep -qF -- ":pre -t" /tmp/fake-docker-build-args.txt; then
+            echo "FAIL: build script not passed custom tag prefix"
+            exit 1
+          fi
+          echo "PASS"

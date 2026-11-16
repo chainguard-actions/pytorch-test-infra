@@ -1,0 +1,61 @@
+name: Test basic build and push
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker CLI
+        run: |
+          rm -rf /tmp/fake-docker /tmp/fake-docker-bin
+          mkdir -p /tmp/fake-docker /tmp/fake-docker-bin
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker/docker" /tmp/fake-docker-bin/docker
+          chmod +x /tmp/fake-docker-bin/docker
+          echo success > /tmp/fake-docker/mode
+          echo /tmp/fake-docker-bin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: ghcr.io/pytorch/my-image:abc123
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.source=https://example.com/repo
+          connect-delay: '0'
+      - name: Assert image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/pytorch/my-image:abc123" ]; then
+            echo "FAIL: expected first tag as image output"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert buildx invocation
+        run: |
+          set -u
+          f=/tmp/fake-docker/args-1.txt
+          echo "--- build args ---"; cat "$f"
+          count=$(cat /tmp/fake-docker/count)
+          if [ "$count" != "1" ]; then echo "FAIL: expected 1 build, got $count"; exit 1; fi
+          for want in buildx build --tag ghcr.io/pytorch/my-image:abc123 --platform \
+                      --build-arg FOO=bar BAZ=qux --label \
+                      org.opencontainers.image.source=https://example.com/repo --push; do
+            if ! grep -Fxq -- "$want" "$f"; then echo "FAIL: missing arg '$want'"; exit 1; fi
+          done
+          if ! grep -Eq '^linux/(amd64|arm64)$' "$f"; then echo "FAIL: missing platform value"; exit 1; fi
+          if [ "$(tail -n1 "$f")" != "." ]; then echo "FAIL: context should be last arg '.'"; exit 1; fi
+          for nowant in --file --target --cache-from --cache-to; do
+            if grep -Fxq -- "$nowant" "$f"; then echo "FAIL: unexpected arg '$nowant'"; exit 1; fi
+          done
+          echo "--- create log ---"; cat /tmp/fake-docker/create.log
+          if ! grep -Fxq -- "remote-buildkit" /tmp/fake-docker/create.log; then
+            echo "FAIL: remote-buildkit builder was not created"; exit 1
+          fi
+          if ! grep -Eq '^tcp://buildkitd-(amd64|arm64)\.buildkit:1234$' /tmp/fake-docker/create.log; then
+            echo "FAIL: builder address not passed"; exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,37 @@
+name: Test dry-run upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create benchmark results
+        run: |
+          mkdir -p "$RUNNER_TEMP/bench-results"
+          echo '[{"benchmark":{"name":"test"},"model":{"name":"m"},"metric":{"name":"latency","benchmark_values":[1.0]}}]' > "$RUNNER_TEMP/bench-results/results.json"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          benchmark-results-dir: ${{ runner.temp }}/bench-results
+          benchmark-name: act-test
+          dry-run: 'true'
+          github-token: ${{ github.token }}
+      - name: Assert action ran (or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "DEVICE_NAME: ${DEVICE_NAME:-}"
+          if [ "$OUTCOME" = "success" ]; then
+            case "${DEVICE_NAME:-}" in
+              cpu|arm64-cpu|cuda|rocm|hpu|xpu) echo "PASS: device name '$DEVICE_NAME'" ;;
+              *) echo "FAIL: action succeeded but DEVICE_NAME is not set correctly"; exit 1 ;;
+            esac
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo job lookup not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

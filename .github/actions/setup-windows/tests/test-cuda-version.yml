@@ -1,0 +1,64 @@
+name: Test with cuda version
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install shims for Windows-only tools
+        run: |
+          set -eu
+          SHIMS="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIMS"
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          cat > "$SHIMS/powershell" <<'EOF'
+          #!/bin/sh
+          echo "fake powershell $*" >> "${RUNNER_TEMP}/shims/powershell.log"
+          exit 0
+          EOF
+          cat > "$SHIMS/cygpath" <<'EOF'
+          #!/bin/sh
+          for last; do :; done
+          echo "$last"
+          EOF
+          cat > "$SHIMS/curl" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *169.254.169.254*) exit 7 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+          chmod +x "$SHIMS/powershell" "$SHIMS/cygpath" "$SHIMS/curl"
+          echo "$SHIMS" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: "12.4"
+      - name: Assert action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert environment variables and git config
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR:-}"
+          echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR:-}"
+          if [ ! -d "${RUNNER_ARTIFACT_DIR:-/nonexistent}" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR not set or missing"
+            exit 1
+          fi
+          if [ ! -d "${RUNNER_TEST_RESULTS_DIR:-/nonexistent}" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR not set or missing"
+            exit 1
+          fi
+          if [ "$(git config --global core.longpaths)" != "true" ]; then
+            echo "FAIL: core.longpaths not true"
+            exit 1
+          fi
+          echo "PASS"

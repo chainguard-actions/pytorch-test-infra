@@ -1,0 +1,1154 @@
+import AutorevertToggle, {
+  isAutorevertActive,
+} from "components/autorevert/AutorevertToggle";
+import AutorevertView from "components/autorevert/AutorevertView";
+import CheckBoxSelector from "components/common/CheckBoxSelector";
+import CopyLink from "components/common/CopyLink";
+import LoadingPage from "components/common/LoadingPage";
+import PageSelector from "components/common/PageSelector";
+import { LocalTimeHuman } from "components/common/TimeUtils";
+import TooltipTarget from "components/common/tooltipTarget/TooltipTarget";
+import GreenLightIcon from "components/greenlight/GreenLightIcon";
+import styles from "components/hud.module.css";
+import {
+  GroupHudTableColumns,
+  GroupHudTableHeader,
+  passesGroupFilter,
+} from "components/hud/GroupHudTableHeaders";
+import HudGroupedCell from "components/job/GroupJobConclusion";
+import JobConclusion from "components/job/JobConclusion";
+import JobFilterInput from "components/job/JobFilterInput";
+import JobTooltip from "components/job/JobTooltip";
+import SettingsPanel from "components/SettingsPanel";
+import {
+  AdvisorVerdict,
+  AdvisorVerdictRow,
+  buildVerdictsBySha,
+  deduplicateVerdicts,
+  matchVerdictToJob,
+} from "lib/advisorVerdictUtils";
+import { isJobAutorevertSignal } from "lib/autorevertUtils";
+import { fetcher, useClickHouseAPIImmutable } from "lib/GeneralUtils";
+import {
+  greenlightRepoKey,
+  isGreenlightRepo,
+} from "lib/greenlight/greenlightConfig";
+import {
+  buildGreenlightCommitParams,
+  buildStatusByTrunkSha,
+  GreenlightTrunkStatusRow,
+  normalizeSha,
+  shouldShowGreenlightStatus,
+} from "lib/greenlight/greenlightHudState";
+import {
+  getGroupingData,
+  groups,
+  isUnstableGroup,
+  sortGroupNamesForHUD,
+} from "lib/JobClassifierUtil";
+import {
+  isFailedJob,
+  isRerunDisabledTestsJob,
+  isUnstableJob,
+} from "lib/jobUtils";
+import { ParamSelector } from "lib/ParamSelector";
+import { trackRouteEvent } from "lib/tracking/track";
+import {
+  formatHudUrlForRoute,
+  Highlight,
+  HudParams,
+  isPyTorchPyTorchRepo,
+  IssueData,
+  JobData,
+  packHudParams,
+  RowData,
+} from "lib/types";
+import {
+  useGroupingPreference,
+  useHideAlwaysSkippedPreference,
+  useHideGreenColumnsPreference,
+  useHideNonViableStrictPreference,
+  useMonsterFailuresPreference,
+  usePreference,
+  useShowGreenlightRejectedPreference,
+} from "lib/useGroupingPreference";
+import useHudData from "lib/useHudData";
+import useTableFilter from "lib/useTableFilter";
+import Head from "next/head";
+import { useRouter } from "next/router";
+import { IssueLabelApiResponse } from "pages/api/issue/[label]";
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import useSWR from "swr";
+
+export function JobCell({
+  sha,
+  job,
+  unstableIssues,
+  isAutorevertSignal,
+  repoOwner,
+  repoName,
+}: {
+  sha: string;
+  job: JobData;
+  unstableIssues: IssueData[];
+  isAutorevertSignal?: boolean;
+  repoOwner?: string;
+  repoName?: string;
+}) {
+  const [pinnedId, setPinnedId] = useContext(PinnedTooltipContext);
+  const advisorVerdictsBySha = useContext(AdvisorVerdictsContext);
+
+  // Match AI advisor verdict to this job cell (only show on failed jobs)
+  const verdictsForSha = advisorVerdictsBySha.get(sha);
+  const advisorVerdict =
+    verdictsForSha && isFailedJob(job)
+      ? matchVerdictToJob(job.name ?? "", verdictsForSha, job.failureCaptures)
+      : undefined;
+
+  // Build cell style classes
+  const cellClasses = [];
+  if (pinnedId.name == job.name) {
+    cellClasses.push(styles.highlight);
+  }
+  if (isAutorevertSignal) {
+    cellClasses.push(styles.autorevertSignal);
+  }
+  if (advisorVerdict) {
+    cellClasses.push(styles.advisorVerdict);
+  }
+  const cellStyle = cellClasses.join(" ");
+
+  return (
+    <td onDoubleClick={() => window.open(job.htmlUrl)}>
+      <TooltipTarget
+        pinnedId={pinnedId}
+        setPinnedId={setPinnedId}
+        tooltipContent={
+          <JobTooltip
+            job={job}
+            // This cell's own sha, always. It used to be `pinnedId.sha || sha`, which is either
+            // redundant (a pinned CELL is this cell, so the shas match) or wrong: clicking a commit
+            // pins {sha, name: undefined} and leaves hover tooltips live, so hovering a
+            // does-not-exist cell on another row handed SingleWorkflowDispatcher the PINNED row's
+            // sha -- offering to dispatch the job against the wrong commit (DP17, gpt-5.6-sol).
+            sha={sha}
+            isAutorevertSignal={isAutorevertSignal}
+            advisorVerdict={advisorVerdict}
+            repoOwner={repoOwner}
+            repoName={repoName}
+            // Deliberately NOT TooltipTarget's own "pin only when nothing is pinned" guard. Pinning a
+            // commit ROW sets {sha, name: undefined}, which leaves hover tooltips live -- so under
+            // that guard picking a run in a hovered tooltip would still be lost on mouse-out, which
+            // is the whole defect being fixed (DP17, gpt-5.6-sol). Moving the pin from the row to
+            // this cell is the intended effect: the reader just acted on this cell.
+            pinCell={() => {
+              if (pinnedId.sha !== sha || pinnedId.name !== job.name) {
+                setPinnedId({ sha: sha, name: job.name as string });
+              }
+            }}
+          />
+        }
+        sha={sha as string}
+        name={job.name as string}
+      >
+        <div className={`${styles.center} ${cellStyle}`}>
+          <JobConclusion
+            conclusion={job.conclusion}
+            failedPreviousRun={job.failedPreviousRun}
+            classified={job.failureAnnotation != null}
+            warningOnly={
+              isFailedJob(job) &&
+              (isRerunDisabledTestsJob(job) ||
+                isUnstableJob(job, unstableIssues))
+            }
+            jobData={job}
+          />
+          {advisorVerdict && (
+            <div
+              className={`${styles.advisorBadge} ${
+                styles[
+                  `advisorVerdict_${advisorVerdict.verdict}` as keyof typeof styles
+                ] ?? ""
+              }`}
+              title={`AI: ${advisorVerdict.verdict} (${Math.round(
+                advisorVerdict.confidence * 100
+              )}%)`}
+            >
+              ai
+            </div>
+          )}
+        </div>
+      </TooltipTarget>
+    </td>
+  );
+}
+
+function HudRow({
+  rowData,
+  names,
+  unstableIssues,
+  repoOwner,
+  repoName,
+}: {
+  rowData: RowData;
+  names: string[];
+  unstableIssues: IssueData[];
+  repoOwner?: string;
+  repoName?: string;
+}) {
+  const router = useRouter();
+  const params = packHudParams(router.query);
+  const sha = rowData.sha;
+
+  const [pinnedId, setPinnedId] = useContext(PinnedTooltipContext);
+  const greenlightStatus = useContext(GreenlightStatusesContext).get(
+    normalizeSha(sha)
+  );
+  const [showGreenlightRejected] = useContext(ShowGreenlightRejectedContext);
+
+  let rowStyle = "";
+  if (pinnedId.sha == sha) {
+    rowStyle = styles.highlight;
+  } else if (rowData.isAutoreverted) {
+    rowStyle = styles.autoreverted;
+  }
+
+  function clickCommit(e: React.MouseEvent) {
+    if (pinnedId.name !== undefined || pinnedId.sha !== undefined) {
+      return;
+    }
+    e.stopPropagation();
+    setPinnedId({ sha: rowData.sha, name: undefined });
+  }
+
+  return (
+    <tr className={rowStyle} onClick={(e) => clickCommit(e)}>
+      <td className={styles.jobMetadata}>
+        <LocalTimeHuman timestamp={rowData.time} />
+      </td>
+      <td className={styles.jobMetadata}>
+        <a href={rowData.commitUrl}>{sha.substring(0, 7)}</a>
+      </td>
+      <td className={styles.jobMetadata}>
+        <div className={styles.jobMetadataTruncated}>
+          {/* here, we purposefully do not use Link/. The prefetch behavior
+          (even with prefetch disabled) spams our backend).*/}
+          <a href={`/${params.repoOwner}/${params.repoName}/commit/${sha}`}>
+            {rowData.commitTitle}
+          </a>
+        </div>
+      </td>
+      <td className={styles.jobMetadata}>
+        {rowData.prNum !== null && (
+          <div className={styles.prCell}>
+            <a
+              href={`https://github.com/${params.repoOwner}/${params.repoName}/pull/${rowData.prNum}`}
+              title={
+                rowData.isForcedMerge
+                  ? rowData.isForcedMergeWithFailures
+                    ? "Forced merge with failures that were merge-blocking"
+                    : "Forced merge. Had no merge-blocking failures"
+                  : undefined
+              }
+            >
+              {rowData.isForcedMerge ? (
+                <mark
+                  className={
+                    rowData.isForcedMergeWithFailures
+                      ? styles.forcedMergeWithFailure
+                      : styles.forcedMerge
+                  }
+                >
+                  #{rowData.prNum}
+                </mark>
+              ) : (
+                <div>#{rowData.prNum}</div>
+              )}
+            </a>
+            {/* LAND always; NO_LAND only when the reader has opted in. Every
+            other status is the absence of a verdict, never shown here. */}
+            {shouldShowGreenlightStatus(
+              greenlightStatus,
+              showGreenlightRejected
+            ) && <GreenLightIcon status={greenlightStatus} size={14} />}
+          </div>
+        )}
+      </td>
+      <td className={styles.jobMetadata}>
+        <div className={styles.jobMetadataTruncatedAuthor}>
+          {rowData.authorUrl !== null ? (
+            <a href={rowData.authorUrl}>{rowData.author}</a>
+          ) : (
+            rowData.author
+          )}
+        </div>
+      </td>
+      <HudJobCells
+        rowData={rowData}
+        names={names}
+        unstableIssues={unstableIssues}
+        params={params}
+        repoOwner={repoOwner}
+        repoName={repoName}
+      />
+    </tr>
+  );
+}
+
+function HudJobCells({
+  rowData,
+  names,
+  unstableIssues,
+  params,
+  repoOwner,
+  repoName,
+}: {
+  rowData: RowData;
+  names: string[];
+  unstableIssues: IssueData[];
+  params: HudParams;
+  repoOwner?: string;
+  repoName?: string;
+}) {
+  let groupNames = groups.map((group) => group.name).concat("other");
+  const { expandedGroups, setExpandedGroups, groupNameMapping } =
+    useContext(GroupingContext);
+  return (
+    <>
+      {names.map((name) => {
+        if (groupNames.includes(name)) {
+          let numClassified = 0;
+          for (const jobName of groupNameMapping.get(name) ?? []) {
+            if (rowData.nameToJobs.get(jobName)?.failureAnnotation != null) {
+              numClassified++;
+            }
+          }
+
+          const failedJobs = groupNameMapping.get(name)?.filter((jobName) => {
+            const job = rowData.nameToJobs.get(jobName);
+            return job && isFailedJob(job);
+          });
+
+          return (
+            <HudGroupedCell
+              sha={rowData.sha}
+              key={name}
+              groupName={name}
+              repoOwner={params.repoOwner}
+              repoName={params.repoName}
+              jobs={
+                groupNameMapping
+                  .get(name)
+                  ?.map((jobName) => {
+                    return rowData.nameToJobs.get(jobName);
+                  })
+                  .filter((job) => job != null && job != undefined) as JobData[]
+              }
+              isExpanded={expandedGroups.has(name)}
+              toggleExpanded={() => {
+                if (expandedGroups.has(name)) {
+                  expandedGroups.delete(name);
+                } else {
+                  expandedGroups.add(name);
+                }
+                setExpandedGroups(new Set(expandedGroups));
+              }}
+              isClassified={
+                numClassified != 0 && numClassified == failedJobs?.length
+              }
+              unstableIssues={unstableIssues}
+              rowData={rowData}
+            />
+          );
+        } else {
+          const job = rowData.nameToJobs.get(name) ?? {
+            name: name,
+            conclusion: undefined,
+          };
+
+          return (
+            <JobCell
+              sha={rowData.sha}
+              key={name}
+              job={job}
+              unstableIssues={unstableIssues}
+              isAutorevertSignal={isJobAutorevertSignal(job, rowData)}
+              repoOwner={repoOwner}
+              repoName={repoName}
+            />
+          );
+        }
+      })}
+    </>
+  );
+}
+
+function HudTableBody({
+  shaGrid,
+  names,
+  unstableIssues,
+  repoOwner,
+  repoName,
+}: {
+  shaGrid: RowData[];
+  names: string[];
+  unstableIssues: IssueData[];
+  repoOwner?: string;
+  repoName?: string;
+}) {
+  return (
+    <tbody>
+      {shaGrid.map((row: RowData) => (
+        <HudRow
+          key={row.sha}
+          rowData={row}
+          names={names}
+          unstableIssues={unstableIssues}
+          repoOwner={repoOwner}
+          repoName={repoName}
+        />
+      ))}
+    </tbody>
+  );
+}
+
+function FiltersAndSettings({}: {}) {
+  const router = useRouter();
+  const params = packHudParams(router.query);
+  const { jobFilter, handleSubmit } = useTableFilter(params);
+  const [mergeEphemeralLF, setMergeEphemeralLF] = useContext(MergeLFContext);
+  const [mergeOSDC, setMergeOSDC] = useContext(MergeOSDCContext);
+  const [showGreenlightRejected, setShowGreenlightRejected] = useContext(
+    ShowGreenlightRejectedContext
+  );
+  const [autorevertView, setAutorevertView] = useContext(AutorevertViewContext);
+  const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
+  const [hideUnstable, setHideUnstable] = usePreference("hideUnstable");
+  const [hideGreenColumns, setHideGreenColumns] =
+    useHideGreenColumnsPreference();
+  const [hideNonViableStrict, setHideNonViableStrict] =
+    useHideNonViableStrictPreference();
+  const [hideAlwaysSkipped, setHideAlwaysSkipped] =
+    useHideAlwaysSkippedPreference();
+  const [useGrouping, setUseGrouping] = useGroupingPreference(
+    params.nameFilter
+  );
+
+  // Only show autorevert toggle for pytorch/pytorch main
+  const isPyTorchMain =
+    isPyTorchPyTorchRepo(params) && params.branch === "main";
+
+  // The viable/strict concept (and thus this filter) only exists for
+  // pytorch/pytorch, so the toggle is a no-op for any other repo.
+  const isPyTorchRepo = isPyTorchPyTorchRepo(params);
+
+  // No other repo is evaluated by Green Light, so there is nothing for the
+  // toggle to reveal there.
+  const isGreenlight = isGreenlightRepo(params.repoOwner, params.repoName);
+
+  return (
+    <div className={styles.hudControlsRow}>
+      {!autorevertView && (
+        <>
+          <JobFilterInput
+            currentFilter={jobFilter}
+            handleSubmit={handleSubmit}
+          />
+          <SettingsPanel
+            settingGroups={{
+              // You need to specify both checkBoxName and key for each setting.
+              // `checkbox name` is used by CheckBoxSelector while `key` is
+              // used to uniquely identify the component in the settings panel.
+              // As far as I can CheckBoxSelector cannot read or write `key` but
+              // React requires us to set key since it's a list element, so we
+              // end up with some unfortunate duplication.
+              "View Options": [
+                <CheckBoxSelector
+                  value={useGrouping}
+                  setValue={(value) => setUseGrouping(value)}
+                  checkBoxName="groupView"
+                  key="groupView"
+                  labelText={"Use grouped view"}
+                />,
+                <MonsterFailuresCheckbox key="monsterFailures" />,
+                <CheckBoxSelector
+                  value={showGreenlightRejected}
+                  setValue={(value) => setShowGreenlightRejected(value)}
+                  checkBoxName="showGreenlightRejected"
+                  key="showGreenlightRejected"
+                  labelText={"Show Green Light rejections"}
+                  disabled={!isGreenlight}
+                  title={
+                    isGreenlight
+                      ? "Also mark PRs Green Light declined to approve"
+                      : "Only applies to repos Green Light reviews"
+                  }
+                />,
+              ],
+              "Filter Options": [
+                <CheckBoxSelector
+                  value={hideUnstable}
+                  setValue={(value) => setHideUnstable(value)}
+                  checkBoxName="hideUnstable"
+                  key="hideUnstable"
+                  labelText={"Hide unstable jobs"}
+                />,
+                <CheckBoxSelector
+                  value={hideGreenColumns}
+                  setValue={(value) => setHideGreenColumns(value)}
+                  checkBoxName="hideGreenColumns"
+                  key="hideGreenColumns"
+                  labelText={"Hide green columns"}
+                />,
+                <CheckBoxSelector
+                  value={hideNonViableStrict}
+                  setValue={(value) => setHideNonViableStrict(value)}
+                  checkBoxName="hideNonViableStrict"
+                  key="hideNonViableStrict"
+                  labelText={"Hide non-viable-strict jobs"}
+                  disabled={!isPyTorchRepo}
+                  title={
+                    isPyTorchRepo
+                      ? undefined
+                      : "Only applies to the pytorch/pytorch repo"
+                  }
+                />,
+                <CheckBoxSelector
+                  value={hideAlwaysSkipped}
+                  setValue={(value) => setHideAlwaysSkipped(value)}
+                  checkBoxName="hideAlwaysSkipped"
+                  key="hideAlwaysSkipped"
+                  labelText={"Hide always-skipped jobs"}
+                />,
+                <CheckBoxSelector
+                  value={mergeEphemeralLF}
+                  setValue={setMergeEphemeralLF}
+                  checkBoxName="mergeEphemeralLF"
+                  key="mergeEphemeralLF"
+                  labelText={"Condense LF, ephemeral jobs"}
+                />,
+                <CheckBoxSelector
+                  value={mergeOSDC}
+                  setValue={setMergeOSDC}
+                  checkBoxName="mergeOSDC"
+                  key="mergeOSDC"
+                  labelText={"Condense OSDC, non-OSDC jobs"}
+                />,
+              ],
+            }}
+            isOpen={settingsPanelOpen}
+            onToggle={() => setSettingsPanelOpen(!settingsPanelOpen)}
+          />
+        </>
+      )}
+      {isPyTorchMain && (
+        <AutorevertToggle
+          active={autorevertView}
+          onToggle={setAutorevertView}
+          repoOwner={params.repoOwner}
+          repoName={params.repoName}
+          branch={params.branch}
+          page={params.page}
+          per_page={params.per_page}
+        />
+      )}
+    </div>
+  );
+}
+
+export const MonsterFailuresContext = createContext<
+  [boolean, ((_value: boolean) => void) | undefined]
+>([false, undefined]);
+
+// AI Advisor verdicts context: sha -> verdicts[]
+export const AdvisorVerdictsContext = createContext<
+  Map<string, AdvisorVerdict[]>
+>(new Map());
+
+// trunk sha -> the GreenLight status of the revision that produced that commit.
+export const GreenlightStatusesContext = createContext<Map<string, string>>(
+  new Map()
+);
+
+// Whether the rows also mark commits GreenLight refused. The default matches
+// useShowGreenlightRejectedPreference's: off, so a row rendered outside the
+// provider shows approvals only rather than every refusal.
+export const ShowGreenlightRejectedContext = createContext<
+  [boolean, (_value: boolean) => void]
+>([false, (_) => {}]);
+
+export const GroupingContext = createContext<{
+  groupNameMapping: Map<string, Array<string>>;
+  expandedGroups: Set<string>;
+  setExpandedGroups: React.Dispatch<React.SetStateAction<Set<string>>>;
+}>({
+  groupNameMapping: new Map(),
+  expandedGroups: new Set(),
+  setExpandedGroups: () => {},
+});
+
+export function MonsterFailuresProvider({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const [monsterFailures, setMonsterFailures] = useMonsterFailuresPreference();
+  return (
+    <MonsterFailuresContext.Provider
+      value={[monsterFailures, setMonsterFailures]}
+    >
+      {children}
+    </MonsterFailuresContext.Provider>
+  );
+}
+
+export function MonsterFailuresCheckbox() {
+  const [monsterFailures, setMonsterFailures] = useContext(
+    MonsterFailuresContext
+  );
+  return (
+    <CheckBoxSelector
+      value={monsterFailures}
+      setValue={(value) => setMonsterFailures && setMonsterFailures(value)}
+      checkBoxName="monsterFailures"
+      labelText={"Monsterize failures"}
+    />
+  );
+}
+
+function HudHeader({ params }: { params: HudParams }) {
+  function handleBranchSubmit(branch: string) {
+    window.location.href = formatHudUrlForRoute("hud", { ...params, branch });
+  }
+  function handleRepoSubmit(repoOwnerAndName: string) {
+    const split = repoOwnerAndName.split("/");
+    window.location.href = formatHudUrlForRoute("hud", {
+      ...params,
+      repoOwner: split[0],
+      repoName: split[1],
+    });
+  }
+
+  return (
+    <h1>
+      <ParamSelector
+        value={`${params.repoOwner}/${params.repoName}`}
+        handleSubmit={handleRepoSubmit}
+      />
+      :{" "}
+      <ParamSelector value={params.branch} handleSubmit={handleBranchSubmit} />
+    </h1>
+  );
+}
+
+export const PinnedTooltipContext = createContext<[Highlight, any]>([
+  { sha: undefined, name: undefined },
+  null,
+]);
+
+export const MergeLFContext = createContext<[boolean, (val: boolean) => void]>([
+  false,
+  (_) => {},
+]);
+
+export const MergeOSDCContext = createContext<
+  [boolean, (val: boolean) => void]
+>([false, (_) => {}]);
+
+export const AutorevertViewContext = createContext<
+  [boolean, (val: boolean) => void]
+>([false, (_) => {}]);
+
+export default function Hud() {
+  const router = useRouter();
+  const [mergeEphemeralLF, setMergeEphemeralLF] = usePreference("mergeLF");
+  const [mergeOSDC, setMergeOSDC] = usePreference(
+    "mergeOSDC",
+    /*override*/ undefined,
+    /*default*/ false
+  );
+  const [showGreenlightRejected, setShowGreenlightRejected] =
+    useShowGreenlightRejectedPreference();
+  const [autorevertView, setAutorevertView] = useState(() =>
+    isAutorevertActive(router.query)
+  );
+  // Sync autorevert state when route changes (e.g. clicking "home")
+  useEffect(() => {
+    setAutorevertView(isAutorevertActive(router.query));
+  }, [router.query]);
+  const params = packHudParams({
+    ...router.query,
+    mergeEphemeralLF: mergeEphemeralLF,
+    mergeOSDC: mergeOSDC,
+  });
+
+  // Logic to handle tooltip pinning. The behavior we want is:
+  // - If the user clicks on a tooltip, it should be pinned.
+  // - While a tooltip is pinned, we don't show any other tooltips.
+  // - Clicking outside the tooltip or pressing esc should unpin it.
+  // This state needs to be set up at this level because we want to capture all
+  // clicks.
+
+  const [pinnedTooltip, setPinnedTooltip] = useState<Highlight>({
+    sha: undefined,
+    name: undefined,
+  });
+
+  function handleClick() {
+    setPinnedTooltip({ sha: undefined, name: undefined });
+  }
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (e.code === "Escape") {
+        setPinnedTooltip({ sha: undefined, name: undefined });
+      }
+    },
+    [setPinnedTooltip]
+  );
+
+  useEffect(() => {
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+  const titleRepoInfo =
+    params.repoOwner != null && params.repoName != null && params.branch != null
+      ? ` (${params.repoOwner}/${params.repoName}: ${params.branch})`
+      : "";
+  return (
+    <>
+      <Head>
+        <title>{`HUD ${titleRepoInfo}`}</title>
+      </Head>
+      <PinnedTooltipContext.Provider value={[pinnedTooltip, setPinnedTooltip]}>
+        <MonsterFailuresProvider>
+          <MergeLFContext.Provider
+            value={[mergeEphemeralLF, setMergeEphemeralLF]}
+          >
+            <MergeOSDCContext.Provider value={[mergeOSDC, setMergeOSDC]}>
+              <ShowGreenlightRejectedContext.Provider
+                value={[showGreenlightRejected, setShowGreenlightRejected]}
+              >
+                <AutorevertViewContext.Provider
+                  value={[autorevertView, setAutorevertView]}
+                >
+                  {params.branch !== undefined && (
+                    <div onClick={handleClick}>
+                      <div style={{ display: "flex", alignItems: "flex-end" }}>
+                        <HudHeader params={params} />
+                        <CopyPermanentLink
+                          params={params}
+                          style={{ marginLeft: "10px" }}
+                          autorevertView={autorevertView}
+                        />
+                      </div>
+                      <div style={{ position: "relative", clear: "both" }}>
+                        <FiltersAndSettings />
+                        {autorevertView ? (
+                          <AutorevertView />
+                        ) : (
+                          <GroupedHudTable params={params} />
+                        )}
+                      </div>
+                      {!autorevertView && (
+                        <>
+                          <PageSelector params={params} baseUrl="hud" />
+                          <br />
+                          <div>
+                            <em>This page automatically updates.</em>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </AutorevertViewContext.Provider>
+              </ShowGreenlightRejectedContext.Provider>
+            </MergeOSDCContext.Provider>
+          </MergeLFContext.Provider>
+        </MonsterFailuresProvider>
+      </PinnedTooltipContext.Provider>
+    </>
+  );
+}
+
+function useLatestCommitSha(params: HudParams) {
+  const { data } = useHudData({ ...params, page: 1, per_page: 1 });
+  if (data === undefined) {
+    return null;
+  }
+  if (data.length === 0) {
+    return null; // Nothing worth copying
+  }
+  if (data[0].sha === undefined) {
+    return null; // No sha to copy. This should never happen (TM)
+  }
+
+  return data[0].sha;
+}
+
+function CopyPermanentLink({
+  params,
+  style,
+  autorevertView,
+}: {
+  params: HudParams;
+  style?: React.CSSProperties;
+  autorevertView?: boolean;
+}) {
+  // Hook must be called unconditionally (React rules of hooks)
+  const latestCommitSha = useLatestCommitSha(params);
+
+  // In autorevert view, copy the current URL which has all ar_* params
+  if (autorevertView) {
+    const url = typeof window !== "undefined" ? window.location.href : "";
+    return <CopyLink textToCopy={url} compressed={false} style={style} />;
+  }
+
+  // Branch and tag pointers can change over time.
+  // For a permanent, we take the latest immutable commit as our reference
+  if (latestCommitSha === null) {
+    return <></>;
+  }
+  const permaParams = { ...params, branch: latestCommitSha };
+
+  const domain = window.location.origin;
+  const path = formatHudUrlForRoute("hud", permaParams);
+  const url = `${domain}${path}`;
+  return <CopyLink textToCopy={url} compressed={false} style={style} />;
+}
+
+interface CrcrHudRow {
+  pr_number: number;
+  pytorch_head_sha: string;
+  downstream_repo: string;
+  downstream_repo_level: string;
+  workflow_name: string;
+  job_name: string;
+  check_run_id: string;
+  run_id: string;
+  run_attempt: number;
+  status: string;
+  conclusion: string;
+  workflow_run_url: string;
+  duration_seconds: number;
+  failed_tests_json: string;
+}
+
+function crcrToJobData(row: CrcrHudRow): JobData {
+  let conclusion: string | undefined;
+  if (row.status === "completed") {
+    conclusion = row.conclusion || "failure";
+  } else if (row.status === "in_progress") {
+    conclusion = "pending";
+  } else {
+    conclusion = undefined;
+  }
+
+  const failureLines: string[] = [];
+  if (conclusion === "failure") {
+    if (row.failed_tests_json) {
+      try {
+        const tests = JSON.parse(row.failed_tests_json);
+        if (Array.isArray(tests) && tests.length > 0) {
+          failureLines.push(
+            tests.map((t: any) => t.name || t.classname || "").join("; ")
+          );
+        }
+      } catch {
+        // fall through to synthetic failure line
+      }
+    }
+    if (failureLines.length === 0) {
+      failureLines.push(`${row.downstream_repo}/${row.job_name}`);
+    }
+  }
+
+  const level = row.downstream_repo_level || "L2";
+  return {
+    name: `CRCR ${row.downstream_repo} / ${row.job_name} (${level})`,
+    conclusion,
+    htmlUrl: row.workflow_run_url,
+    durationS: row.duration_seconds || undefined,
+    failureLines: failureLines.length > 0 ? failureLines : undefined,
+    id: row.check_run_id,
+    sha: row.pytorch_head_sha,
+    workflowName: `CRCR ${row.downstream_repo}`,
+    jobName: `${row.job_name} (${level})`,
+    runAttempt: row.run_attempt,
+  };
+}
+
+function GroupedHudTable({ params }: { params: HudParams }) {
+  const router = useRouter();
+  const { data, isLoading, error } = useHudData(params);
+  const { data: unstableIssuesData } = useSWR<IssueLabelApiResponse>(
+    `/api/issue/unstable`,
+    fetcher,
+    {
+      dedupingInterval: 300 * 1000,
+      refreshInterval: 300 * 1000, // refresh every 5 minutes
+    }
+  );
+
+  // Lazy-load AI advisor verdicts for commits on screen
+  const shas = useMemo(() => data?.map((row) => row.sha) ?? [], [data]);
+  const { data: advisorRows } = useClickHouseAPIImmutable<AdvisorVerdictRow>(
+    "advisor_verdicts_for_hud",
+    {
+      repo: `${params.repoOwner}/${params.repoName}`,
+      shas: shas,
+    },
+    shas.length > 0
+  );
+  const advisorVerdictsBySha = useMemo(() => {
+    if (!advisorRows || advisorRows.length === 0) return new Map();
+    return buildVerdictsBySha(deduplicateVerdicts(advisorRows));
+  }, [advisorRows]);
+
+  // Lazy-load CRCR results for commits on screen (pytorch/pytorch only)
+  const isPyTorch = isPyTorchPyTorchRepo(params);
+  const prNums = useMemo(
+    () =>
+      data
+        ?.map((row) => row.prNum)
+        .filter((n): n is number => n != null && n > 0) ?? [],
+    [data]
+  );
+  const { data: crcrRows } = useClickHouseAPIImmutable<CrcrHudRow>(
+    "crcr_hud_results",
+    { prNums },
+    isPyTorch && prNums.length > 0
+  );
+
+  // Lazy-load GreenLight verdicts for commits on screen, keyed by trunk sha so a
+  // PR that landed more than once is marked per landing. The PR number and the
+  // commit's own time are what recover the head GreenLight reviewed.
+  const isGreenlight = isGreenlightRepo(params.repoOwner, params.repoName);
+  const greenlightCommits = useMemo(
+    () => buildGreenlightCommitParams(data),
+    [data]
+  );
+  const { data: greenlightRows } =
+    useClickHouseAPIImmutable<GreenlightTrunkStatusRow>(
+      "greenlight_trunk_commit_states",
+      {
+        repo: greenlightRepoKey(params.repoOwner, params.repoName),
+        owner: params.repoOwner,
+        project: params.repoName,
+        ...greenlightCommits,
+      },
+      isGreenlight && greenlightCommits.shas.length > 0
+    );
+  const greenlightStatusBySha = useMemo(
+    () => buildStatusByTrunkSha(greenlightRows),
+    [greenlightRows]
+  );
+
+  // Merge CRCR results into each row's nameToJobs so they appear as
+  // regular grid columns (with grouping, filtering, monsterization).
+  const dataWithCrcr = useMemo(() => {
+    if (!data) return data;
+    if (!crcrRows || crcrRows.length === 0) return data;
+
+    const crcrByPr = new Map<number, CrcrHudRow[]>();
+    for (const row of crcrRows) {
+      const list = crcrByPr.get(row.pr_number) ?? [];
+      list.push(row);
+      crcrByPr.set(row.pr_number, list);
+    }
+
+    return data.map((row) => {
+      if (!row.prNum) return row;
+      const crcrForPr = crcrByPr.get(row.prNum);
+      if (!crcrForPr) return row;
+
+      const merged = new Map(row.nameToJobs);
+      for (const cr of crcrForPr) {
+        const jobData = crcrToJobData(cr);
+        const existing = merged.get(jobData.name!);
+        if (
+          !existing ||
+          !existing.id ||
+          cr.run_attempt > (existing.runAttempt ?? 0)
+        ) {
+          merged.set(jobData.name!, jobData);
+        }
+      }
+      return { ...row, nameToJobs: merged };
+    });
+  }, [data, crcrRows]);
+
+  const jobNames = new Set(
+    dataWithCrcr?.flatMap((row) => Array.from(row.nameToJobs.keys()))
+  );
+
+  const [hideUnstable] = usePreference("hideUnstable");
+  const [hideGreenColumns] = useHideGreenColumnsPreference();
+  const [hideNonViableStrict] = useHideNonViableStrictPreference();
+  const [hideAlwaysSkipped] = useHideAlwaysSkippedPreference();
+  const [useGrouping] = useGroupingPreference(params.nameFilter);
+
+  const {
+    shaGrid,
+    groupNameMapping,
+    jobsWithFailures,
+    groupsWithFailures,
+    jobsAlwaysSkipped,
+    groupsAlwaysSkipped,
+    jobsViableStrictBlocking,
+    groupsViableStrictBlocking,
+  } = getGroupingData(
+    dataWithCrcr ?? [],
+    jobNames,
+    (!useGrouping && hideUnstable) || (useGrouping && !hideUnstable),
+    unstableIssuesData ?? [],
+    params.repoOwner,
+    params.repoName
+  );
+
+  const [expandedGroups, setExpandedGroups] = useState(new Set<string>());
+
+  const { jobFilter } = useTableFilter(params);
+
+  useEffect(() => {
+    // Only run on component mount, this assumes that the user's preference is
+    // the value in local storage
+    trackRouteEvent(router, "groupingPreference", { useGrouping: useGrouping });
+  }, [router, useGrouping]);
+
+  const groupNames = Array.from(groupNameMapping.keys());
+  let names = sortGroupNamesForHUD(groupNames);
+
+  if (useGrouping) {
+    expandedGroups.forEach((group) => {
+      const nameInd = names.indexOf(group);
+      names = [
+        ...names.slice(0, nameInd + 1),
+        ...(groupNameMapping.get(group) ?? []),
+        ...names.slice(nameInd + 1),
+      ];
+    });
+    if (hideUnstable) {
+      names = names.filter(
+        (name) => !isUnstableGroup(name, unstableIssuesData ?? [])
+      );
+    }
+  } else {
+    names = [...jobNames];
+    groups.forEach((group) => {
+      if (
+        groupNames.includes(group.name) &&
+        (group.persistent ||
+          (isUnstableGroup(group.name, unstableIssuesData ?? []) &&
+            hideUnstable))
+      ) {
+        // Add group name, take out all the jobs that belong to that group
+        // unless the group is expanded
+        names.push(group.name);
+        names = names.filter(
+          (name) => !groupNameMapping.get(group.name)?.includes(name)
+        );
+        if (expandedGroups.has(group.name)) {
+          names = names.concat(groupNameMapping.get(group.name) ?? []);
+        }
+      }
+    });
+  }
+
+  names = names.filter((name) => {
+    // Filter by job filter text first
+    if (
+      !passesGroupFilter(
+        jobFilter,
+        name,
+        groupNameMapping,
+        params.useRegexFilter || false
+      )
+    ) {
+      return false;
+    }
+
+    // If hiding non-viable-strict, only show jobs/groups that are viable/strict
+    // blocking. The viable/strict concept only exists for pytorch/pytorch, so
+    // this filter is ignored for any other repo (even if the setting is checked).
+    if (hideNonViableStrict && isPyTorchPyTorchRepo(params)) {
+      if (
+        !groupsViableStrictBlocking.has(name) &&
+        !jobsViableStrictBlocking.has(name)
+      ) {
+        return false;
+      }
+    }
+
+    // If hiding always-skipped jobs, drop columns where every recorded run was skipped
+    if (hideAlwaysSkipped) {
+      if (groupNameMapping.has(name)) {
+        if (groupsAlwaysSkipped.has(name)) {
+          return false;
+        }
+      } else if (jobsAlwaysSkipped.has(name)) {
+        return false;
+      }
+    }
+
+    // If hiding green columns, filter out names that don't have any failed jobs
+    if (hideGreenColumns) {
+      // For group names, check if any job in the group has failures
+      if (groupNameMapping.has(name)) {
+        return groupsWithFailures.has(name);
+      }
+      // For individual job names, check if this job has failures
+      else {
+        return jobsWithFailures.has(name);
+      }
+    }
+
+    return true;
+  });
+
+  if (isLoading) {
+    return <LoadingPage />;
+  }
+  if (error) {
+    return (
+      <div>
+        Error loading HUD data: {error.message} {error.status} {error.info}
+      </div>
+    );
+  }
+
+  if (data === undefined) {
+    return <div>No data available? Please file an issue</div>;
+  }
+
+  return (
+    <AdvisorVerdictsContext.Provider value={advisorVerdictsBySha}>
+      <GreenlightStatusesContext.Provider value={greenlightStatusBySha}>
+        <GroupingContext.Provider
+          value={{ groupNameMapping, expandedGroups, setExpandedGroups }}
+        >
+          <table className={styles.hudTable} style={{ overflow: "auto" }}>
+            <GroupHudTableColumns names={names} />
+            <GroupHudTableHeader names={names} />
+            <HudTableBody
+              shaGrid={shaGrid}
+              names={names}
+              unstableIssues={unstableIssuesData ?? []}
+              repoOwner={params.repoOwner}
+              repoName={params.repoName}
+            />
+          </table>
+        </GroupingContext.Provider>
+      </GreenlightStatusesContext.Provider>
+    </AdvisorVerdictsContext.Provider>
+  );
+}

@@ -1,0 +1,38 @@
+name: Test basic checkout
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          path: checkout-target
+      - name: Assert files checked out
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/checkout-target/action.yml" ]; then
+            echo "FAIL: action.yml not found in checkout-target"
+            ls -la "$GITHUB_WORKSPACE/checkout-target" || true
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert commit output matches HEAD
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          echo "commit output: $COMMIT"
+          HEAD_SHA="$(git -C "$GITHUB_WORKSPACE/checkout-target" rev-parse HEAD)"
+          echo "HEAD: $HEAD_SHA"
+          if ! echo "$COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "FAIL: commit output is not a 40-char SHA"
+            exit 1
+          fi
+          if [ "$COMMIT" != "$HEAD_SHA" ]; then
+            echo "FAIL: commit output does not match HEAD"
+            exit 1
+          fi
+          echo "PASS"

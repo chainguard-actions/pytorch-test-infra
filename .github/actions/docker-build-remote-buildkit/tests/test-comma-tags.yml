@@ -1,0 +1,43 @@
+name: Test comma and newline separated tags
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker CLI
+        run: |
+          rm -rf /tmp/fake-docker /tmp/fake-docker-bin
+          mkdir -p /tmp/fake-docker /tmp/fake-docker-bin
+          cp "$GITHUB_WORKSPACE/tests/fixtures/fake-docker/docker" /tmp/fake-docker-bin/docker
+          chmod +x /tmp/fake-docker-bin/docker
+          echo success > /tmp/fake-docker/mode
+          echo /tmp/fake-docker-bin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: |
+            example.com/img:one , example.com/img:two
+            example.com/img:three
+          connect-delay: '0'
+      - name: Assert image output is the first tag
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "example.com/img:one" ]; then
+            echo "FAIL: expected 'example.com/img:one'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert all tags passed
+        run: |
+          f=/tmp/fake-docker/args-1.txt
+          cat "$f"
+          n=$(grep -Fxc -- "--tag" "$f")
+          if [ "$n" != "3" ]; then echo "FAIL: expected 3 --tag flags, got $n"; exit 1; fi
+          for t in example.com/img:one example.com/img:two example.com/img:three; do
+            if ! grep -Fxq -- "$t" "$f"; then echo "FAIL: missing tag $t"; exit 1; fi
+          done
+          echo "PASS"

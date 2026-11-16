@@ -1,0 +1,39 @@
+name: Test basic checkout into repository subdirectory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: octocat/Hello-World
+          ref: master
+          submodules: "false"
+      - name: Assert repository checked out under its own path
+        run: |
+          ls -la "$GITHUB_WORKSPACE/octocat/Hello-World" || true
+          if [ ! -f "$GITHUB_WORKSPACE/octocat/Hello-World/README" ]; then
+            echo "FAIL: README not found in octocat/Hello-World"
+            exit 1
+          fi
+          if [ ! -d "$GITHUB_WORKSPACE/octocat/Hello-World/.git" ]; then
+            echo "FAIL: .git not found in checkout"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert RUNNER_ARTIFACT_DIR is exported
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEMP=$RUNNER_TEMP"
+          if [ -z "$RUNNER_ARTIFACT_DIR" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR not set"
+            exit 1
+          fi
+          if [ "$RUNNER_ARTIFACT_DIR" != "${RUNNER_TEMP}/artifacts" ]; then
+            echo "FAIL: expected ${RUNNER_TEMP}/artifacts"
+            exit 1
+          fi
+          echo "PASS"

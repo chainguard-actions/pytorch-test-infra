@@ -1,0 +1,22 @@
+name: Test CHANNEL set earlier via GITHUB_ENV is preserved
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Pre-set CHANNEL
+        run: echo "CHANNEL=test" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+      - name: Assert CHANNEL remains test
+        env:
+          CHANNEL_EXPR: ${{ env.CHANNEL }}
+        run: |
+          echo "CHANNEL: '${CHANNEL:-}' env.CHANNEL: '$CHANNEL_EXPR'"
+          if [ "${CHANNEL:-}" != "test" ] || [ "$CHANNEL_EXPR" != "test" ]; then
+            echo "FAIL: expected CHANNEL=test (default step should have been skipped)"
+            exit 1
+          fi
+          echo "PASS"

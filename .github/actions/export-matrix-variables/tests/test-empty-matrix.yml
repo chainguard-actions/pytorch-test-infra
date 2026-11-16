@@ -1,0 +1,23 @@
+name: Test empty matrix is a no-op
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Clean temp files
+        run: rm -f "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}" "${RUNNER_TEMP}/matrix_to_export.json"
+      - id: action
+        uses: .
+        with:
+          target-os: linux
+      - name: Assert nothing was exported
+        run: |
+          if [ -e "${RUNNER_TEMP}/matrix_to_export.json" ]; then
+            echo "FAIL: matrix json should not be written"; exit 1
+          fi
+          if [ -e "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}" ]; then
+            echo "FAIL: env file should not be written"; exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,86 @@
+name: Test basic nightly commit creation
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create local fake remote with main and nightly branches
+        run: |
+          set -euo pipefail
+          REMOTE_ROOT=/tmp/fake-remote
+          rm -rf "$REMOTE_ROOT" /tmp/seed
+          mkdir -p "$REMOTE_ROOT/fake-owner"
+          git init --bare "$REMOTE_ROOT/fake-owner/fake-repo"
+          ln -s fake-repo "$REMOTE_ROOT/fake-owner/fake-repo.git"
+          git init /tmp/seed
+          cd /tmp/seed
+          git config user.email "seed@example.com"
+          git config user.name "Seed"
+          git checkout -b nightly
+          echo "old nightly" > file.txt
+          git add file.txt
+          git commit -m "old nightly"
+          git checkout --orphan main
+          git rm -rf . >/dev/null
+          echo "main content" > main.txt
+          git add main.txt
+          git commit -m "main commit"
+          git push "$REMOTE_ROOT/fake-owner/fake-repo" main nightly
+          git -C "$REMOTE_ROOT/fake-owner/fake-repo" symbolic-ref HEAD refs/heads/main
+          echo "MAIN_SHA=$(git rev-parse main)" >> "$GITHUB_ENV"
+          echo "MAIN_TREE=$(git rev-parse 'main^{tree}')" >> "$GITHUB_ENV"
+          echo "OLD_NIGHTLY=$(git rev-parse nightly)" >> "$GITHUB_ENV"
+          # Redirect github.com URLs to the local fake remote
+          git config --global url."file://$REMOTE_ROOT/".insteadOf "https://github.com/"
+      - id: action
+        uses: .
+        with:
+          token: ${{ github.token }}
+          repository: fake-owner/fake-repo
+          ref: main
+          path: nightly-target
+      - name: Assert nightly branch updated correctly
+        run: |
+          set -euo pipefail
+          git config --global --unset-all url."file:///tmp/fake-remote/".insteadOf || true
+          REMOTE=/tmp/fake-remote/fake-owner/fake-repo
+          NEW_NIGHTLY=$(git -C "$REMOTE" rev-parse refs/heads/nightly)
+          echo "old nightly: $OLD_NIGHTLY"
+          echo "new nightly: $NEW_NIGHTLY"
+          if [ "$NEW_NIGHTLY" = "$OLD_NIGHTLY" ]; then
+            echo "FAIL: nightly branch was not updated"
+            exit 1
+          fi
+          PARENT=$(git -C "$REMOTE" rev-parse "${NEW_NIGHTLY}^1")
+          echo "parent: $PARENT"
+          if [ "$PARENT" != "$OLD_NIGHTLY" ]; then
+            echo "FAIL: new nightly commit parent should be old nightly"
+            exit 1
+          fi
+          if git -C "$REMOTE" rev-parse --verify -q "${NEW_NIGHTLY}^2" >/dev/null; then
+            echo "FAIL: new nightly commit should have exactly one parent"
+            exit 1
+          fi
+          TREE=$(git -C "$REMOTE" rev-parse "${NEW_NIGHTLY}^{tree}")
+          echo "tree: $TREE (expected $MAIN_TREE)"
+          if [ "$TREE" != "$MAIN_TREE" ]; then
+            echo "FAIL: nightly tree should match main tree"
+            exit 1
+          fi
+          MSG=$(git -C "$REMOTE" log -1 --format=%s "$NEW_NIGHTLY")
+          echo "message: $MSG"
+          case "$MSG" in
+            *"nightly release (${MAIN_SHA})"*) ;;
+            *) echo "FAIL: commit message missing 'nightly release (${MAIN_SHA})'"; exit 1 ;;
+          esac
+          if ! echo "$MSG" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2} nightly release'; then
+            echo "FAIL: commit message should start with a date"
+            exit 1
+          fi
+          if [ ! -f "$GITHUB_WORKSPACE/nightly-target/main.txt" ]; then
+            echo "FAIL: checkout path missing main.txt"
+            exit 1
+          fi
+          echo "PASS"

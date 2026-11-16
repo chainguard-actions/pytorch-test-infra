@@ -1,0 +1,124 @@
+name: Test basic setup with mocked EC2, AWS and docker
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install mock tools on PATH
+        run: |
+          set -eu
+          MOCK="$RUNNER_TEMP/mockbin"
+          LOG="$RUNNER_TEMP/mocklog"
+          mkdir -p "$MOCK" "$LOG"
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+
+          cat > "$MOCK/curl" <<EOF
+          #!/bin/bash
+          echo "curl \$*" >> "$LOG/curl.log"
+          case "\$*" in
+            *169.254.169.254/latest/api/token*) echo "fake-token"; exit 0 ;;
+            *meta-data/ami-id*) echo "ami-0123456789abcdef0"; exit 0 ;;
+            *meta-data/instance-id*) echo "i-0123456789abcdef0"; exit 0 ;;
+            *meta-data/instance-type*) echo "m5.large"; exit 0 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+
+          cat > "$MOCK/aws" <<EOF
+          #!/bin/bash
+          echo "aws \$*" >> "$LOG/aws.log"
+          case "\$1 \$2" in
+            "sts get-caller-identity")
+              printf '{\n    "UserId": "AIDAEXAMPLE",\n    "Account": "123456789012",\n    "Arn": "arn:aws:iam::123456789012:user/test"\n}\n'
+              ;;
+            "ecr get-login-password")
+              echo "fake-ecr-password"
+              ;;
+            *) exit 1 ;;
+          esac
+          EOF
+
+          cat > "$MOCK/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG/docker.log"
+          if [ "\$1" = "login" ]; then
+            cat > "$LOG/docker-login-stdin.txt"
+          fi
+          exit 0
+          EOF
+
+          cat > "$MOCK/sudo" <<'EOF'
+          #!/bin/bash
+          exec "$@"
+          EOF
+
+          cat > "$MOCK/systemctl" <<EOF
+          #!/bin/bash
+          echo "systemctl \$*" >> "$LOG/systemctl.log"
+          exit 0
+          EOF
+
+          cat > "$MOCK/lspci" <<'EOF'
+          #!/bin/bash
+          echo "00:00.0 Host bridge: Intel Corporation 440FX"
+          EOF
+
+          chmod +x "$MOCK"/*
+          echo "$MOCK" >> "$GITHUB_PATH"
+
+      - id: action
+        uses: .
+
+      - name: Assert environment variables and directories
+        run: |
+          for v in RUNNER_ARTIFACT_DIR RUNNER_TEST_RESULTS_DIR RUNNER_DOCS_DIR; do
+            val="${!v:-}"
+            echo "$v=$val"
+            if [ -z "$val" ]; then echo "FAIL: $v not set"; exit 1; fi
+            if [ ! -d "$val" ]; then echo "FAIL: $val is not a directory"; exit 1; fi
+          done
+          [ "$RUNNER_ARTIFACT_DIR" = "$RUNNER_TEMP/artifacts" ] || { echo "FAIL: artifact dir"; exit 1; }
+          [ "$RUNNER_TEST_RESULTS_DIR" = "$RUNNER_TEMP/test-results" ] || { echo "FAIL: test-results dir"; exit 1; }
+          [ "$RUNNER_DOCS_DIR" = "$RUNNER_TEMP/docs" ] || { echo "FAIL: docs dir"; exit 1; }
+          echo "PASS"
+
+      - name: Assert github env file preserved
+        run: |
+          F="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          echo "file: $F"
+          if [ ! -f "$F" ]; then echo "FAIL: env file missing"; exit 1; fi
+          grep -q '^GITHUB' "$F" || { echo "FAIL: no GITHUB vars"; exit 1; }
+          grep -q '^CI' "$F" || { echo "FAIL: no CI vars"; exit 1; }
+          grep -q '^RUNNER' "$F" || { echo "FAIL: no RUNNER vars"; exit 1; }
+          echo "PASS"
+
+      - name: Assert ECR login and metadata calls
+        run: |
+          LOG="$RUNNER_TEMP/mocklog"
+          echo "--- docker.log"; cat "$LOG/docker.log" || true
+          echo "--- aws.log"; cat "$LOG/aws.log" || true
+          echo "--- curl.log"; cat "$LOG/curl.log" || true
+          grep -q 'docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com' "$LOG/docker.log" \
+            || { echo "FAIL: docker login not called with expected registry"; exit 1; }
+          grep -q 'fake-ecr-password' "$LOG/docker-login-stdin.txt" \
+            || { echo "FAIL: ECR password not piped to docker login"; exit 1; }
+          grep -q 'ecr get-login-password --region us-east-1' "$LOG/aws.log" \
+            || { echo "FAIL: aws ecr get-login-password not called"; exit 1; }
+          grep -q 'meta-data/instance-type' "$LOG/curl.log" \
+            || { echo "FAIL: EC2 metadata not queried"; exit 1; }
+          if [ ! -f /.inarc ] && [ ! -f /.incontainer ]; then
+            grep -q 'docker system prune -af' "$LOG/docker.log" \
+              || { echo "FAIL: docker system prune not called"; exit 1; }
+          fi
+          echo "PASS"
+
+      - name: Assert GPU_FLAG not set (no NVIDIA GPU)
+        run: |
+          echo "GPU_FLAG=${GPU_FLAG:-}"
+          if [ -n "${GPU_FLAG:-}" ]; then echo "FAIL: GPU_FLAG unexpectedly set"; exit 1; fi
+          echo "PASS"

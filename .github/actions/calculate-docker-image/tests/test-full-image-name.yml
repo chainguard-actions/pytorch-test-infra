@@ -1,0 +1,46 @@
+name: Test full image name with registry prefix
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "fake-password"
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "fake docker $*" >> /tmp/fake-docker-calls.txt
+          case "$1" in
+            login) cat >/dev/null; echo "Login Succeeded"; exit 0 ;;
+            manifest) exit 1 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - name: Prepare
+        run: chmod +x tests/fixtures/docker/build.sh
+      - id: action
+        uses: .
+        with:
+          docker-image-name: registry.example.com/myrepo/myimage:abc123
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: registry.example.com
+          repo-name: myrepo
+          always-rebuild: "true"
+      - name: Assert full image name is used as-is
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "registry.example.com/myrepo/myimage:abc123" ]; then
+            echo "FAIL: expected 'registry.example.com/myrepo/myimage:abc123'"
+            exit 1
+          fi
+          echo "PASS"

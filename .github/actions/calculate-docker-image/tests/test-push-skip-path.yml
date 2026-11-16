@@ -1,0 +1,26 @@
+name: Test push input with skip path
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          docker-image-name: pytorch-linux-jammy-builder
+          docker-build-dir: does-not-exist/docker
+          repo-name: myrepo
+          push: "true"
+          force-push: "true"
+      - name: Assert docker-image passes through unchanged (push ignored on skip path)
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "pytorch-linux-jammy-builder" ]; then
+            echo "FAIL: expected 'pytorch-linux-jammy-builder'"
+            exit 1
+          fi
+          echo "PASS"

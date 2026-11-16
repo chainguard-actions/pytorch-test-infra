@@ -1,0 +1,78 @@
+name: Test basic usage (cpu)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install shims for Windows-only tools
+        run: |
+          set -eu
+          SHIMS="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIMS"
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          # powershell is not available on the Linux runner: record the call and succeed
+          cat > "$SHIMS/powershell" <<'EOF'
+          #!/bin/sh
+          echo "fake powershell $*" >> "${RUNNER_TEMP}/shims/powershell.log"
+          exit 0
+          EOF
+          # cygpath (Git Bash/MSYS) is not available on Linux: identity conversion
+          cat > "$SHIMS/cygpath" <<'EOF'
+          #!/bin/sh
+          for last; do :; done
+          echo "$last"
+          EOF
+          # Fail fast on EC2 metadata endpoint instead of hanging
+          cat > "$SHIMS/curl" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *169.254.169.254*) exit 7 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+          chmod +x "$SHIMS/powershell" "$SHIMS/cygpath" "$SHIMS/curl"
+          echo "$SHIMS" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: cpu
+      - name: Assert git config was set
+        run: |
+          LP="$(git config --global core.longpaths || true)"
+          SL="$(git config --global core.symlinks || true)"
+          FS="$(git config --global core.fsmonitor || true)"
+          echo "core.longpaths=$LP core.symlinks=$SL core.fsmonitor=$FS"
+          if [ "$LP" != "true" ] || [ "$SL" != "true" ] || [ "$FS" != "false" ]; then
+            echo "FAIL: unexpected git global config"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert powershell steps were invoked
+        run: |
+          cat "$RUNNER_TEMP/shims/powershell.log" || true
+          COUNT="$(wc -l < "$RUNNER_TEMP/shims/powershell.log" 2>/dev/null || echo 0)"
+          echo "powershell invocations: $COUNT"
+          if [ "$COUNT" -lt 2 ]; then
+            echo "FAIL: expected at least 2 powershell step invocations"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert environment variables and directories
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR:-}"
+          echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR:-}"
+          if [ "${RUNNER_ARTIFACT_DIR:-}" != "${RUNNER_TEMP}/artifacts" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR expected ${RUNNER_TEMP}/artifacts"
+            exit 1
+          fi
+          if [ "${RUNNER_TEST_RESULTS_DIR:-}" != "${RUNNER_TEMP}/test-results" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR expected ${RUNNER_TEMP}/test-results"
+            exit 1
+          fi
+          if [ ! -d "$RUNNER_ARTIFACT_DIR" ] || [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+            echo "FAIL: directories were not created"
+            exit 1
+          fi
+          echo "PASS"

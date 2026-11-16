@@ -1,0 +1,49 @@
+name: Test with venv input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide the benchmarks script the action expects at ../../scripts
+        run: |
+          TARGET="$GITHUB_WORKSPACE/../../scripts/benchmarks"
+          if [ ! -f "$TARGET/gather_runners_info.py" ]; then
+            mkdir -p "$TARGET"
+            cp "$GITHUB_WORKSPACE/tests/fixtures/gather_runners_info.py" "$TARGET/gather_runners_info.py"
+          fi
+      - name: Create virtual environment
+        run: |
+          VENV_DIR="$RUNNER_TEMP/test-venv"
+          if ! python3 -m venv "$VENV_DIR"; then
+            rm -rf "$VENV_DIR"
+            python3 -m pip install --break-system-packages virtualenv || python3 -m pip install virtualenv
+            python3 -m virtualenv "$VENV_DIR"
+          fi
+          test -f "$VENV_DIR/bin/activate"
+          echo "VENV_ACTIVATE=$VENV_DIR/bin/activate" >> "$GITHUB_ENV"
+          echo "VENV_DIR=$VENV_DIR" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          venv: ${{ env.VENV_ACTIVATE }}
+      - name: Assert packages were installed into the venv
+        run: |
+          "$VENV_DIR/bin/python" -c 'import psutil; print("psutil", psutil.__version__)' || {
+            echo "FAIL: psutil not installed in venv"; exit 1; }
+          echo "PASS"
+      - name: Assert runners-info output is non-empty valid JSON
+        env:
+          ACTUAL: ${{ steps.action.outputs.runners-info }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "FAIL: runners-info output is empty"
+            exit 1
+          fi
+          if ! printf '%s' "$ACTUAL" | python3 -c 'import json,sys; json.load(sys.stdin)'; then
+            echo "FAIL: runners-info is not valid JSON"
+            exit 1
+          fi
+          echo "PASS"

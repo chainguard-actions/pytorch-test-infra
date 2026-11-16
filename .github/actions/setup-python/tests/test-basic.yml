@@ -1,0 +1,39 @@
+name: Test basic venv creation (simulated macOS)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake brew
+        run: sh "$GITHUB_WORKSPACE/tests/fixtures/setup-fake-brew.sh"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/tests/fixtures/fake-darwin.js
+        with:
+          python-version: "3.12"
+      - name: Assert venv created and exported
+        run: |
+          FAKE="$RUNNER_TEMP/fake-brew"
+          echo "VENV_PATH: $VENV_PATH"
+          echo "PATH: $PATH"
+          echo "--- brew calls"; cat "$FAKE/brew-calls.log" || true
+          echo "--- python calls"; cat "$FAKE/python-calls.log" || true
+          case "$VENV_PATH" in
+            "$RUNNER_TEMP"/venv-3.12-*) ;;
+            *) echo "FAIL: unexpected VENV_PATH"; exit 1 ;;
+          esac
+          [ -x "$VENV_PATH/bin/python" ] || { echo "FAIL: venv python missing"; exit 1; }
+          case ":$PATH:" in
+            *":$VENV_PATH/bin:"*) ;;
+            *) echo "FAIL: venv bin not on PATH"; exit 1 ;;
+          esac
+          grep -qx "update" "$FAKE/brew-calls.log" || { echo "FAIL: brew update not called"; exit 1; }
+          grep -qx "install python@3.12" "$FAKE/brew-calls.log" || { echo "FAIL: brew install python@3.12 not called"; exit 1; }
+          grep -q -- "-m venv $VENV_PATH" "$FAKE/python-calls.log" || { echo "FAIL: venv not created with python3.12"; exit 1; }
+          if [ -f "$VENV_PATH/pip-calls.log" ]; then
+            echo "FAIL: pip should not be invoked without requirements file"; exit 1
+          fi
+          echo "PASS"

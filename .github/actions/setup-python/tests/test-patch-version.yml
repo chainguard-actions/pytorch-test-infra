@@ -1,0 +1,31 @@
+name: Test patch version is truncated to major.minor (simulated macOS)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake brew
+        run: sh "$GITHUB_WORKSPACE/tests/fixtures/setup-fake-brew.sh"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/tests/fixtures/fake-darwin.js
+        with:
+          python-version: "3.11.7"
+      - name: Assert formula and venv use major.minor
+        run: |
+          FAKE="$RUNNER_TEMP/fake-brew"
+          echo "VENV_PATH: $VENV_PATH"
+          cat "$FAKE/brew-calls.log" || true
+          case "$VENV_PATH" in
+            "$RUNNER_TEMP"/venv-3.11-*) ;;
+            *) echo "FAIL: expected venv-3.11-*"; exit 1 ;;
+          esac
+          grep -qx "install python@3.11" "$FAKE/brew-calls.log" || { echo "FAIL: expected brew install python@3.11"; exit 1; }
+          if grep -q "python@3.11.7" "$FAKE/brew-calls.log"; then
+            echo "FAIL: patch version should be stripped"; exit 1
+          fi
+          [ -x "$VENV_PATH/bin/python" ] || { echo "FAIL: venv python missing"; exit 1; }
+          echo "PASS"

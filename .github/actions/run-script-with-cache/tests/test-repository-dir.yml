@@ -1,0 +1,29 @@
+name: Test repository working directory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: ${{ github.workspace }}/tests/fixtures/build_env.sh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Clean marker
+        run: rm -f /tmp/action-marker.txt /tmp/action-pwd.txt
+      - id: action
+        uses: .
+        with:
+          repository: tests/fixtures
+          script: write-marker.sh
+      - name: Assert script ran in repository directory
+        run: |
+          if [ ! -f /tmp/action-marker.txt ] || [ ! -f /tmp/action-pwd.txt ]; then
+            echo "FAIL: marker files not created"
+            exit 1
+          fi
+          PWD_ACTUAL="$(cat /tmp/action-pwd.txt)"
+          echo "pwd: $PWD_ACTUAL"
+          case "$PWD_ACTUAL" in
+            */tests/fixtures) echo "PASS" ;;
+            *) echo "FAIL: expected working dir ending in tests/fixtures"; exit 1 ;;
+          esac

@@ -1,0 +1,29 @@
+name: Test basic script run
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: ${{ github.workspace }}/tests/fixtures/build_env.sh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Clean marker
+        run: rm -f /tmp/action-marker.txt /tmp/action-pwd.txt
+      - id: action
+        uses: .
+        with:
+          script: tests/fixtures/write-marker.sh
+      - name: Assert script ran with build env sourced
+        run: |
+          if [ ! -f /tmp/action-marker.txt ]; then
+            echo "FAIL: marker file not created"
+            exit 1
+          fi
+          ACTUAL="$(cat /tmp/action-marker.txt)"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "from-build-env" ]; then
+            echo "FAIL: expected 'from-build-env'"
+            exit 1
+          fi
+          echo "PASS"

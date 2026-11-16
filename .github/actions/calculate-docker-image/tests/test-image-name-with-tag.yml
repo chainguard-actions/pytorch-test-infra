@@ -1,0 +1,53 @@
+name: Test image name with embedded tag and matching ci-docker-hash
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "fake-password"
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "fake docker $*" >> /tmp/fake-docker-calls.txt
+          case "$1" in
+            login) cat >/dev/null; echo "Login Succeeded"; exit 0 ;;
+            manifest) exit 1 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - name: Prepare
+        id: prep
+        run: |
+          chmod +x tests/fixtures/docker/build.sh
+          echo "hash=$(git rev-parse HEAD:tests/fixtures/docker)" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: myimage:custom
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: registry.example.com
+          repo-name: myrepo
+          always-rebuild: "true"
+          ci-docker-hash: ${{ steps.prep.outputs.hash }}
+      - name: Assert tag uses the embedded tag as prefix
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+          HASH: ${{ steps.prep.outputs.hash }}
+        run: |
+          EXPECTED="registry.example.com/myrepo/myimage:custom-${HASH}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ -z "$HASH" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"

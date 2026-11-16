@@ -1,0 +1,49 @@
+name: Test no running containers (docker stop fails, tolerated)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who on PATH
+        run: |
+          MOCK="$RUNNER_TEMP/mockbin"
+          mkdir -p "$MOCK"
+          cat > "$MOCK/docker" <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/docker-calls.log
+          case "$1" in
+            ps) exit 0 ;;
+            stop)
+              if [ "$#" -lt 2 ]; then
+                echo "\"docker stop\" requires at least 1 argument." >&2
+                exit 1
+              fi
+              ;;
+          esac
+          exit 0
+          EOF
+          cat > "$MOCK/who" <<'EOF'
+          #!/bin/bash
+          exit 0
+          EOF
+          chmod +x "$MOCK/docker" "$MOCK/who"
+          rm -f /tmp/docker-calls.log
+          echo "$MOCK" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        timeout-minutes: 5
+      - name: Assert action succeeded and prune still ran
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "--- docker calls ---"; cat /tmp/docker-calls.log || true
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          grep -qx "stop" /tmp/docker-calls.log || { echo "FAIL: docker stop (no args) not attempted"; exit 1; }
+          grep -qx "system prune -af" /tmp/docker-calls.log || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          echo "PASS"

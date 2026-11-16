@@ -1,0 +1,27 @@
+name: Test checkout of a specific tag ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: v4.0.0
+          submodules: "false"
+      - name: Assert tag content checked out
+        run: |
+          F="$GITHUB_WORKSPACE/actions/checkout/action.yml"
+          if [ ! -f "$F" ]; then
+            echo "FAIL: action.yml not found"
+            exit 1
+          fi
+          grep -n "using:" "$F"
+          if ! grep -q "node20" "$F"; then
+            echo "FAIL: expected v4.0.0 action.yml to use node20"
+            exit 1
+          fi
+          echo "PASS"

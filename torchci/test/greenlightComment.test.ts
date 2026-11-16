@@ -1,0 +1,320 @@
+import { readFileSync } from "fs";
+import * as clickhouse from "lib/clickhouse";
+import { buildGreenlightSections } from "lib/greenlight/greenlightComment";
+import * as greenlightRender from "lib/greenlight/greenlightRender";
+import { GREENLIGHT_PENDING_ALT_ATTR } from "lib/greenlight/greenlightSweep";
+import path from "path";
+import { format } from "util";
+
+const LAND_ROW = {
+  pr_number: 194531,
+  status: "LAND",
+  reason: "clean",
+  message: "template edits verified",
+  head_sha: "013fcdd87c69d270338390baa8bf0555ca8cfd70",
+  eval_job: "https://github.com/pytorch/test-infra/actions/runs/32757228321",
+  version: "2026-08-24T17:42:35.589000",
+};
+
+const NO_LAND_ROW = {
+  pr_number: 194654,
+  status: "NO_LAND",
+  reason: "breaking_change",
+  message: "the new import guard is bc-breaking",
+  head_sha: "b00aa03feef186eacc976cce162006f0a44936fe",
+  eval_job: "https://github.com/pytorch/test-infra/actions/runs/32778700698",
+  version: "2026-08-24T21:40:01.442000",
+};
+
+// A status greenlightRender has no branch for, so it falls through to "". Every
+// other field is populated, so an empty render can only come from the status.
+const UNKNOWN_STATUS_ROW = {
+  pr_number: 194645,
+  status: "SOMETHING_NEW",
+  reason: "clean",
+  message: "a status this renderer predates",
+  head_sha: "5b9b0093017bb70bd26c6aa52595238c52b4b048",
+  eval_job: "https://github.com/pytorch/test-infra/actions/runs/32782669526",
+  version: "2026-08-24T22:02:55.744000",
+};
+
+// A PR the sweep covers that has no greenlight state row at all.
+const NO_STATE_PR = {
+  pr_number: 194000,
+  head_sha: "8c9cd4b0b0e2c7bd4a2b7e1e6d3a9c5f0b1d2e3a",
+};
+
+// The head a PR moved to after its verdict was recorded.
+const PUSHED_SHA = "f1e2d3c4b5a6978877665544332211aabbccddee";
+
+// A live review. The renderer only emits the in-progress marker while the row is
+// inside the staleness window, and buildGreenlightSections stamps `now` itself,
+// so this version has to track the wall clock rather than be a fixed date.
+function inFlightRow() {
+  return {
+    ...LAND_ROW,
+    pr_number: 194888,
+    status: "AI_REVIEW_DISPATCHED",
+    version: new Date().toISOString().replace("Z", ""),
+  };
+}
+
+// What a console sink prints for the calls a console.error spy recorded.
+// JSON.stringify cannot stand in for this: Error.message and Error.stack are
+// non-enumerable, so it renders every logged error as `{}` and a redaction check
+// built on it passes whatever the error carries.
+function loggedText(spy: jest.SpyInstance): string {
+  return spy.mock.calls.map((call) => format(...call)).join("\n");
+}
+
+// pr_number -> head sha, as the Dr.CI sweep hands them over. Defaults each PR's
+// head to the sha its own row was reviewed at, so only the tests about a
+// superseded verdict have to say otherwise.
+function heads(
+  ...rows: { pr_number: number; head_sha: string }[]
+): Map<number, string> {
+  return new Map(rows.map((row) => [row.pr_number, row.head_sha]));
+}
+
+describe("buildGreenlightSections", () => {
+  let queryClickhouseSaved: jest.SpyInstance;
+
+  beforeEach(() => {
+    queryClickhouseSaved = jest
+      .spyOn(clickhouse, "queryClickhouseSaved")
+      .mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it("issues no query for a repo that is not a greenlight repo", async () => {
+    const sections = await buildGreenlightSections(
+      "pytorch",
+      "vision",
+      heads(LAND_ROW)
+    );
+
+    expect(sections.size).toBe(0);
+    expect(queryClickhouseSaved).not.toHaveBeenCalled();
+  });
+
+  it("issues no query when no PRs were passed", async () => {
+    const sections = await buildGreenlightSections(
+      "pytorch",
+      "pytorch",
+      new Map()
+    );
+
+    expect(sections.size).toBe(0);
+    expect(queryClickhouseSaved).not.toHaveBeenCalled();
+  });
+
+  it("batches every PR into one query and keys the sections by pr_number", async () => {
+    queryClickhouseSaved.mockResolvedValue([LAND_ROW, NO_LAND_ROW]);
+
+    const sections = await buildGreenlightSections(
+      "pytorch",
+      "pytorch",
+      heads(LAND_ROW, NO_LAND_ROW, NO_STATE_PR)
+    );
+
+    expect(queryClickhouseSaved).toHaveBeenCalledTimes(1);
+    expect(queryClickhouseSaved).toHaveBeenCalledWith("greenlight_pr_states", {
+      repo: "pytorch/pytorch",
+      prNumbers: [
+        LAND_ROW.pr_number,
+        NO_LAND_ROW.pr_number,
+        NO_STATE_PR.pr_number,
+      ],
+    });
+    expect([...sections.keys()]).toEqual([
+      LAND_ROW.pr_number,
+      NO_LAND_ROW.pr_number,
+    ]);
+    expect(sections.get(LAND_ROW.pr_number)).toContain(
+      greenlightRender.GREENLIGHT_SECTION_HEADER
+    );
+    expect(sections.get(LAND_ROW.pr_number)).toContain(LAND_ROW.message);
+    expect(sections.get(NO_LAND_ROW.pr_number)).toContain(
+      greenlightRender.GREENLIGHT_NO_LAND_HEADLINE
+    );
+  });
+
+  // The repo gate folds case, so a mixed-case request gets this far. Every row in
+  // misc.greenlight_pr_state is written lowercase, so querying the raw spelling
+  // matches nothing and the section silently renders empty.
+  it("queries the canonical repo key for a mixed-case request", async () => {
+    queryClickhouseSaved.mockResolvedValue([LAND_ROW]);
+
+    const sections = await buildGreenlightSections(
+      "PyTorch",
+      "PyTorch",
+      heads(LAND_ROW)
+    );
+
+    expect(queryClickhouseSaved).toHaveBeenCalledWith("greenlight_pr_states", {
+      repo: "pytorch/pytorch",
+      prNumbers: [LAND_ROW.pr_number],
+    });
+    expect(sections.size).toBe(1);
+  });
+
+  it("maps the row's columns onto the renderer's state", async () => {
+    queryClickhouseSaved.mockResolvedValue([LAND_ROW]);
+    const render = jest.spyOn(greenlightRender, "renderGreenlightSection");
+
+    await buildGreenlightSections("pytorch", "pytorch", heads(LAND_ROW));
+
+    expect(render).toHaveBeenCalledWith(
+      {
+        // Not a column: the row does not carry the repo, so the sweep's own
+        // folded key is what the renderer builds the report link from.
+        repo: "pytorch/pytorch",
+        prNumber: LAND_ROW.pr_number,
+        status: LAND_ROW.status,
+        reason: LAND_ROW.reason,
+        message: LAND_ROW.message,
+        headSha: LAND_ROW.head_sha,
+        evalJob: LAND_ROW.eval_job,
+        version: LAND_ROW.version,
+      },
+      expect.any(Date),
+      LAND_ROW.head_sha
+    );
+  });
+
+  it("hands the renderer the PR's own head, marking a superseded verdict", async () => {
+    queryClickhouseSaved.mockResolvedValue([LAND_ROW]);
+
+    const sections = await buildGreenlightSections(
+      "pytorch",
+      "pytorch",
+      new Map([[LAND_ROW.pr_number, PUSHED_SHA]])
+    );
+
+    expect(sections.get(LAND_ROW.pr_number)).toContain(
+      greenlightRender.GREENLIGHT_OUTDATED_HEADLINE_PREFIX
+    );
+  });
+
+  // A row for a PR the sweep did not ask about cannot be matched to a head sha,
+  // and an unknown head must not read as a mismatch with the reviewed one.
+  it("renders a row with no head sha of its own as up to date", async () => {
+    queryClickhouseSaved.mockResolvedValue([LAND_ROW, NO_LAND_ROW]);
+
+    const sections = await buildGreenlightSections(
+      "pytorch",
+      "pytorch",
+      heads(LAND_ROW)
+    );
+
+    expect(sections.get(NO_LAND_ROW.pr_number)).not.toContain(
+      greenlightRender.GREENLIGHT_OUTDATED_HEADLINE_PREFIX
+    );
+  });
+
+  // The marker is what pins a PR into the next sweep, and roughly a third of
+  // review starts land on PRs with no recent CI activity for the time-windowed
+  // query to select. For those it is the only thing that gets the PR swept at
+  // all, so this passthrough is load-bearing rather than a backstop.
+  it("passes the in-progress marker through into the returned section", async () => {
+    const row = inFlightRow();
+    queryClickhouseSaved.mockResolvedValue([row]);
+
+    const sections = await buildGreenlightSections(
+      "pytorch",
+      "pytorch",
+      heads(row)
+    );
+
+    expect(sections.get(row.pr_number)).toContain(GREENLIGHT_PENDING_ALT_ATTR);
+  });
+
+  // The only handler above this one is in drci.ts and it fails the whole sweep to
+  // an empty map, so an unguarded throw on one row takes the GREEN LIGHT section
+  // off every other PR in the sweep too.
+  it("drops only the row whose render threw, keeping the rest of the sweep", async () => {
+    queryClickhouseSaved.mockResolvedValue([LAND_ROW, NO_LAND_ROW]);
+    const thrown = new Error("render blew up on one row");
+    const render = jest
+      .spyOn(greenlightRender, "renderGreenlightSection")
+      .mockImplementation((state) => {
+        if (state.prNumber === LAND_ROW.pr_number) throw thrown;
+        return "rendered";
+      });
+    const logged = jest.spyOn(console, "error").mockImplementation(() => {});
+
+    const sections = await buildGreenlightSections(
+      "pytorch",
+      "pytorch",
+      heads(LAND_ROW, NO_LAND_ROW)
+    );
+
+    expect(render).toHaveBeenCalledTimes(2);
+    expect([...sections.keys()]).toEqual([NO_LAND_ROW.pr_number]);
+    // Enough to find the row, and not the model's text: `message` is scrubbed on
+    // its way into the comment and not on its way into a log. The error is a
+    // fixed string, as the renderer's own throws are, so rendering the whole call
+    // the way a console sink does leaks nothing.
+    expect(logged).toHaveBeenCalledWith(
+      expect.stringContaining("section render threw"),
+      LAND_ROW.pr_number,
+      thrown
+    );
+    expect(loggedText(logged)).not.toContain(LAND_ROW.message);
+  });
+
+  it("skips rows that render to nothing", async () => {
+    queryClickhouseSaved.mockResolvedValue([UNKNOWN_STATUS_ROW, LAND_ROW]);
+
+    const sections = await buildGreenlightSections(
+      "pytorch",
+      "pytorch",
+      heads(UNKNOWN_STATUS_ROW, LAND_ROW)
+    );
+
+    expect([...sections.keys()]).toEqual([LAND_ROW.pr_number]);
+  });
+});
+
+// buildGreenlightSections reaches this SQL by name through queryClickhouseSaved, so the
+// only place its text can be pinned is the file itself. Nothing here runs the query.
+const RENDER_QUERY_SQL = readFileSync(
+  path.resolve(
+    __dirname,
+    "..",
+    "clickhouse_queries",
+    "greenlight_pr_states",
+    "query.sql"
+  ),
+  "utf-8"
+);
+
+// The header comment names both `shadow` and `LIMIT 1 BY` while explaining why they sit
+// in that order, and the index assertions below are about the statement, not the prose.
+const RENDER_QUERY = RENDER_QUERY_SQL.replace(/--.*$/gm, "");
+
+describe("greenlight_pr_states query.sql", () => {
+  it("excludes shadow rows from the Dr.CI render", () => {
+    expect(RENDER_QUERY).toContain("AND shadow = false");
+  });
+
+  it("filters in WHERE, ahead of the LIMIT 1 BY collapse", () => {
+    const where = RENDER_QUERY.indexOf("WHERE");
+    const shadow = RENDER_QUERY.indexOf("shadow");
+    const order = RENDER_QUERY.indexOf("ORDER BY");
+    const limit = RENDER_QUERY.indexOf("LIMIT 1 BY");
+
+    expect(where).toBeGreaterThan(-1);
+    expect(shadow).toBeGreaterThan(where);
+    expect(shadow).toBeLessThan(order);
+    expect(order).toBeLessThan(limit);
+    // Filtering only after the collapse would let a PR's newest row be a shadow one: it
+    // wins LIMIT 1 BY, then gets dropped, hiding the real verdict underneath it. A
+    // second mention placed after the collapse satisfies every check above, so pin that
+    // there is exactly one.
+    expect(RENDER_QUERY.lastIndexOf("shadow")).toBe(shadow);
+  });
+});

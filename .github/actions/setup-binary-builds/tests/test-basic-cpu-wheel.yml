@@ -1,0 +1,69 @@
+name: Test basic CPU wheel setup with miniconda
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # The action's "Set artifact name" step reads REPOSITORY and REF from the
+      # job environment (as upstream build workflows set them).
+      REPOSITORY: pytorch/test-infra
+      REF: main
+      PACKAGE_TYPE: wheel
+      PYTHON_VERSION: "3.10"
+      CU_VERSION: cpu
+      ARCH: x86_64
+      CHANNEL: nightly
+      UPLOAD_TO_BASE_BUCKET: "no"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # The action pip-installs ${GITHUB_WORKSPACE}/test-infra/tools/pkg-helpers
+      - name: Check out test-infra (provides tools/pkg-helpers)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          submodules: "false"
+          setup-miniconda: "true"
+          python-version: "3.10"
+          cuda-version: cpu
+          arch: x86_64
+      - name: Assert repository checked out into subdirectory
+        run: |
+          if [ ! -d "$GITHUB_WORKSPACE/pytorch/test-infra/.git" ] && [ ! -f "$GITHUB_WORKSPACE/pytorch/test-infra/.git" ]; then
+            echo "FAIL: pytorch/test-infra not checked out"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert ARTIFACT_NAME
+        run: |
+          echo "ARTIFACT_NAME: ${ARTIFACT_NAME:-}"
+          if [ "${ARTIFACT_NAME:-}" != "pytorch_test-infra_main_3.10_cpu_x86_64" ]; then
+            echo "FAIL: expected pytorch_test-infra_main_3.10_cpu_x86_64"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert build env file and conda env exported
+        run: |
+          echo "BUILD_ENV_FILE: ${BUILD_ENV_FILE:-}"
+          echo "CONDA_ENV: ${CONDA_ENV:-}"
+          echo "CONDA_RUN: ${CONDA_RUN:-}"
+          if [ -z "${BUILD_ENV_FILE:-}" ] || [ ! -f "$BUILD_ENV_FILE" ]; then
+            echo "FAIL: BUILD_ENV_FILE missing"
+            exit 1
+          fi
+          if [ -z "${CONDA_ENV:-}" ] || [ ! -d "$CONDA_ENV" ]; then
+            echo "FAIL: CONDA_ENV missing"
+            exit 1
+          fi
+          case "${CONDA_RUN:-}" in
+            "conda run --no-capture-output -p ${CONDA_ENV}") ;;
+            *) echo "FAIL: unexpected CONDA_RUN"; exit 1 ;;
+          esac
+          echo "PASS"
