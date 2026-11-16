@@ -1,0 +1,33 @@
+name: Test is_windows mode skips strict bash options
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: /tmp/act-test-build-env5.sh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env file (without CONDA_RUN) and script
+        run: |
+          # CONDA_RUN intentionally left unset: would fail under set -u in strict mode
+          printf 'export SOME_VAR=1\n' > /tmp/act-test-build-env5.sh
+          mkdir -p "$GITHUB_WORKSPACE/.act-test"
+          cat > "$GITHUB_WORKSPACE/.act-test/win.sh" <<'EOF'
+          echo "ok" > /tmp/act-test-win-marker
+          EOF
+          rm -f /tmp/act-test-win-marker
+      - id: action
+        uses: .
+        with:
+          is_windows: enabled
+          script: .act-test/win.sh
+      - name: Assert script ran
+        run: |
+          ACTUAL="$(cat /tmp/act-test-win-marker 2>/dev/null || true)"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ok" ]; then
+            echo "FAIL: expected 'ok'"
+            exit 1
+          fi
+          echo "PASS"

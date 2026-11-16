@@ -1,0 +1,40 @@
+name: Test unparseable metrics file skips upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/aws-called
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/bash
+          touch /tmp/aws-called
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - name: Create truncated metrics file
+        run: |
+          printf '[{"type": "result", "duration_ms": 12' > /tmp/bad-metrics.json
+      - id: action
+        uses: .
+        with:
+          metrics-file: /tmp/bad-metrics.json
+      - name: Assert step succeeded and no upload
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ -f /tmp/aws-called ]; then
+            echo "FAIL: aws should not have been called"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,46 @@
+name: Test build with push disabled
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker CLI
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/docker-build-* /tmp/docker-all.log /tmp/fake-docker-mode
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/docker-all.log
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            n=$(( $(cat /tmp/docker-build-count 2>/dev/null || echo 0) + 1 ))
+            echo "$n" > /tmp/docker-build-count
+            printf '%s\n' "$@" > "/tmp/docker-build-$n.args"
+            echo "fake build ok"
+            exit 0
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: local/test:latest
+          push: 'false'
+          connect-delay: '0'
+      - name: Assert no --push flag
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: $ACTUAL"
+          if [ "$ACTUAL" != "local/test:latest" ]; then echo "FAIL: wrong image output"; exit 1; fi
+          cat /tmp/docker-build-1.args
+          if grep -qxF -- '--push' /tmp/docker-build-1.args; then
+            echo "FAIL: --push should not be passed when push=false"; exit 1
+          fi
+          if ! grep -qxF -- 'local/test:latest' /tmp/docker-build-1.args; then
+            echo "FAIL: tag missing"; exit 1
+          fi
+          echo "PASS"

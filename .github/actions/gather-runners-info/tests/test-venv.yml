@@ -1,0 +1,58 @@
+name: Test venv input activates virtual environment
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create a virtual environment
+        run: |
+          SUDO=""
+          if [ "$(id -u)" != "0" ]; then SUDO="sudo"; fi
+          VENV="$RUNNER_TEMP/test-venv"
+          if ! command -v lscpu >/dev/null || ! python3 -m venv "$VENV" >/dev/null 2>&1; then
+            rm -rf "$VENV"
+            $SUDO apt-get update
+            PYVER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo 3)
+            $SUDO apt-get install -y python3 python3-venv "python${PYVER}-venv" util-linux \
+              || $SUDO apt-get install -y python3 python3-venv util-linux
+            python3 -m venv "$VENV"
+          fi
+          "$VENV/bin/python" -m pip --version
+          if "$VENV/bin/python" -c "import psutil" 2>/dev/null; then
+            echo "FAIL: psutil unexpectedly preinstalled in fresh venv"
+            exit 1
+          fi
+          echo "VENV_DIR=$VENV" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          venv: ${{ env.VENV_DIR }}/bin/activate
+      - name: Assert runners-info output is valid
+        env:
+          ACTUAL: ${{ steps.action.outputs.runners-info }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "FAIL: runners-info output is empty"
+            exit 1
+          fi
+          python3 - <<'EOF'
+          import json, os, sys
+          data = json.loads(os.environ["ACTUAL"])
+          if not isinstance(data, list) or not data:
+              print("FAIL: expected non-empty list"); sys.exit(1)
+          r = data[0]
+          if r.get("name") not in ("cpu", "arm64-cpu"):
+              print(f"FAIL: unexpected name {r.get('name')!r}"); sys.exit(1)
+          if not r.get("type"):
+              print("FAIL: type is empty"); sys.exit(1)
+          if not r.get("cpu_count"):
+              print("FAIL: cpu_count missing"); sys.exit(1)
+          print("PASS")
+          EOF
+      - name: Assert packages were installed into the venv
+        run: |
+          "$VENV_DIR/bin/python" -c "import psutil; assert psutil.__version__ == '7.0.0', psutil.__version__; print('PASS psutil')"
+          "$VENV_DIR/bin/python" -c "import pynvml; print('PASS nvidia-ml-py')"

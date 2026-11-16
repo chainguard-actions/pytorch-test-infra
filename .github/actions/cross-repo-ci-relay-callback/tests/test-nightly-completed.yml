@@ -1,0 +1,80 @@
+name: Test nightly completed
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          nohup python3 tests/fixtures/mock_server.py 18080 /tmp/mock > /tmp/mock.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18080/ready >/dev/null; then echo "mock ready"; break; fi
+            sleep 1
+          done
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:18080/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0123456789abcdef0123456789abcdef01234567
+          event-type: nightly
+          test-results: '{"passed": 10, "failed": 0, "skipped": 2}'
+          artifact-url: https://example.com/artifacts/1
+          job-name: build-cpu
+          callback-url: http://127.0.0.1:18080/github/callback/
+      - name: Assert payload sent to relay
+        run: |
+          cat /tmp/mock.log || true
+          ls -la /tmp/mock
+          if [ ! -f /tmp/mock/request-1.json ]; then
+            echo "FAIL: no callback request received"
+            exit 1
+          fi
+          cat /tmp/mock/request-1.json; echo
+          AUTH="$(cat /tmp/mock/auth-1.txt)"
+          if [ "$AUTH" != "Bearer fake-oidc-token" ]; then
+            echo "FAIL: unexpected Authorization header"
+            exit 1
+          fi
+          if [ -f /tmp/mock/request-2.json ]; then
+            echo "FAIL: expected exactly one request"
+            exit 1
+          fi
+          python3 - <<'EOF'
+          import json, sys
+          p = json.load(open("/tmp/mock/request-1.json"))
+          sha = "0123456789abcdef0123456789abcdef01234567"
+          w = p["workflow"]
+          checks = [
+              (p["event_type"], "nightly"),
+              (p["delivery_id"], sha),
+              (p["payload"]["head_sha"], sha),
+              (p["payload"]["repository"]["full_name"], "pytorch/pytorch"),
+              (w["status"], "completed"),
+              (w["conclusion"], "success"),
+              (w["schema_version"], "1"),
+              (w["job_name"], "build-cpu"),
+              (w["name"], "Test nightly completed"),
+              (w["artifact_url"], "https://example.com/artifacts/1"),
+              (w["test_results"], {"passed": 10, "failed": 0, "skipped": 2}),
+          ]
+          for actual, expected in checks:
+              print(f"actual={actual!r} expected={expected!r}")
+              if actual != expected:
+                  print("FAIL")
+                  sys.exit(1)
+          if not w["started_at"] or not w["completed_at"]:
+              print("FAIL: started_at/completed_at must be set for nightly")
+              sys.exit(1)
+          if not w["check_run_id"] or not w["run_id"]:
+              print("FAIL: check_run_id/run_id missing")
+              sys.exit(1)
+          print("PASS")
+          EOF

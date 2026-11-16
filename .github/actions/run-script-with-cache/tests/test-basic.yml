@@ -1,0 +1,32 @@
+name: Test basic script run without cache
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: /tmp/act-test-build-env.sh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env file and script
+        run: |
+          printf 'export CONDA_RUN=""\n' > /tmp/act-test-build-env.sh
+          mkdir -p "$GITHUB_WORKSPACE/.act-test"
+          cat > "$GITHUB_WORKSPACE/.act-test/hello.sh" <<'EOF'
+          echo "hello from script"
+          echo "ran" > /tmp/act-test-basic-marker
+          EOF
+          rm -f /tmp/act-test-basic-marker
+      - id: action
+        uses: .
+        with:
+          script: .act-test/hello.sh
+      - name: Assert script ran
+        run: |
+          if [ ! -f /tmp/act-test-basic-marker ]; then
+            echo "FAIL: marker not created, script did not run"
+            exit 1
+          fi
+          echo "content: $(cat /tmp/act-test-basic-marker)"
+          [ "$(cat /tmp/act-test-basic-marker)" = "ran" ] || { echo "FAIL: wrong content"; exit 1; }
+          echo "PASS"

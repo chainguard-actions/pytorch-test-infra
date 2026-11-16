@@ -1,0 +1,47 @@
+name: Test invalid triage verdict ignored
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          nohup python3 tests/fixtures/mock_server.py 18086 /tmp/mock > /tmp/mock.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18086/ready >/dev/null; then echo "mock ready"; break; fi
+            sleep 1
+          done
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:18086/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: cancelled
+          delivery-id: 0123456789abcdef0123456789abcdef01234567
+          event-type: nightly
+          triage-verdict: '["not", "an", "object"]'
+          callback-url: http://127.0.0.1:18086/github/callback/
+      - name: Assert verdict dropped but callback sent
+        run: |
+          cat /tmp/mock.log || true
+          if [ ! -f /tmp/mock/request-1.json ]; then
+            echo "FAIL: no callback request received"
+            exit 1
+          fi
+          cat /tmp/mock/request-1.json; echo
+          python3 - <<'EOF'
+          import json, sys
+          w = json.load(open("/tmp/mock/request-1.json"))["workflow"]
+          print("conclusion:", w["conclusion"])
+          if w["conclusion"] != "cancelled":
+              print("FAIL: wrong conclusion"); sys.exit(1)
+          if "triage_verdict" in w:
+              print("FAIL: invalid triage verdict should have been dropped"); sys.exit(1)
+          print("PASS")
+          EOF

@@ -1,0 +1,43 @@
+name: Test skip pull when image present locally
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/fake-calls.log
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "aws $*" >> /tmp/fake-calls.log
+          echo "fake-password"
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/fake-calls.log
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) echo '{"config":{"size":1024},"layers":[{"size":1024}]}'; exit 0 ;;
+            inspect) echo '[{}]'; exit 0 ;;
+            pull) exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/cached/image:v1
+      - name: Assert pull skipped
+        run: |
+          cat /tmp/fake-calls.log
+          grep -q "docker inspect --type=image example.com/cached/image:v1" /tmp/fake-calls.log || { echo "FAIL: local inspect missing"; exit 1; }
+          if grep -q "^docker pull" /tmp/fake-calls.log; then
+            echo "FAIL: docker pull should not run when image exists locally"
+            exit 1
+          fi
+          echo "PASS"

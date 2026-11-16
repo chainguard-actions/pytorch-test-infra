@@ -1,0 +1,69 @@
+name: Teardown Windows
+
+description: Set up Docker workspace on linux
+
+inputs:
+  extra-delete-dir:
+    description: If set, cleaning up the workspace will delete this too
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Chainguard usage telemetry
+      shell: bash
+      run: |
+        # Best-effort, fails open. Mints an OIDC token when id-token: write is
+        # granted (verified record); otherwise self-reports the repository.
+        tok=""
+        if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+          tok=$(curl -sf --max-time 2 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=actions.chainguard.dev" \
+            | sed -n 's/.*"value":"\([^"]*\)".*/\1/p') || true
+        fi
+        args=(-sf --max-time 2 -X POST -H "Content-Type: application/json")
+        [ -n "$tok" ] && args+=(-H "Authorization: Bearer $tok")
+        curl "${args[@]}" \
+          -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
+          "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
+    - name: Wait until all sessions have drained
+      shell: powershell
+      if: always()
+      run: |
+        function Get-SSH-Users {
+            # Gets ssh sessions for all users not named SYSTEM
+            Get-CimInstance -ClassName Win32_Process -Filter "Name = 'sshd.exe'" |
+                Get-CimAssociatedInstance -Association Win32_SessionProcess |
+                Get-CimAssociatedInstance -Association Win32_LoggedOnUser |
+                Where-Object {$_.Name -ne 'SYSTEM'} |
+                Measure-Object
+        }
+
+        $usersLoggedOn = Get-SSH-Users
+
+        Write-Output "Holding runner until all ssh sessions have logged out"
+        while ($usersLoggedOn.Count -gt 0) {
+            $usersLoggedOn = Get-SSH-Users
+            Write-Output "."
+            Start-Sleep -s 5
+        }
+
+    - name: Kill active ssh sessions if still around (Useful if workflow was cancelled)
+      shell: powershell
+      if: always()
+      run: |
+        function Get-SSH-Sessions {
+            try {
+                Get-Process sshd -IncludeUserName -ErrorAction 'Stop' |
+                    Where-Object UserName -notLike "*SYSTEM*" |
+                    Select-Object Id
+            } catch { @() }
+        }
+
+        $runningSessions = Get-SSH-Sessions
+
+        foreach ($session in $runningSessions) {
+            Stop-Process -id $session.Id
+        }

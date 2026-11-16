@@ -1,0 +1,45 @@
+name: Test basic chown of a directory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create target directory with files
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/chown-target/nested/deeper"
+          echo "hello" > "$GITHUB_WORKSPACE/chown-target/file.txt"
+          echo "world" > "$GITHUB_WORKSPACE/chown-target/nested/deeper/inner.txt"
+      - id: action
+        uses: .
+        with:
+          directory: ${{ github.workspace }}/chown-target
+          ALPINE_IMAGE: alpine:3.20
+      - name: Assert action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert files owned by current user and content intact
+        run: |
+          UID_NOW="$(id -u)"; GID_NOW="$(id -g)"
+          echo "expected owner: $UID_NOW:$GID_NOW"
+          for f in chown-target/file.txt chown-target/nested/deeper/inner.txt; do
+            OWNER="$(stat -c '%u:%g' "$GITHUB_WORKSPACE/$f")"
+            echo "$f -> $OWNER"
+            if [ "$OWNER" != "$UID_NOW:$GID_NOW" ]; then
+              echo "FAIL: $f not owned by current user"
+              exit 1
+            fi
+          done
+          if [ "$(cat "$GITHUB_WORKSPACE/chown-target/file.txt")" != "hello" ]; then
+            echo "FAIL: file content changed"
+            exit 1
+          fi
+          echo "PASS"

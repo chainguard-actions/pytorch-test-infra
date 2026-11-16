@@ -1,0 +1,82 @@
+name: Test basic upload with valid metrics
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI that captures the upload
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/aws-captured.json /tmp/aws-args.txt
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/bash
+          echo "$@" > /tmp/aws-args.txt
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-captured.json
+            echo "DEST=$4" >> /tmp/aws-args.txt
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - name: Create metrics file
+        run: |
+          cat > /tmp/test-metrics.json <<'EOF'
+          [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"content": "hi"}},
+            {"type": "result", "duration_ms": 12345, "num_turns": 7, "total_cost_usd": 0.42,
+             "usage": {"input_tokens": 100, "output_tokens": 200, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 400},
+             "modelUsage": {"claude-sonnet-4": {"inputTokens": 100}},
+             "result": "some long text"}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          metrics-file: /tmp/test-metrics.json
+          s3-bucket: my-test-bucket
+          s3-prefix: my-prefix
+      - name: Assert upload happened with correct payload
+        run: |
+          if [ ! -f /tmp/aws-captured.json ]; then
+            echo "FAIL: aws s3 cp was not called"
+            exit 1
+          fi
+          echo "payload:"; cat /tmp/aws-captured.json
+          echo "args:"; cat /tmp/aws-args.txt
+          P=/tmp/aws-captured.json
+          check() {
+            local expr="$1" expected="$2"
+            local actual
+            actual=$(jq -r "$expr" "$P")
+            if [ "$actual" != "$expected" ]; then
+              echo "FAIL: $expr = '$actual', expected '$expected'"
+              exit 1
+            fi
+            echo "ok: $expr = $actual"
+          }
+          check '.duration_ms' 12345
+          check '.num_turns' 7
+          check '.total_cost_usd' 0.42
+          check '.input_tokens' 100
+          check '.output_tokens' 200
+          check '.cache_read_input_tokens' 300
+          check '.cache_creation_input_tokens' 400
+          check '.model' 'claude-sonnet-4'
+          check '.pr_number' 0
+          check '.event_name' 'workflow_dispatch'
+          check 'has("result")' 'false'
+          check '.timestamp | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.000$")' 'true'
+          check '.run_id | type' 'number'
+          if ! grep -q "DEST=s3://my-test-bucket/my-prefix/" /tmp/aws-args.txt; then
+            echo "FAIL: destination does not use bucket/prefix inputs"
+            exit 1
+          fi
+          if ! grep -qE "DEST=s3://.*/[0-9]+_[0-9]+\.json$" /tmp/aws-args.txt; then
+            echo "FAIL: destination key not of form <run_id>_<attempt>.json"
+            exit 1
+          fi
+          echo "PASS"

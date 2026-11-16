@@ -1,0 +1,54 @@
+name: Test S3 upload failure is best-effort
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install failing fake aws CLI
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/aws-captured.json
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/bash
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-captured.json
+          fi
+          echo "upload failed: access denied" >&2
+          exit 1
+          EOF
+          chmod +x /tmp/fakebin/aws
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - name: Create metrics file with two results and missing fields
+        run: |
+          cat > /tmp/multi-metrics.json <<'EOF'
+          [
+            {"type": "result", "duration_ms": 1, "num_turns": 1, "modelUsage": {"old-model": {}}},
+            {"type": "result", "duration_ms": "999", "num_turns": "bogus"}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          metrics-file: /tmp/multi-metrics.json
+      - name: Assert step succeeded despite upload failure
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ ! -f /tmp/aws-captured.json ]; then
+            echo "FAIL: aws s3 cp was not attempted"
+            exit 1
+          fi
+          cat /tmp/aws-captured.json
+          P=/tmp/aws-captured.json
+          [ "$(jq -r .duration_ms $P)" = "999" ] || { echo "FAIL: last result should win (duration_ms)"; exit 1; }
+          [ "$(jq -r .num_turns $P)" = "0" ] || { echo "FAIL: non-numeric num_turns should default to 0"; exit 1; }
+          [ "$(jq -r .input_tokens $P)" = "0" ] || { echo "FAIL: missing input_tokens should be 0"; exit 1; }
+          [ "$(jq -r .model $P)" = "" ] || { echo "FAIL: missing modelUsage should give empty model"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,80 @@
+name: Test basic build with single tag and default push
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker CLI
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/docker-build-* /tmp/docker-all.log /tmp/fake-docker-mode
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/docker-all.log
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            n=$(( $(cat /tmp/docker-build-count 2>/dev/null || echo 0) + 1 ))
+            echo "$n" > /tmp/docker-build-count
+            printf '%s\n' "$@" > "/tmp/docker-build-$n.args"
+            mode=$(cat /tmp/fake-docker-mode 2>/dev/null || echo ok)
+            case "$mode" in
+              connfail-once)
+                if [ "$n" -eq 1 ]; then echo "ERROR: failed to dial: connection refused"; exit 1; fi ;;
+              builderr)
+                echo "#1 [internal] load build definition from Dockerfile"
+                echo "ERROR: failed to solve: process did not complete successfully"
+                exit 1 ;;
+            esac
+            echo "fake build ok"
+            exit 0
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: ghcr.io/example/my-image:abc123
+          connect-delay: '0'
+      - name: Assert image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/my-image:abc123" ]; then
+            echo "FAIL: unexpected image output"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert buildx invocation
+        run: |
+          cat /tmp/docker-all.log
+          count=$(cat /tmp/docker-build-count)
+          echo "build count: $count"
+          if [ "$count" != "1" ]; then echo "FAIL: expected exactly 1 build"; exit 1; fi
+          if ! grep -q "buildx create --name remote-buildkit --driver remote" /tmp/docker-all.log; then
+            echo "FAIL: builder was not registered"; exit 1
+          fi
+          ARGS=" $(tr '\n' ' ' < /tmp/docker-build-1.args)"
+          echo "args:$ARGS"
+          case "$(uname -m)" in
+            aarch64|arm64) PLAT=linux/arm64 ;;
+            *) PLAT=linux/amd64 ;;
+          esac
+          for want in " buildx build " " --tag ghcr.io/example/my-image:abc123 " " --platform $PLAT " " --push "; do
+            case "$ARGS" in
+              *"$want"*) echo "found:$want" ;;
+              *) echo "FAIL: missing '$want'"; exit 1 ;;
+            esac
+          done
+          if [ "$(tail -n1 /tmp/docker-build-1.args)" != "." ]; then
+            echo "FAIL: context should be '.' as last arg"; exit 1
+          fi
+          for unwanted in " --file " " --target " " --build-arg " " --label " " --cache-from " " --cache-to "; do
+            case "$ARGS" in
+              *"$unwanted"*) echo "FAIL: unexpected '$unwanted'"; exit 1 ;;
+            esac
+          done
+          echo "PASS"

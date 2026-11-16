@@ -1,0 +1,52 @@
+name: Test command mode
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker CLI
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/docker-build-* /tmp/docker-all.log /tmp/fake-docker-mode /tmp/cmd-marker
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/docker-all.log
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            n=$(( $(cat /tmp/docker-build-count 2>/dev/null || echo 0) + 1 ))
+            echo "$n" > /tmp/docker-build-count
+            printf '%s\n' "$@" > "/tmp/docker-build-$n.args"
+            echo "fake build ok"
+            exit 0
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          command: echo custom-ran > /tmp/cmd-marker && docker buildx build --tag custom/img:cmd --push .
+          tags: ignored/img:tag
+          connect-delay: '0'
+      - name: Assert command ran and image output empty
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: '$IMAGE'"
+          if [ -n "$IMAGE" ]; then echo "FAIL: image output should be empty in command mode"; exit 1; fi
+          if [ "$(cat /tmp/cmd-marker 2>/dev/null)" != "custom-ran" ]; then
+            echo "FAIL: command did not run"; exit 1
+          fi
+          cat /tmp/docker-all.log
+          if ! grep -q "buildx create --name remote-buildkit" /tmp/docker-all.log; then
+            echo "FAIL: builder not registered"; exit 1
+          fi
+          if ! grep -qxF 'custom/img:cmd' /tmp/docker-build-1.args; then
+            echo "FAIL: custom command build args missing"; exit 1
+          fi
+          if grep -q 'ignored/img:tag' /tmp/docker-all.log; then
+            echo "FAIL: tags input should be ignored in command mode"; exit 1
+          fi
+          echo "PASS"

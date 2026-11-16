@@ -1,0 +1,45 @@
+name: Test BUILD_ENV_FILE is sourced and CONDA_RUN is used
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: /tmp/act-test-build-env2.sh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env file, wrapper, and script
+        run: |
+          cat > /tmp/act-test-conda-run.sh <<'EOF'
+          #!/bin/bash
+          echo "wrapper" > /tmp/act-test-wrapper-marker
+          exec "$@"
+          EOF
+          chmod +x /tmp/act-test-conda-run.sh
+          cat > /tmp/act-test-build-env2.sh <<'EOF'
+          export CONDA_RUN="/tmp/act-test-conda-run.sh"
+          export MY_TEST_VALUE="from-env-file"
+          EOF
+          mkdir -p "$GITHUB_WORKSPACE/.act-test"
+          cat > "$GITHUB_WORKSPACE/.act-test/envcheck.sh" <<'EOF'
+          echo "MY_TEST_VALUE=${MY_TEST_VALUE}"
+          echo "${MY_TEST_VALUE}" > /tmp/act-test-env-marker
+          EOF
+          rm -f /tmp/act-test-env-marker /tmp/act-test-wrapper-marker
+      - id: action
+        uses: .
+        with:
+          script: .act-test/envcheck.sh
+      - name: Assert env file sourced and CONDA_RUN wrapper used
+        run: |
+          ACTUAL="$(cat /tmp/act-test-env-marker 2>/dev/null || true)"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "from-env-file" ]; then
+            echo "FAIL: expected 'from-env-file'"
+            exit 1
+          fi
+          if [ ! -f /tmp/act-test-wrapper-marker ]; then
+            echo "FAIL: CONDA_RUN wrapper was not invoked"
+            exit 1
+          fi
+          echo "PASS"

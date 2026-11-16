@@ -1,0 +1,25 @@
+name: Test always-rebuild with no build script (build skipped)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          docker-image-name: rebuild-image:v1
+          docker-build-dir: does-not-exist/docker
+          always-rebuild: "true"
+          repo-name: pytorch
+      - name: Assert image name passed through and build skipped
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "rebuild-image:v1" ]; then
+            echo "FAIL: expected 'rebuild-image:v1'"
+            exit 1
+          fi
+          echo "PASS"

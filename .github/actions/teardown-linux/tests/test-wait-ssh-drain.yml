@@ -1,0 +1,47 @@
+name: Test waiting for ssh sessions to drain
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock docker and who
+        run: |
+          set -eu
+          BIN="$RUNNER_TEMP/mockbin"
+          LOG="$RUNNER_TEMP/mocklog"
+          mkdir -p "$BIN" "$LOG"
+          : > "$LOG/docker.log"
+          : > "$LOG/who.log"
+          cat > "$BIN/docker" <<EOF
+          #!/bin/sh
+          echo "\$*" >> "$LOG/docker.log"
+          exit 0
+          EOF
+          # First call reports a session; subsequent calls report none
+          cat > "$BIN/who" <<EOF
+          #!/bin/sh
+          N=\$(wc -l < "$LOG/who.log")
+          echo "called" >> "$LOG/who.log"
+          if [ "\$N" -eq 0 ]; then echo "user pts/0 2024-01-01 00:00"; fi
+          EOF
+          chmod +x "$BIN/docker" "$BIN/who"
+          echo "$BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          skip-wait-ssh: ""
+      - name: Assert wait polled until drained and cleanup ran
+        run: |
+          LOG="$RUNNER_TEMP/mocklog"
+          echo "--- docker.log ---"; cat "$LOG/docker.log"
+          COUNT=$(wc -l < "$LOG/who.log" | tr -d ' ')
+          echo "who calls: $COUNT"
+          if [ "$COUNT" != "2" ]; then
+            echo "FAIL: expected who to be called exactly twice"
+            exit 1
+          fi
+          grep -qx "ps -q" "$LOG/docker.log" || { echo "FAIL: docker ps -q not called"; exit 1; }
+          grep -qx "system prune -af" "$LOG/docker.log" || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          echo "PASS"

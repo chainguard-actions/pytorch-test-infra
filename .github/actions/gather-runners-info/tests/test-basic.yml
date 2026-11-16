@@ -1,0 +1,52 @@
+name: Test basic usage (CPU runner, no venv)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure python3, pip and lscpu are available
+        run: |
+          SUDO=""
+          if [ "$(id -u)" != "0" ]; then SUDO="sudo"; fi
+          if ! command -v python3 >/dev/null || ! python3 -m pip --version >/dev/null 2>&1 || ! command -v lscpu >/dev/null; then
+            $SUDO apt-get update
+            $SUDO apt-get install -y python3 python3-pip util-linux
+          fi
+          python3 --version
+          python3 -m pip --version
+      - id: action
+        uses: .
+      - name: Assert runners-info is valid JSON with CPU device info
+        env:
+          ACTUAL: ${{ steps.action.outputs.runners-info }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "FAIL: runners-info output is empty"
+            exit 1
+          fi
+          python3 - <<'EOF'
+          import json, os, sys
+          data = json.loads(os.environ["ACTUAL"])
+          if not isinstance(data, list) or not data:
+              print("FAIL: expected non-empty list"); sys.exit(1)
+          r = data[0]
+          if r.get("name") not in ("cpu", "arm64-cpu"):
+              print(f"FAIL: unexpected name {r.get('name')!r}"); sys.exit(1)
+          if not r.get("type"):
+              print("FAIL: type is empty"); sys.exit(1)
+          if not isinstance(r.get("cpu_count"), int) or r["cpu_count"] < 1:
+              print(f"FAIL: bad cpu_count {r.get('cpu_count')!r}"); sys.exit(1)
+          if "avail_mem_in_gb" not in r:
+              print("FAIL: avail_mem_in_gb missing"); sys.exit(1)
+          if not r.get("extra_info", {}).get("hostname"):
+              print("FAIL: extra_info.hostname missing"); sys.exit(1)
+          print("PASS")
+          EOF
+      - name: Assert psutil was installed by the action
+        run: |
+          python3 -c "import psutil; assert psutil.__version__ == '7.0.0', psutil.__version__; print('PASS')"

@@ -1,0 +1,46 @@
+name: Test pull failure retries and fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/fake-calls.log
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "aws $*" >> /tmp/fake-calls.log
+          echo "fake-password"
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/fake-calls.log
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) echo '{"config":{"size":1024},"layers":[{"size":1024}]}'; exit 0 ;;
+            inspect) exit 1 ;;
+            pull) echo "pull failed" >&2; exit 1 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          docker-image: example.com/missing/image:nope
+      - name: Assert failure after retries
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          cat /tmp/fake-calls.log
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "failure" ]; then echo "FAIL: expected failure"; exit 1; fi
+          COUNT=$(grep -c "^docker pull example.com/missing/image:nope$" /tmp/fake-calls.log)
+          echo "pull count: $COUNT"
+          if [ "$COUNT" != "3" ]; then echo "FAIL: expected 3 pull attempts"; exit 1; fi
+          echo "PASS"

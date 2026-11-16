@@ -1,0 +1,35 @@
+name: Test nonexistent environment and pip files are ignored with warning
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          environment-file: tests/fixtures/does-not-exist.txt
+          pip-requirements-file: tests/fixtures/does-not-exist-requirements.txt
+          default-packages: "wheel"
+      - name: Assert action succeeded and env usable
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          set -x
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: action should succeed despite missing files"
+            exit 1
+          fi
+          if [ -z "$CONDA_PREFIX" ] || [ ! -d "$CONDA_PREFIX" ]; then
+            echo "FAIL: CONDA_PREFIX not set or missing"
+            exit 1
+          fi
+          VER=$($CONDA_RUN python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          echo "python version: $VER"
+          if [ "$VER" != "3.9" ]; then
+            echo "FAIL: expected python 3.9"
+            exit 1
+          fi
+          echo "PASS"

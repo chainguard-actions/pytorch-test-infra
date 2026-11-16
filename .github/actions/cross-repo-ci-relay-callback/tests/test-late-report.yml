@@ -1,0 +1,61 @@
+name: Test late report
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          nohup python3 tests/fixtures/mock_server.py 18082 /tmp/mock 200 \
+            '{"status":"ok","results":[{"result":"attached","job_name":"build-npu","delivery_id":"d1"},{"result":"already_has_verdict","job_name":"build-gpu","delivery_id":"d2"}]}' \
+            > /tmp/mock.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18082/ready >/dev/null; then echo "mock ready"; break; fi
+            sleep 1
+          done
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:18082/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          event-type: late-report
+          triage-verdict-list: >-
+            [{"delivery_id":"d1","workflow_name":"wf","job_name":"build-npu","check_run_id":123,
+            "triage_verdict":{"schema_version":1,"category":"flake","confidence":"low","summary":"flaky"}},
+            {"delivery_id":"d2","workflow_name":"wf","job_name":"build-gpu",
+            "triage_verdict":{"schema_version":1,"category":"infra","confidence":"medium","summary":"runner died"}}]
+          callback-url: http://127.0.0.1:18082/github/callback/
+      - name: Assert late report payload
+        run: |
+          cat /tmp/mock.log || true
+          if [ ! -f /tmp/mock/request-1.json ]; then
+            echo "FAIL: no request received"
+            exit 1
+          fi
+          if [ -f /tmp/mock/request-2.json ]; then
+            echo "FAIL: expected a single request for 2 reports"
+            exit 1
+          fi
+          cat /tmp/mock/request-1.json; echo
+          python3 - <<'EOF'
+          import json, sys
+          p = json.load(open("/tmp/mock/request-1.json"))
+          print("event_type:", p.get("event_type"))
+          if p.get("event_type") != "late-report":
+              print("FAIL: wrong event_type"); sys.exit(1)
+          if "workflow" in p:
+              print("FAIL: late report must not include workflow"); sys.exit(1)
+          r = p["reports"]
+          if len(r) != 2:
+              print("FAIL: expected 2 reports"); sys.exit(1)
+          if r[0]["job_name"] != "build-npu" or r[0]["check_run_id"] != 123:
+              print("FAIL: first report mismatch"); sys.exit(1)
+          if r[1]["triage_verdict"]["category"] != "infra":
+              print("FAIL: second report mismatch"); sys.exit(1)
+          print("PASS")
+          EOF

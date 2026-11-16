@@ -41,15 +41,15 @@ runs:
     - name: Check if binaries have changed
       shell: bash
       env:
-        PLATFORM: ${{ inputs.platform }}
-        VERSION: ${{ inputs.version }}
+        INPUT_PLATFORM: ${{ inputs.platform }}
+        INPUT_VERSION: ${{ inputs.version }}
       run: |
         set -ex
         python3 tools/clang-tidy-checks/check_s3.py \
-          --s3-key "${PLATFORM}/${VERSION}/clang-tidy" \
+          --s3-key "${INPUT_PLATFORM}/${INPUT_VERSION}/clang-tidy" \
           --local-file clang-tidy
         python3 tools/clang-tidy-checks/check_s3.py \
-          --s3-key "${PLATFORM}/${VERSION}/clang-format" \
+          --s3-key "${INPUT_PLATFORM}/${INPUT_VERSION}/clang-format" \
           --local-file clang-format
 
     - name: configure aws credentials

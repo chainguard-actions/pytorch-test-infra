@@ -1,0 +1,36 @@
+name: Test activate-with-label skips without label
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Seed an existing authorized_keys file
+        run: |
+          mkdir -p "$HOME/.ssh"
+          echo "ssh-ed25519 AAAAPRESEEDEDKEY marker@test" > "$HOME/.ssh/authorized_keys"
+      - id: action
+        uses: .
+        with:
+          github-secret: ${{ secrets.GITHUB_TOKEN }}
+          activate-with-label: 'true'
+          label: 'with-ssh-label-that-is-not-applied'
+          remove-existing-keys: 'true'
+          fail-silently: 'false'
+      - name: Assert step succeeded and keys untouched
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          cat "$HOME/.ssh/authorized_keys" || true
+          if ! grep -q "AAAAPRESEEDEDKEY" "$HOME/.ssh/authorized_keys"; then
+            echo "FAIL: authorized_keys was modified although label was not applied"
+            exit 1
+          fi
+          echo "PASS"

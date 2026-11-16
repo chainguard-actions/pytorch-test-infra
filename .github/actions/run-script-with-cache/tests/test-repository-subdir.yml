@@ -1,0 +1,31 @@
+name: Test script runs in repository subdirectory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: /tmp/act-test-build-env4.sh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env file and script in subdir
+        run: |
+          printf 'export CONDA_RUN=""\n' > /tmp/act-test-build-env4.sh
+          mkdir -p "$GITHUB_WORKSPACE/act-subrepo"
+          cat > "$GITHUB_WORKSPACE/act-subrepo/run.sh" <<'EOF'
+          pwd > /tmp/act-test-subdir-marker
+          EOF
+          rm -f /tmp/act-test-subdir-marker
+      - id: action
+        uses: .
+        with:
+          repository: act-subrepo
+          script: run.sh
+      - name: Assert script ran in subdirectory
+        run: |
+          ACTUAL="$(cat /tmp/act-test-subdir-marker 2>/dev/null || true)"
+          echo "actual: $ACTUAL"
+          case "$ACTUAL" in
+            */act-subrepo) echo "PASS" ;;
+            *) echo "FAIL: expected working dir ending in /act-subrepo"; exit 1 ;;
+          esac

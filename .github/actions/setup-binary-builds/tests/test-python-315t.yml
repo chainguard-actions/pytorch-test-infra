@@ -1,0 +1,46 @@
+name: Test free-threaded python 3.15t
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: octocat/Hello-World
+      REF: master
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake conda
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          install -m 0755 tests/fixtures/fake-conda.sh "$RUNNER_TEMP/fakebin/conda"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          SUDO=""; if [ "$(id -u)" != "0" ]; then SUDO=sudo; fi
+          $SUDO install -m 0755 tests/fixtures/fake-conda.sh /usr/local/bin/conda
+          rm -f /tmp/fake-conda.log
+      - id: action
+        uses: .
+        with:
+          repository: octocat/Hello-World
+          ref: master
+          python-version: "3.15t"
+          cuda-version: cu128
+          arch: x86_64
+      - name: Assert artifact name
+        run: |
+          echo "ARTIFACT_NAME: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "octocat_Hello-World_master_3.15t_cu128_x86_64" ]; then
+            echo "FAIL: unexpected artifact name"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda create args
+        run: |
+          cat /tmp/fake-conda.log
+          LINE="$(grep "conda_environment_" /tmp/fake-conda.log | grep '^conda create')"
+          echo "create line: $LINE"
+          echo "$LINE" | grep -q "python=3.15 " || { echo "FAIL: expected python=3.15"; exit 1; }
+          echo "$LINE" | grep -q "python-freethreading" || { echo "FAIL: freethreading missing"; exit 1; }
+          echo "$LINE" | grep -q -- "-c conda-forge" || { echo "FAIL: conda-forge channel missing"; exit 1; }
+          if echo "$LINE" | grep -q "openssl="; then echo "FAIL: openssl pin should be cleared"; exit 1; fi
+          echo "PASS"

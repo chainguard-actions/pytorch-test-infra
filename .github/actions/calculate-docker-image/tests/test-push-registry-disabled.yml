@@ -1,0 +1,27 @@
+name: Test push input with custom registry disabled (no push performed)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          docker-image-name: push-image:latest
+          docker-build-dir: tests/fixtures/docker
+          use-custom-docker-registry: "false"
+          push: "true"
+          force-push: "true"
+          repo-name: pytorch
+      - name: Assert image name returned unchanged
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "push-image:latest" ]; then
+            echo "FAIL: expected 'push-image:latest'"
+            exit 1
+          fi
+          echo "PASS"

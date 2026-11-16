@@ -1,0 +1,36 @@
+name: Test keep existing keys
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Seed an existing authorized_keys file
+        run: |
+          mkdir -p "$HOME/.ssh"
+          echo "ssh-ed25519 AAAAKEEPMEKEY keep@test" > "$HOME/.ssh/authorized_keys"
+      - id: action
+        uses: .
+        timeout-minutes: 10
+        with:
+          github-secret: ${{ secrets.GITHUB_TOKEN }}
+          activate-with-label: 'false'
+          remove-existing-keys: 'false'
+          fail-silently: 'true'
+      - name: Assert success and existing key preserved
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          cat "$HOME/.ssh/authorized_keys"
+          if ! grep -q "AAAAKEEPMEKEY" "$HOME/.ssh/authorized_keys"; then
+            echo "FAIL: existing key was removed although remove-existing-keys=false"
+            exit 1
+          fi
+          echo "PASS"

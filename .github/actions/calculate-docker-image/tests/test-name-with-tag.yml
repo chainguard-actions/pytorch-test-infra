@@ -1,0 +1,44 @@
+name: Test image name with embedded tag used as prefix
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker (image reported as already existing)
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "fake-password"
+          exit 0
+          EOF
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/sh
+          echo "fake-docker $*" >&2
+          if [ "$1" = "login" ]; then cat >/dev/null; fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws" "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: my-image:mytag
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: 123456789012.dkr.ecr.us-east-1.amazonaws.com
+          repo-name: pytorch
+      - name: Assert tag is mytag-hash
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          HASH=$(git rev-parse HEAD:tests/fixtures/docker)
+          EXPECTED="123456789012.dkr.ecr.us-east-1.amazonaws.com/pytorch/my-image:mytag-${HASH}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,44 @@
+name: Test custom registry
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/fake-calls.log
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "aws $*" >> /tmp/fake-calls.log
+          echo "fake-password"
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/fake-calls.log
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) echo '{"config":{"size":1024},"layers":[{"size":1024}]}'; exit 0 ;;
+            inspect) exit 1 ;;
+            pull) exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: my-registry.example.com/team/app:1.2.3
+          docker-registry: my-registry.example.com
+      - name: Assert custom registry used
+        run: |
+          cat /tmp/fake-calls.log
+          grep -q "docker login -u AWS --password-stdin my-registry.example.com$" /tmp/fake-calls.log || { echo "FAIL: login to custom registry missing"; exit 1; }
+          if grep -q "308535385114.dkr.ecr.us-east-1.amazonaws.com" /tmp/fake-calls.log; then
+            echo "FAIL: default registry used despite override"; exit 1
+          fi
+          grep -q "^docker pull my-registry.example.com/team/app:1.2.3$" /tmp/fake-calls.log || { echo "FAIL: pull missing"; exit 1; }
+          echo "PASS"

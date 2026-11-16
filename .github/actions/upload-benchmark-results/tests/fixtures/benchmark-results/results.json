@@ -1,0 +1,23 @@
+[
+  {
+    "benchmark": {
+      "name": "act-test-benchmark",
+      "mode": "inference",
+      "dtype": "float32",
+      "extra_info": {}
+    },
+    "model": {
+      "name": "dummy-model",
+      "type": "test",
+      "backend": "eager",
+      "origins": ["test"],
+      "extra_info": {}
+    },
+    "metric": {
+      "name": "latency",
+      "benchmark_values": [1.5, 1.6],
+      "target_value": null,
+      "extra_info": {}
+    }
+  }
+]

@@ -1,0 +1,63 @@
+name: Test periodic failure details
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          nohup python3 tests/fixtures/mock_server.py 18081 /tmp/mock > /tmp/mock.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18081/ready >/dev/null; then echo "mock ready"; break; fi
+            sleep 1
+          done
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:18081/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: failure
+          delivery-id: abcdefabcdefabcdefabcdefabcdefabcdefabcd
+          event-type: periodic
+          failed-tests-detail: '[{"name":"test_foo","classname":"TestBar","message":"AssertionError"}]'
+          triage-verdict: '{"schema_version":1,"category":"upstream","confidence":"high","summary":"aten::foo changed"}'
+          callback-url: http://127.0.0.1:18081/github/callback/
+      - name: Assert payload contents
+        run: |
+          cat /tmp/mock.log || true
+          if [ ! -f /tmp/mock/request-1.json ]; then
+            echo "FAIL: no callback request received"
+            exit 1
+          fi
+          cat /tmp/mock/request-1.json; echo
+          python3 - <<'EOF'
+          import json, sys
+          p = json.load(open("/tmp/mock/request-1.json"))
+          w = p["workflow"]
+          checks = [
+              (p["event_type"], "periodic"),
+              (p["delivery_id"], "abcdefabcdefabcdefabcdefabcdefabcdefabcd"),
+              (w["status"], "completed"),
+              (w["conclusion"], "failure"),
+              (w["job_name"], "test"),
+              (w["failed_tests_detail"], [{"name": "test_foo", "classname": "TestBar", "message": "AssertionError"}]),
+              (w["triage_verdict"]["category"], "upstream"),
+              (w["triage_verdict"]["confidence"], "high"),
+              (w["triage_verdict"]["summary"], "aten::foo changed"),
+          ]
+          for actual, expected in checks:
+              print(f"actual={actual!r} expected={expected!r}")
+              if actual != expected:
+                  print("FAIL")
+                  sys.exit(1)
+          if "artifact_url" in w or "test_results" in w:
+              print("FAIL: unexpected optional fields present")
+              sys.exit(1)
+          print("PASS")
+          EOF

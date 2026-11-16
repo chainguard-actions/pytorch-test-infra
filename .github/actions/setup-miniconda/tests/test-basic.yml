@@ -1,0 +1,74 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert conda environment exported
+        run: |
+          set -x
+          echo "CONDA_ENV=$CONDA_ENV"
+          echo "CONDA_PREFIX=$CONDA_PREFIX"
+          echo "CONDA_RUN=$CONDA_RUN"
+          echo "CONDA_INSTALL=$CONDA_INSTALL"
+          echo "CONDA_EXE=$CONDA_EXE"
+          EXPECTED="${RUNNER_TEMP}/conda_environment_${GITHUB_RUN_ID}"
+          if [ "$CONDA_PREFIX" != "$EXPECTED" ]; then
+            echo "FAIL: CONDA_PREFIX expected '$EXPECTED'"
+            exit 1
+          fi
+          if [ "$CONDA_ENV" != "$CONDA_PREFIX" ]; then
+            echo "FAIL: CONDA_ENV should equal CONDA_PREFIX"
+            exit 1
+          fi
+          if [ ! -d "$CONDA_PREFIX" ]; then
+            echo "FAIL: conda env dir missing"
+            exit 1
+          fi
+          if [ "$CONDA_EXE" != "${RUNNER_TEMP}/miniconda/bin/conda" ] || [ ! -x "$CONDA_EXE" ]; then
+            echo "FAIL: CONDA_EXE wrong or not executable"
+            exit 1
+          fi
+          case "$CONDA_RUN" in
+            *"run -p ${CONDA_PREFIX} --no-capture-output"*) ;;
+            *) echo "FAIL: CONDA_RUN unexpected"; exit 1 ;;
+          esac
+          case "$CONDA_INSTALL" in
+            *"install --yes --quiet -p ${CONDA_PREFIX}"*) ;;
+            *) echo "FAIL: CONDA_INSTALL unexpected"; exit 1 ;;
+          esac
+          echo "PASS"
+      - name: Assert python version and default packages
+        run: |
+          set -x
+          VER=$($CONDA_RUN python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          echo "python version: $VER"
+          if [ "$VER" != "3.9" ]; then
+            echo "FAIL: expected python 3.9"
+            exit 1
+          fi
+          for bin in cmake ninja pkg-config; do
+            if [ ! -x "$CONDA_PREFIX/bin/$bin" ]; then
+              echo "FAIL: $bin not installed in env"
+              exit 1
+            fi
+          done
+          $CONDA_RUN cmake --version | grep -q "3.22" || { echo "FAIL: cmake not 3.22"; exit 1; }
+          echo "PASS"
+      - name: Assert conda on PATH and channel priority reset
+        run: |
+          set -x
+          WHICH=$(which conda)
+          echo "which conda: $WHICH"
+          if [ "$WHICH" != "${RUNNER_TEMP}/miniconda/bin/conda" ]; then
+            echo "FAIL: wrong conda on PATH"
+            exit 1
+          fi
+          PRIO=$(conda config --show channel_priority)
+          echo "$PRIO"
+          echo "$PRIO" | grep -q "disabled\|false" || { echo "FAIL: channel_priority not disabled"; exit 1; }
+          echo "PASS"

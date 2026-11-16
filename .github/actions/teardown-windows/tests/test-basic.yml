@@ -1,0 +1,69 @@
+name: Test basic teardown (default inputs)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install fake powershell shim that records invoked scripts
+        run: |
+          mkdir -p /tmp/fake-ps-bin /tmp/ps-log
+          cat > /tmp/fake-ps-bin/powershell <<'EOF'
+          #!/bin/bash
+          LOG=/tmp/ps-log
+          mkdir -p "$LOG"
+          n=$(cat "$LOG/counter" 2>/dev/null || echo 0)
+          n=$((n+1))
+          echo "$n" > "$LOG/counter"
+          printf '%s\n' "$@" > "$LOG/args-$n.txt"
+          for a in "$@"; do
+            f=$(printf '%s' "$a" | sed -n "s/.*'\([^']*\)'.*/\1/p")
+            [ -z "$f" ] && f="$a"
+            if [ -f "$f" ]; then
+              cp "$f" "$LOG/script-$n.ps1"
+            fi
+          done
+          exit 0
+          EOF
+          chmod +x /tmp/fake-ps-bin/powershell
+          echo "/tmp/fake-ps-bin" >> "$GITHUB_PATH"
+
+      - id: action
+        uses: .
+
+      - name: Assert both teardown steps ran via powershell
+        run: |
+          echo "invocations: $(cat /tmp/ps-log/counter 2>/dev/null)"
+          ls -la /tmp/ps-log || true
+          for f in /tmp/ps-log/*; do echo "== $f"; cat "$f"; done
+          count=$(cat /tmp/ps-log/counter 2>/dev/null || echo 0)
+          if [ "$count" -lt 2 ]; then
+            echo "FAIL: expected at least 2 powershell invocations, got $count"
+            exit 1
+          fi
+          if ! grep -l "Get-SSH-Users" /tmp/ps-log/script-*.ps1 >/dev/null 2>&1; then
+            echo "FAIL: session-drain step script not executed"
+            exit 1
+          fi
+          if ! grep -l "Holding runner until all ssh sessions have logged out" /tmp/ps-log/script-*.ps1 >/dev/null 2>&1; then
+            echo "FAIL: drain message not found in executed script"
+            exit 1
+          fi
+          if ! grep -l "Stop-Process" /tmp/ps-log/script-*.ps1 >/dev/null 2>&1; then
+            echo "FAIL: kill-sessions step script not executed"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert action step outcome
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          echo "PASS"

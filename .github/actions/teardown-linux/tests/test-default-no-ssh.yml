@@ -1,0 +1,44 @@
+name: Test default with no ssh sessions
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock docker and who
+        run: |
+          set -eu
+          BIN="$RUNNER_TEMP/mockbin"
+          LOG="$RUNNER_TEMP/mocklog"
+          mkdir -p "$BIN" "$LOG"
+          : > "$LOG/docker.log"
+          : > "$LOG/who.log"
+          cat > "$BIN/docker" <<EOF
+          #!/bin/sh
+          echo "\$*" >> "$LOG/docker.log"
+          if [ "\$1" = "ps" ]; then echo "abc123"; fi
+          exit 0
+          EOF
+          cat > "$BIN/who" <<EOF
+          #!/bin/sh
+          echo "called" >> "$LOG/who.log"
+          EOF
+          chmod +x "$BIN/docker" "$BIN/who"
+          echo "$BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert wait ran once and cleanup ran
+        run: |
+          LOG="$RUNNER_TEMP/mocklog"
+          echo "--- docker.log ---"; cat "$LOG/docker.log"
+          echo "--- who.log ---"; cat "$LOG/who.log"
+          COUNT=$(wc -l < "$LOG/who.log" | tr -d ' ')
+          echo "who calls: $COUNT"
+          if [ "$COUNT" != "1" ]; then
+            echo "FAIL: expected who to be called exactly once"
+            exit 1
+          fi
+          grep -qx "stop abc123" "$LOG/docker.log" || { echo "FAIL: docker stop not called"; exit 1; }
+          grep -qx "system prune -af" "$LOG/docker.log" || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          echo "PASS"

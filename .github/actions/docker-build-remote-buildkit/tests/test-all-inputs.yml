@@ -1,0 +1,84 @@
+name: Test build with multiple tags and all buildx inputs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker CLI
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/docker-build-* /tmp/docker-all.log /tmp/fake-docker-mode
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/docker-all.log
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            n=$(( $(cat /tmp/docker-build-count 2>/dev/null || echo 0) + 1 ))
+            echo "$n" > /tmp/docker-build-count
+            printf '%s\n' "$@" > "/tmp/docker-build-$n.args"
+            echo "fake build ok"
+            exit 0
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: |
+            ghcr.io/example/img:one, ghcr.io/example/img:two
+            ghcr.io/example/img:three
+          context: ./subdir
+          file: ./subdir/Dockerfile.custom
+          target: runtime
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.source=https://example.com/repo
+            team=infra
+          cache-from: |
+            type=registry,ref=ghcr.io/example/img:cache
+          cache-to: |
+            type=registry,ref=ghcr.io/example/img:cache,mode=max
+          connect-delay: '0'
+      - name: Assert image output is first tag
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/img:one" ]; then
+            echo "FAIL: expected first tag"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert buildx args
+        run: |
+          ARGS=" $(tr '\n' ' ' < /tmp/docker-build-1.args)"
+          echo "args:$ARGS"
+          for want in \
+            " --tag ghcr.io/example/img:one " \
+            " --tag ghcr.io/example/img:two " \
+            " --tag ghcr.io/example/img:three " \
+            " --file ./subdir/Dockerfile.custom " \
+            " --target runtime " \
+            " --build-arg FOO=bar " \
+            " --build-arg BAZ=qux " \
+            " --label org.opencontainers.image.source=https://example.com/repo " \
+            " --label team=infra " \
+            " --cache-from type=registry,ref=ghcr.io/example/img:cache " \
+            " --cache-to type=registry,ref=ghcr.io/example/img:cache,mode=max " \
+            " --push "; do
+            case "$ARGS" in
+              *"$want"*) echo "found:$want" ;;
+              *) echo "FAIL: missing '$want'"; exit 1 ;;
+            esac
+          done
+          tags=$(grep -cxF -- '--tag' /tmp/docker-build-1.args)
+          if [ "$tags" != "3" ]; then echo "FAIL: expected 3 --tag flags, got $tags"; exit 1; fi
+          if [ "$(tail -n1 /tmp/docker-build-1.args)" != "./subdir" ]; then
+            echo "FAIL: context should be ./subdir as last arg"; exit 1
+          fi
+          echo "PASS"

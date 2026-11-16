@@ -1,0 +1,56 @@
+name: Test custom stable-branch input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          repository: octocat/Hello-World
+          stable-branch: viable/custom-test
+          requires: '["build"]'
+          secret-bot-token: ${{ secrets.GITHUB_TOKEN }}
+          clickhouse-url: http://127.0.0.1:1
+          clickhouse-username: default
+          clickhouse-password: unused
+      - name: Assert full-history clone (fetch-depth 0)
+        working-directory: octocat/Hello-World
+        run: |
+          SHALLOW=$(git rev-parse --is-shallow-repository)
+          echo "is-shallow: $SHALLOW"
+          if [ "$SHALLOW" != "false" ]; then
+            echo "FAIL: expected a full-history clone"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert outcome and that the custom branch was not pushed on failure
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          SHA: ${{ steps.action.outputs.latest_viable_sha }}
+          PUSH: ${{ steps.action.outputs.push_result }}
+          TIME: ${{ steps.action.outputs.time }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "sha: $SHA"
+          echo "push_result: $PUSH"
+          echo "time: $TIME"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$SHA" ]; then
+              echo "FAIL: action succeeded but latest_viable_sha is empty"
+              exit 1
+            fi
+            echo "PASS: got sha '$SHA'"
+          elif [ "$OUTCOME" = "failure" ]; then
+            if [ -n "$PUSH" ] || [ -n "$TIME" ]; then
+              echo "FAIL: push step must not run when lookup failed"
+              exit 1
+            fi
+            echo "PASS: action failed gracefully before pushing"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

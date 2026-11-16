@@ -1,0 +1,72 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # The action's "Set artifact name" step expects callers to export these
+      REPOSITORY: octocat/Hello-World
+      REF: master
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake conda
+        run: |
+          set -eux
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          install -m 0755 tests/fixtures/fake-conda.sh "$RUNNER_TEMP/fakebin/conda"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          SUDO=""; if [ "$(id -u)" != "0" ]; then SUDO=sudo; fi
+          $SUDO install -m 0755 tests/fixtures/fake-conda.sh /usr/local/bin/conda
+          rm -f /tmp/fake-conda.log
+      - id: action
+        uses: .
+        with:
+          repository: octocat/Hello-World
+          ref: master
+          python-version: "3.10.19"
+          cuda-version: cu121
+          arch: x86_64
+      - name: Assert checkout into repository subdirectory
+        run: |
+          ls -la "$GITHUB_WORKSPACE/octocat/Hello-World"
+          if [ ! -f "$GITHUB_WORKSPACE/octocat/Hello-World/README" ]; then
+            echo "FAIL: README not found in checked out repository"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert artifact name
+        run: |
+          echo "ARTIFACT_NAME: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "octocat_Hello-World_master_3.10_cu121_x86_64" ]; then
+            echo "FAIL: unexpected artifact name"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert build env file and conda env
+        run: |
+          echo "BUILD_ENV_FILE: $BUILD_ENV_FILE"
+          echo "CONDA_ENV: $CONDA_ENV"
+          echo "CONDA_RUN: $CONDA_RUN"
+          cat /tmp/fake-conda.log
+          if [ -z "$BUILD_ENV_FILE" ] || [ ! -f "$BUILD_ENV_FILE" ]; then
+            echo "FAIL: BUILD_ENV_FILE missing"; exit 1
+          fi
+          grep -q "FAKE_PKG_HELPER=1" "$BUILD_ENV_FILE" || { echo "FAIL: build env file content"; exit 1; }
+          case "$CONDA_ENV" in
+            */conda_environment_*) ;;
+            *) echo "FAIL: unexpected CONDA_ENV"; exit 1 ;;
+          esac
+          if [ "$CONDA_RUN" != "conda run --no-capture-output -p ${CONDA_ENV}" ]; then
+            echo "FAIL: unexpected CONDA_RUN"; exit 1
+          fi
+          LINE="$(grep "conda_environment_" /tmp/fake-conda.log | grep '^conda create')"
+          echo "create line: $LINE"
+          echo "$LINE" | grep -q "python=3.10.19" || { echo "FAIL: python version not passed"; exit 1; }
+          echo "$LINE" | grep -q "openssl=3.5.6" || { echo "FAIL: openssl pin missing"; exit 1; }
+          if echo "$LINE" | grep -q "python-freethreading"; then
+            echo "FAIL: unexpected freethreading"; exit 1
+          fi
+          grep -q "^conda clean --all" /tmp/fake-conda.log || { echo "FAIL: conda clean not run"; exit 1; }
+          grep -q "^conda config --set channel_priority false" /tmp/fake-conda.log || { echo "FAIL: channel priority not reset"; exit 1; }
+          echo "PASS"

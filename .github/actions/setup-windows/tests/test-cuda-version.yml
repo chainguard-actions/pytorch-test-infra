@@ -1,0 +1,96 @@
+name: Test setup-windows with cuda-version 12.4
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install shims for Windows-only tools (powershell, cygpath) and EC2 metadata curl
+        run: |
+          set -eu
+          SHIMS="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIMS"
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          rm -f /tmp/powershell-calls
+
+          cat > "$SHIMS/powershell" <<'EOF'
+          #!/bin/sh
+          # Fake powershell: record invocation and succeed (registry/Defender are Windows-only)
+          echo "powershell $*" >> /tmp/powershell-calls
+          exit 0
+          EOF
+
+          cat > "$SHIMS/cygpath" <<'EOF'
+          #!/bin/sh
+          # Fake cygpath: on Linux paths are already POSIX
+          echo "$1"
+          EOF
+
+          cat > "$SHIMS/curl" <<EOF
+          #!/bin/sh
+          out=""
+          prev=""
+          for arg in "\$@"; do
+            case "\$prev" in
+              -o|--output) out="\$arg" ;;
+            esac
+            prev="\$arg"
+          done
+          case "\$*" in
+            *169.254.169.254*api/token*) payload="fake-token-value" ;;
+            *169.254.169.254*meta-data/*)
+              cat="\${*##*meta-data/}"
+              payload="fake-\${cat%% *}" ;;
+            *) exec "$REAL_CURL" "\$@" ;;
+          esac
+          if [ -n "\$out" ]; then printf '%s' "\$payload" > "\$out"; else printf '%s' "\$payload"; fi
+          exit 0
+          EOF
+
+          sed -i 's/^          //' "$SHIMS/powershell" "$SHIMS/cygpath" "$SHIMS/curl"
+          chmod +x "$SHIMS"/*
+          echo "$SHIMS" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: "12.4"
+      - name: Assert git global config was set
+        run: |
+          for kv in core.longpaths=true core.symlinks=true core.fsmonitor=false; do
+            key="${kv%%=*}"; want="${kv#*=}"
+            got="$(git config --global --get "$key" || true)"
+            echo "$key: $got"
+            if [ "$got" != "$want" ]; then
+              echo "FAIL: expected $key=$want"
+              exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert powershell steps were invoked
+        run: |
+          cat /tmp/powershell-calls || true
+          n="$(wc -l < /tmp/powershell-calls 2>/dev/null || echo 0)"
+          echo "powershell calls: $n"
+          if [ "$n" -lt 2 ]; then
+            echo "FAIL: expected 2 powershell steps to run"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert environment variables and directories
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "$RUNNER_TEMP/artifacts" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR expected $RUNNER_TEMP/artifacts"
+            exit 1
+          fi
+          if [ "$RUNNER_TEST_RESULTS_DIR" != "$RUNNER_TEMP/test-results" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR expected $RUNNER_TEMP/test-results"
+            exit 1
+          fi
+          if [ ! -d "$RUNNER_ARTIFACT_DIR" ] || [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+            echo "FAIL: directories not created"
+            exit 1
+          fi
+          echo "PASS"

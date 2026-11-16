@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--clang-tidy-upload/v20261109-2327
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Check if binaries have changed' run: block puts ${{ inputs.platform }} and ${{ inputs.version }} directly into the shell command, e.g. `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-tidy"` and `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-format"`. Fix: pass them in through env: (for example PLATFORM and VERSION) and reference them as "${PLATFORM}/${VERSION}/clang-tidy".
+Rule (a): the 'Check if binaries have changed' step puts expressions straight into the run: script: `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-tidy"` and `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-format"`. A crafted input value can break out of the quotes and run its own shell commands. Fix: pass the inputs in through env: variables and use them double-quoted in the script.
 
 Locations:
 
@@ -25,12 +25,12 @@ Locations:
 
 ### unpinned-uses (severity: high)
 
-These uses: references point to mutable tags instead of 40-character commit SHAs: aws-actions/configure-aws-credentials@v4, seemethere/upload-artifact-s3@v5 (twice), actions/upload-artifact@v6 (twice).
+action.yml points to actions by mutable tags instead of 40-character commit SHAs: aws-actions/configure-aws-credentials@v4 (line 37), seemethere/upload-artifact-s3@v5 (lines 45, 54), and actions/upload-artifact@v6 (lines 64, 72).
 
 Locations:
 
 - `action.yml:37`
-- `action.yml:44`
+- `action.yml:45`
 - `action.yml:54`
 - `action.yml:64`
 - `action.yml:72`
@@ -75,5 +75,13 @@ Locations:
 
 **Notes:**
 
-In the 'Check if binaries have changed' step, inputs.platform and inputs.version now go in through the step's env: block as PLATFORM and VERSION. The script uses them as "${PLATFORM}/${VERSION}/...". I pinned aws-actions/configure-aws-credentials@v4, seemethere/upload-artifact-s3@v5 (2 uses) and actions/upload-artifact@v6 (2 uses) to full commit SHAs found with lookup_action_sha, with the tag kept in a comment after each one. Inputs used in with: blocks were left as they were, because with: values are not run by a shell.
+I fixed all three findings in action.yml.
+
+- **Script injection (`script-injection` and `static-inline-injection`):** the 'Check if binaries have changed' step no longer pastes `inputs.platform` and `inputs.version` into its script. They now come in through the step's env: block as `INPUT_PLATFORM` and `INPUT_VERSION`, and the script uses them double-quoted.
+- **Unpinned actions (`unpinned-uses`):** every action reference now uses a full commit SHA, with the original tag kept as a comment. I looked up each SHA with the lookup tool:
+  - `aws-actions/configure-aws-credentials` v4: `7474bc4690e29a8392af63c5b98e7449536d5c3a`
+  - `seemethere/upload-artifact-s3` v5: `baba72d0712b404f646cebe0730933554ebce96a` (2 uses)
+  - `actions/upload-artifact` v6: `b7c566a772e6b6bfb58ed0dc250532a479d7789f` (2 uses)
+
+I haven't run the action or a new analysis pass, so these changes are untested.
 

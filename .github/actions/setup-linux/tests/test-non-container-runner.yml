@@ -1,0 +1,107 @@
+name: Test setup-linux on a non-container (EC2 host) runner
+on:
+  workflow_dispatch:
+env:
+  CI: "true"
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Ensure no container markers
+        run: |
+          SUDO=""; if [ "$(id -u)" != "0" ]; then SUDO=sudo; fi
+          $SUDO rm -f /.incontainer /.inarc
+
+      - name: Install mock tools (curl, aws, docker, sudo, lspci, systemctl)
+        run: |
+          MOCK="$RUNNER_TEMP/mockbin"
+          LOG="$RUNNER_TEMP/mock-calls.log"
+          mkdir -p "$MOCK"
+          : > "$LOG"
+
+          cat > "$MOCK/curl" <<EOF
+          #!/bin/bash
+          echo "curl \$*" >> "$LOG"
+          case "\$*" in
+            *api/token*) echo "fake-token" ;;
+            *meta-data/*) echo "fake-value" ;;
+            *) exit 22 ;;
+          esac
+          EOF
+
+          cat > "$MOCK/aws" <<EOF
+          #!/bin/bash
+          echo "aws \$*" >> "$LOG"
+          case "\$1 \$2" in
+            "sts get-caller-identity")
+              printf '{\n    "UserId": "AIDAEXAMPLE",\n    "Account": "210987654321",\n    "Arn": "arn:aws:iam::210987654321:user/test"\n}\n'
+              ;;
+            "ecr get-login-password") echo "fake-ecr-password" ;;
+            *) exit 1 ;;
+          esac
+          EOF
+
+          cat > "$MOCK/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG"
+          case "\$1" in
+            login) cat >/dev/null; echo "Login Succeeded" ;;
+            version) echo "Docker version mock" ;;
+            ps) ;;
+            stop) exit 1 ;;
+            system) echo "Total reclaimed space: 0B" ;;
+          esac
+          exit 0
+          EOF
+
+          cat > "$MOCK/sudo" <<EOF
+          #!/bin/bash
+          echo "sudo \$*" >> "$LOG"
+          exec "\$@"
+          EOF
+
+          cat > "$MOCK/lspci" <<EOF
+          #!/bin/bash
+          echo "lspci \$*" >> "$LOG"
+          echo "00:03.0 VGA compatible controller: Amazon.com, Inc. Device 1111"
+          EOF
+
+          cat > "$MOCK/systemctl" <<EOF
+          #!/bin/bash
+          echo "systemctl \$*" >> "$LOG"
+          exit 0
+          EOF
+
+          chmod +x "$MOCK"/*
+          echo "$MOCK" >> "$GITHUB_PATH"
+
+      - id: action
+        uses: .
+
+      - name: Assert results
+        run: |
+          LOG="$RUNNER_TEMP/mock-calls.log"
+          echo "--- mock calls ---"; cat "$LOG"; echo "------------------"
+          fail=0
+
+          grep -q "^docker version" "$LOG" || { echo "FAIL: docker daemon check not run"; fail=1; }
+          if grep -q "systemctl start docker" "$LOG"; then echo "FAIL: docker should not be started when running"; fail=1; fi
+          grep -q "^lspci -v" "$LOG" || { echo "FAIL: nvidia detection (lspci) not run"; fail=1; }
+          grep -q "^docker ps -q" "$LOG" || { echo "FAIL: docker ps not run"; fail=1; }
+          grep -q "^docker system prune -af" "$LOG" || { echo "FAIL: docker system prune not run"; fail=1; }
+          grep -q "^docker login --username AWS --password-stdin 210987654321.dkr.ecr.us-east-1.amazonaws.com" "$LOG" \
+            || { echo "FAIL: docker login not called with expected registry"; fail=1; }
+
+          for v in RUNNER_ARTIFACT_DIR RUNNER_TEST_RESULTS_DIR RUNNER_DOCS_DIR; do
+            val="${!v:-}"
+            echo "$v=$val"
+            if [ -z "$val" ] || [ ! -d "$val" ]; then echo "FAIL: $v not set or dir missing"; fail=1; fi
+          done
+
+          echo "GPU_FLAG='${GPU_FLAG:-}'"
+          if [ -n "${GPU_FLAG:-}" ]; then echo "FAIL: GPU_FLAG should not be set without NVIDIA"; fail=1; fi
+
+          [ "$fail" = "0" ] || exit 1
+          echo "PASS"

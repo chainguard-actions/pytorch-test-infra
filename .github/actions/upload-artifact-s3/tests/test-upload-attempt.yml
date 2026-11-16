@@ -1,0 +1,50 @@
+name: Test upload attempt with real files (no valid AWS credentials)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create files to upload
+        run: |
+          rm -rf "$RUNNER_TEMP/upload-src"
+          mkdir -p "$RUNNER_TEMP/upload-src/sub"
+          echo "hello" > "$RUNNER_TEMP/upload-src/a.txt"
+          echo "world" > "$RUNNER_TEMP/upload-src/sub/b.txt"
+      - id: action
+        uses: .
+        continue-on-error: true
+        env:
+          AWS_ACCESS_KEY_ID: AKIAEXAMPLEINVALID00
+          AWS_SECRET_ACCESS_KEY: invalidSecretKeyForActHarnessTesting0000
+          AWS_EC2_METADATA_DISABLED: "true"
+        with:
+          path: ${{ runner.temp }}/upload-src
+          s3-bucket: act-harness-nonexistent-bucket-test
+          s3-prefix: act-harness/test-prefix
+          if-no-files-found: error
+      - name: Assert upload attempted (success with outputs, or failure without creds)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          RESULT: ${{ steps.action.outputs.uploaded-objects }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "result: $RESULT"
+          if [ "$OUTCOME" = "success" ]; then
+            if ! echo "$RESULT" | grep -q 'act-harness/test-prefix/a.txt'; then
+              echo "FAIL: success but uploaded-objects missing expected key"
+              exit 1
+            fi
+            echo "PASS: uploaded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            if [ -n "$RESULT" ]; then
+              echo "FAIL: failed upload should not set uploaded-objects"
+              exit 1
+            fi
+            echo "PASS: upload failed as expected without valid AWS credentials"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

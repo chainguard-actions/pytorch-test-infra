@@ -1,0 +1,25 @@
+name: Test non-linux target (quotes added)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide test-infra script dependency
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/test-infra"
+          cp -r "$GITHUB_WORKSPACE/tests/fixtures/test-infra/.github" "$GITHUB_WORKSPACE/test-infra/"
+          rm -f "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+      - id: action
+        uses: .
+        with:
+          binary-matrix: '{"python_version": "3.11", "desired_cuda": "cpu"}'
+          target-os: macos
+      - name: Assert env file has quoted values
+        run: |
+          F="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          cat "$F" || { echo "FAIL: env file missing"; exit 1; }
+          grep -qx 'PYTHON_VERSION="3.11"' "$F" || { echo "FAIL: quoted PYTHON_VERSION missing"; exit 1; }
+          grep -qx 'DESIRED_CUDA="cpu"' "$F" || { echo "FAIL: quoted DESIRED_CUDA missing"; exit 1; }
+          echo "PASS"
