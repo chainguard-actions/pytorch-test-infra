@@ -1,0 +1,51 @@
+name: Test setup-windows with cuda version
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide shims for Windows-only tools (powershell, cygpath)
+        run: |
+          SHIM_DIR="$RUNNER_TEMP/win-shims"
+          mkdir -p "$SHIM_DIR"
+          cat > "$SHIM_DIR/powershell" <<'EOF'
+          #!/bin/sh
+          echo "[shim powershell] $*"
+          exit 0
+          EOF
+          cat > "$SHIM_DIR/cygpath" <<'EOF'
+          #!/bin/sh
+          echo "$1"
+          EOF
+          chmod +x "$SHIM_DIR/powershell" "$SHIM_DIR/cygpath"
+          echo "$SHIM_DIR" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: "12.4"
+      - name: Assert outcome and environment
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: action did not succeed"
+            exit 1
+          fi
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          if [ -z "$RUNNER_ARTIFACT_DIR" ] || [ ! -d "$RUNNER_ARTIFACT_DIR" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR missing"
+            exit 1
+          fi
+          if [ -z "$RUNNER_TEST_RESULTS_DIR" ] || [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR missing"
+            exit 1
+          fi
+          if [ "$(git config --global --get core.longpaths)" != "true" ]; then
+            echo "FAIL: core.longpaths not true"
+            exit 1
+          fi
+          echo "PASS"

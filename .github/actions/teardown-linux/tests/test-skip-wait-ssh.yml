@@ -1,0 +1,46 @@
+name: Test skip-wait-ssh
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who (never touch the real docker daemon)
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$FAKEBIN"
+          LOG="$RUNNER_TEMP/docker-calls.log"
+          : > "$LOG"
+          cat > "$FAKEBIN/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG"
+          if [ "\$1" = "ps" ]; then
+            echo "abc123"
+            echo "def456"
+          fi
+          exit 0
+          EOF
+          cat > "$FAKEBIN/who" <<EOF
+          #!/bin/bash
+          echo "who-called" >> "$RUNNER_TEMP/who-calls.log"
+          echo "user pts/0 2024-01-01 00:00"
+          EOF
+          chmod +x "$FAKEBIN/docker" "$FAKEBIN/who"
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          skip-wait-ssh: "true"
+      - name: Assert docker cleanup ran and ssh wait was skipped
+        run: |
+          LOG="$RUNNER_TEMP/docker-calls.log"
+          echo "docker calls:"; cat "$LOG"
+          grep -qx "docker ps -q" "$LOG" || { echo "FAIL: docker ps -q not called"; exit 1; }
+          grep -qx "docker stop abc123 def456" "$LOG" || { echo "FAIL: docker stop not called with container ids"; exit 1; }
+          grep -qx "docker system prune -af" "$LOG" || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          if [ -f "$RUNNER_TEMP/who-calls.log" ]; then
+            echo "FAIL: who was called, ssh wait should have been skipped"
+            exit 1
+          fi
+          echo "PASS"

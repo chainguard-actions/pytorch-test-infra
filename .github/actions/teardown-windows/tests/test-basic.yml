@@ -1,0 +1,68 @@
+name: Test basic teardown
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install powershell shim (Windows-only action running on Linux under act)
+        run: |
+          mkdir -p /tmp/ps-shim /tmp/ps-log
+          : > /tmp/ps-log/calls.log
+          : > /tmp/ps-log/count.log
+          cat > /tmp/ps-shim/powershell <<'EOF'
+          #!/bin/bash
+          # Shim for Windows "powershell": logs the script and runs it under pwsh
+          # with stubs for the Windows-only CIM cmdlets (no ssh sessions present).
+          cmd="${@: -1}"
+          script=$(printf '%s' "$cmd" | sed -E "s/^[[:space:]]*\.[[:space:]]+//; s/^['\"]//; s/['\"]\$//")
+          echo "call" >> /tmp/ps-log/count.log
+          printf '\n=== invocation: %s\n' "$*" >> /tmp/ps-log/calls.log
+          if [ -n "$script" ] && [ -f "$script" ]; then
+            cat "$script" >> /tmp/ps-log/calls.log
+          else
+            for a in "$@"; do
+              for w in $a; do
+                case "$w" in
+                  *.ps1) f="${w//\'/}"; f="${f//\"/}"; [ -f "$f" ] && cat "$f" >> /tmp/ps-log/calls.log ;;
+                esac
+              done
+            done
+          fi
+          printf '\n' >> /tmp/ps-log/calls.log
+          if command -v pwsh >/dev/null 2>&1; then
+            exec pwsh -NoProfile -NonInteractive -Command "function Get-CimInstance { [CmdletBinding()] param([string]\$ClassName,[string]\$Filter) }; function Get-CimAssociatedInstance { [CmdletBinding()] param([Parameter(ValueFromPipeline=\$true)]\$InputObject,[string]\$Association) process { } }; $cmd"
+          fi
+          echo "pwsh not available; script logged but not executed"
+          exit 0
+          EOF
+          chmod +x /tmp/ps-shim/powershell
+          echo "/tmp/ps-shim" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert action succeeded and both teardown steps ran
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/ps-log/calls.log
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          n=$(wc -l < /tmp/ps-log/count.log | tr -d ' ')
+          echo "invocations: $n"
+          if [ "$n" -ne 2 ]; then
+            echo "FAIL: expected 2 powershell invocations, got $n"
+            exit 1
+          fi
+          if ! grep -q 'Holding runner until all ssh sessions have logged out' /tmp/ps-log/calls.log; then
+            echo "FAIL: drain step did not run"
+            exit 1
+          fi
+          if ! grep -q 'Stop-Process' /tmp/ps-log/calls.log; then
+            echo "FAIL: kill-sessions step did not run"
+            exit 1
+          fi
+          echo "PASS"

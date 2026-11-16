@@ -1,0 +1,29 @@
+name: Test retry on connection failure
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -f /tmp/fake-docker.*
+          echo retry-then-ok > /tmp/fake-docker.mode
+          chmod +x "$GITHUB_WORKSPACE/tests/fixtures/fake-docker/docker"
+          echo "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: example/retry:1
+          connect-attempts: '5'
+          connect-delay: '0'
+      - name: Assert retried
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          count=$(cat /tmp/fake-docker.count)
+          echo "image: $IMAGE count: $count"
+          [ "$IMAGE" = "example/retry:1" ] || { echo "FAIL: image"; exit 1; }
+          [ "$count" = "3" ] || { echo "FAIL: expected 3 attempts"; exit 1; }
+          echo "PASS"

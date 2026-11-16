@@ -1,0 +1,5 @@
+[
+  {"type": "result", "duration_ms": 1, "num_turns": 1, "total_cost_usd": 0.01, "usage": {"input_tokens": 1}, "modelUsage": {"first-model": {}}},
+  {"type": "assistant", "message": {"content": "x"}},
+  {"type": "result", "duration_ms": "999", "num_turns": "abc", "usage": {"output_tokens": 55}, "modelUsage": "not-an-object"}
+]

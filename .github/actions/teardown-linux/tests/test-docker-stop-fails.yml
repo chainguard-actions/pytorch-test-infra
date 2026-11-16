@@ -1,0 +1,39 @@
+name: Test docker stop failure is tolerated
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker whose stop fails
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$FAKEBIN"
+          LOG="$RUNNER_TEMP/docker-calls.log"
+          : > "$LOG"
+          cat > "$FAKEBIN/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG"
+          if [ "\$1" = "stop" ]; then
+            echo "Error: no containers" >&2
+            exit 1
+          fi
+          exit 0
+          EOF
+          chmod +x "$FAKEBIN/docker"
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          skip-wait-ssh: "1"
+      - name: Assert prune still ran after stop failure
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat "$RUNNER_TEMP/docker-calls.log"
+          [ "$OUTCOME" = "success" ] || { echo "FAIL: expected success"; exit 1; }
+          grep -q "^docker stop" "$RUNNER_TEMP/docker-calls.log" || { echo "FAIL: stop not attempted"; exit 1; }
+          grep -qx "docker system prune -af" "$RUNNER_TEMP/docker-calls.log" || { echo "FAIL: prune not called"; exit 1; }
+          echo "PASS"

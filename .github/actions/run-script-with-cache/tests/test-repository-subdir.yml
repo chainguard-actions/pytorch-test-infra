@@ -1,0 +1,43 @@
+name: Test script runs in repository working directory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CONDA_RUN: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare subdirectory, script and build env
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/subrepo-test"
+          echo 'export SUB_VAR=ok' > "$RUNNER_TEMP/sub_build_env.sh"
+          cat > "$GITHUB_WORKSPACE/subrepo-test/run.sh" <<'EOF'
+          pwd > "$RUNNER_TEMP/sub_pwd.txt"
+          echo "${SUB_VAR}" > "$RUNNER_TEMP/sub_var.txt"
+          EOF
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/sub_build_env.sh" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          repository: subrepo-test
+          script: run.sh
+      - name: Assert script ran in subdirectory
+        run: |
+          if [ ! -f "$RUNNER_TEMP/sub_pwd.txt" ]; then
+            echo "FAIL: script did not run"
+            exit 1
+          fi
+          PWD_ACTUAL="$(cat "$RUNNER_TEMP/sub_pwd.txt")"
+          VAR_ACTUAL="$(cat "$RUNNER_TEMP/sub_var.txt")"
+          echo "pwd: $PWD_ACTUAL"
+          echo "var: $VAR_ACTUAL"
+          case "$PWD_ACTUAL" in
+            */subrepo-test) ;;
+            *) echo "FAIL: expected working dir ending in subrepo-test"; exit 1 ;;
+          esac
+          if [ "$VAR_ACTUAL" != "ok" ]; then
+            echo "FAIL: expected SUB_VAR=ok"
+            exit 1
+          fi
+          echo "PASS"

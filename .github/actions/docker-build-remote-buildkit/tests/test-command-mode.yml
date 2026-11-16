@@ -1,0 +1,30 @@
+name: Test command mode
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -f /tmp/fake-docker.* /tmp/cmd-marker
+          echo ok > /tmp/fake-docker.mode
+          chmod +x "$GITHUB_WORKSPACE/tests/fixtures/fake-docker/docker"
+          echo "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          command: echo "ran-custom-command" > /tmp/cmd-marker
+          tags: ignored/image:tag
+          connect-delay: '0'
+      - name: Assert command ran
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: '$IMAGE'"
+          [ -z "$IMAGE" ] || { echo "FAIL: image output should be empty in command mode"; exit 1; }
+          grep -q ran-custom-command /tmp/cmd-marker || { echo "FAIL: command did not run"; exit 1; }
+          [ ! -f /tmp/fake-docker.count ] || { echo "FAIL: buildx build should not be invoked"; exit 1; }
+          grep -q "remote-buildkit" /tmp/fake-docker.setup || { echo "FAIL: builder not registered"; exit 1; }
+          echo "PASS"

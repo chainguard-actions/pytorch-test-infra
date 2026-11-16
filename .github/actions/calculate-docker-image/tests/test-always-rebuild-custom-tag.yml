@@ -1,0 +1,77 @@
+name: Test always-rebuild with custom tag and matching hash
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          # Fake aws CLI: return a dummy ECR password / secret
+          case "$*" in
+            *get-login-password*) echo "fake-password" ;;
+            *secretsmanager*) echo '{"SecretString":"{\"docker_hub_readonly_token\":\"fake\"}"}' ;;
+          esac
+          exit 0
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          # Fake docker CLI: accept login, ignore other commands
+          if [ "$1" = "login" ]; then
+            cat >/dev/null
+            echo "Login Succeeded"
+            exit 0
+          fi
+          echo "fake docker: $*"
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - name: Compute expected hash
+        id: hash
+        run: |
+          rm -f /tmp/fake-build-args.txt
+          HASH=$(git rev-parse HEAD:tests/fixtures/docker)
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "hash: $HASH"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: myimage:custom
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: example.registry.local
+          repo-name: myrepo
+          ci-docker-hash: ${{ steps.hash.outputs.hash }}
+          always-rebuild: "true"
+      - name: Assert docker image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          EXPECTED="example.registry.local/myrepo/myimage:custom-${HASH}"
+          echo "actual: $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: docker-image mismatch"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert build script was invoked
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          if [ ! -f /tmp/fake-build-args.txt ]; then
+            echo "FAIL: build script was not invoked"
+            exit 1
+          fi
+          ARGS=$(cat /tmp/fake-build-args.txt)
+          echo "build args: $ARGS"
+          if ! echo "$ARGS" | grep -qF -- "-t $ACTUAL"; then
+            echo "FAIL: build args do not contain '-t $ACTUAL'"
+            exit 1
+          fi
+          echo "PASS"

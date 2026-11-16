@@ -1,0 +1,49 @@
+name: Test custom docker registry
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock aws and docker
+        run: |
+          MOCK_BIN="$RUNNER_TEMP/mockbin"
+          mkdir -p "$MOCK_BIN"
+          rm -f /tmp/mock-docker.log /tmp/mock-docker-local /tmp/mock-docker-pull-fail
+          cat > "$MOCK_BIN/aws" <<'EOF'
+          #!/bin/sh
+          echo "aws $*" >> /tmp/mock-docker.log
+          echo "fake-password"
+          EOF
+          cat > "$MOCK_BIN/docker" <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/mock-docker.log
+          case "$1" in
+            login) cat >/dev/null; echo "Login Succeeded"; exit 0 ;;
+            manifest) echo '{"layers":[{"size":1048576}],"config":{"size":1048576}}'; exit 0 ;;
+            inspect) [ -f /tmp/mock-docker-local ] && exit 0; exit 1 ;;
+            pull) [ -f /tmp/mock-docker-pull-fail ] && exit 1; echo "pulled $2"; exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x "$MOCK_BIN/aws" "$MOCK_BIN/docker"
+          echo "$MOCK_BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:tag
+          docker-registry: 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      - name: Assert custom registry used for login
+        run: |
+          cat /tmp/mock-docker.log
+          if ! grep -q "^docker login -u AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com$" /tmp/mock-docker.log; then
+            echo "FAIL: docker login to custom registry not called"; exit 1
+          fi
+          if grep -q "308535385114" /tmp/mock-docker.log; then
+            echo "FAIL: default registry should not be used"; exit 1
+          fi
+          if ! grep -q "^docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:tag$" /tmp/mock-docker.log; then
+            echo "FAIL: docker pull not called"; exit 1
+          fi
+          echo "PASS"

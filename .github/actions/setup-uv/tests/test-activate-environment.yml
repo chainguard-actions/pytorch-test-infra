@@ -1,0 +1,38 @@
+name: Test activate-environment
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          activate-environment: "true"
+      - name: Assert VIRTUAL_ENV is set and exists
+        run: |
+          echo "VIRTUAL_ENV: $VIRTUAL_ENV"
+          if [ -z "$VIRTUAL_ENV" ]; then
+            echo "FAIL: VIRTUAL_ENV not set"
+            exit 1
+          fi
+          if [ ! -d "$VIRTUAL_ENV" ]; then
+            echo "FAIL: venv directory does not exist"
+            exit 1
+          fi
+          if [ ! -e "$VIRTUAL_ENV/bin/python" ]; then
+            echo "FAIL: venv has no python"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert uv-version output
+        env:
+          ACTUAL: ${{ steps.action.outputs.uv-version }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "0.11.14" ]; then
+            echo "FAIL: expected '0.11.14'"
+            exit 1
+          fi
+          echo "PASS"

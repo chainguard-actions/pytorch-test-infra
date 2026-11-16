@@ -1,0 +1,49 @@
+name: Test invalid triage verdict is ignored
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:18083/token?api-version=2.0
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: mock-request-token
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          mkdir -p /tmp/relay
+          setsid nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" 18083 /tmp/relay > /tmp/relay-server.log 2>&1 < /dev/null &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:18083/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:18083/health || { cat /tmp/relay-server.log; exit 1; }
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: cancelled
+          delivery-id: 1111111111111111111111111111111111111111
+          event-type: nightly
+          triage-verdict: '["not", "an", "object"]'
+          callback-url: http://127.0.0.1:18083/github/callback
+          max-time: '5'
+      - name: Assert payload sent without triage verdict
+        run: |
+          python3 - <<'EOF'
+          import json, sys
+          try:
+              p = json.load(open("/tmp/relay/req0.json"))
+          except Exception as e:
+              print(f"FAIL: no request recorded: {e}"); sys.exit(1)
+          print(json.dumps(p, indent=2))
+          w = p.get("workflow", {})
+          if w.get("conclusion") != "cancelled":
+              print("FAIL: conclusion"); sys.exit(1)
+          if "triage_verdict" in w:
+              print("FAIL: invalid triage_verdict should have been dropped"); sys.exit(1)
+          print("PASS")
+          EOF

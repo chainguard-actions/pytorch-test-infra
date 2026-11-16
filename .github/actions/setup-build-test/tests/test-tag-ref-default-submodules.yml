@@ -1,0 +1,23 @@
+name: Test tag ref with default submodules
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: v4.2.2
+      - name: Assert tag checked out
+        run: |
+          cd "$GITHUB_WORKSPACE/actions/checkout"
+          SHA="$(git rev-parse HEAD)"
+          echo "HEAD: $SHA"
+          if [ "$SHA" != "11bd71901bbe5b1630ceea73d27597364c9af683" ]; then
+            echo "FAIL: expected v4.2.2 commit 11bd71901bbe5b1630ceea73d27597364c9af683"
+            exit 1
+          fi
+          echo "PASS"

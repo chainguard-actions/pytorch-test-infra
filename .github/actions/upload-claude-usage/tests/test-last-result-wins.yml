@@ -1,0 +1,52 @@
+name: Test last result entry wins with defensive coercion
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          rm -f /tmp/aws-args.txt /tmp/aws-uploaded.json /tmp/claude_usage.json
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" >> /tmp/aws-args.txt
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-uploaded.json
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ github.workspace }}/tests/fixtures/claude-output-multi.json
+      - name: Assert payload from last result entry
+        run: |
+          set -e
+          if [ ! -f /tmp/aws-uploaded.json ]; then
+            echo "FAIL: aws s3 cp was not invoked"
+            exit 1
+          fi
+          echo "args: $(cat /tmp/aws-args.txt)"
+          grep -q 's3://ossci-raw-job-status/claude_code_usage/' /tmp/aws-args.txt || { echo "FAIL: default bucket/prefix not used"; exit 1; }
+          cat /tmp/aws-uploaded.json
+          f=/tmp/aws-uploaded.json
+          check() {
+            actual="$(jq -r "$1" "$f")"
+            echo "$1 = $actual"
+            if [ "$actual" != "$2" ]; then
+              echo "FAIL: expected '$2'"
+              exit 1
+            fi
+          }
+          check '.duration_ms' 999
+          check '.num_turns' 0
+          check '.total_cost_usd' 0
+          check '.input_tokens' 0
+          check '.output_tokens' 55
+          check '.model' ''
+          echo "PASS"

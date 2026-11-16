@@ -1,0 +1,27 @@
+name: Test explicit driver-version without GPU
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure no container marker files
+        run: |
+          if [ "$(id -u)" -eq 0 ]; then rm -f /.inarc /.incontainer; else sudo rm -f /.inarc /.incontainer || true; fi
+      - id: action
+        uses: .
+        with:
+          driver-version: '570.133.20'
+      - name: Assert install skipped and outputs set
+        env:
+          HAS: ${{ steps.action.outputs.has-nvidia }}
+          INC: ${{ steps.action.outputs.in-container-runner }}
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome=$OUTCOME has-nvidia=$HAS in-container=$INC HAS_NVIDIA_GPU=${HAS_NVIDIA_GPU:-<unset>}"
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: outcome"; exit 1; fi
+          if [ "$HAS" != "false" ]; then echo "FAIL: has-nvidia"; exit 1; fi
+          if [ "$INC" != "false" ]; then echo "FAIL: in-container-runner"; exit 1; fi
+          if [ "${HAS_NVIDIA_GPU:-}" != "false" ]; then echo "FAIL: HAS_NVIDIA_GPU"; exit 1; fi
+          echo "PASS"

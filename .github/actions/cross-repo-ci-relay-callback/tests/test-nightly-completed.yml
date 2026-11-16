@@ -1,0 +1,69 @@
+name: Test nightly completed callback
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:18081/token?api-version=2.0
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: mock-request-token
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          mkdir -p /tmp/relay
+          setsid nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" 18081 /tmp/relay > /tmp/relay-server.log 2>&1 < /dev/null &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:18081/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:18081/health || { cat /tmp/relay-server.log; exit 1; }
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0123456789abcdef0123456789abcdef01234567
+          event-type: nightly
+          job-name: build-cpu
+          test-results: '{"passed": 10, "failed": 0, "skipped": 2}'
+          artifact-url: https://example.com/artifacts/123
+          callback-url: http://127.0.0.1:18081/github/callback/
+          max-time: '5'
+      - name: Assert payload sent to relay
+        run: |
+          cat /tmp/relay-server.log || true
+          ls -la /tmp/relay
+          python3 - <<'EOF'
+          import json, sys
+          try:
+              p = json.load(open("/tmp/relay/req0.json"))
+              meta = json.load(open("/tmp/relay/req0.meta"))
+          except Exception as e:
+              print(f"FAIL: no request recorded: {e}"); sys.exit(1)
+          print(json.dumps(p, indent=2)); print(meta)
+          w = p.get("workflow", {})
+          checks = [
+              (meta["auth"] == "Bearer mock-oidc-token", "auth header"),
+              (meta["path"] == "/github/callback", "callback path"),
+              (p.get("event_type") == "nightly", "event_type"),
+              (p.get("delivery_id") == "0123456789abcdef0123456789abcdef01234567", "delivery_id"),
+              (p["payload"]["head_sha"] == "0123456789abcdef0123456789abcdef01234567", "head_sha"),
+              (p["payload"]["repository"]["full_name"] == "pytorch/pytorch", "repo"),
+              (w.get("status") == "completed", "status"),
+              (w.get("conclusion") == "success", "conclusion"),
+              (w.get("job_name") == "build-cpu", "job_name"),
+              (w.get("schema_version") == "1", "schema_version"),
+              (w.get("test_results") == {"passed": 10, "failed": 0, "skipped": 2}, "test_results"),
+              (w.get("artifact_url") == "https://example.com/artifacts/123", "artifact_url"),
+              (bool(w.get("started_at")) and bool(w.get("completed_at")), "timestamps"),
+              ("triage_verdict" not in w, "no triage_verdict"),
+          ]
+          bad = [n for ok, n in checks if not ok]
+          if bad:
+              print("FAIL:", bad); sys.exit(1)
+          print("PASS")
+          EOF

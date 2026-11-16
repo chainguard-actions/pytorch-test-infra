@@ -1,0 +1,41 @@
+name: Test default with no ssh sessions
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$FAKEBIN"
+          LOG="$RUNNER_TEMP/docker-calls.log"
+          : > "$LOG"
+          cat > "$FAKEBIN/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG"
+          exit 0
+          EOF
+          cat > "$FAKEBIN/who" <<EOF
+          #!/bin/bash
+          echo "who-called" >> "$RUNNER_TEMP/who-calls.log"
+          exit 0
+          EOF
+          chmod +x "$FAKEBIN/docker" "$FAKEBIN/who"
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        timeout-minutes: 5
+      - name: Assert ssh wait ran once and cleanup happened
+        run: |
+          echo "who calls:"; cat "$RUNNER_TEMP/who-calls.log" || true
+          echo "docker calls:"; cat "$RUNNER_TEMP/docker-calls.log"
+          COUNT=$(wc -l < "$RUNNER_TEMP/who-calls.log" 2>/dev/null || echo 0)
+          if [ "$COUNT" -ne 1 ]; then
+            echo "FAIL: expected who to be called exactly once, got $COUNT"
+            exit 1
+          fi
+          grep -qx "docker ps -q" "$RUNNER_TEMP/docker-calls.log" || { echo "FAIL: docker ps -q not called"; exit 1; }
+          grep -qx "docker system prune -af" "$RUNNER_TEMP/docker-calls.log" || { echo "FAIL: prune not called"; exit 1; }
+          echo "PASS"

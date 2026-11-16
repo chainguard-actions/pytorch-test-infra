@@ -1,0 +1,30 @@
+name: Test basic usage (non-Windows no-op)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          RUNNER_OS_VAL: ${{ runner.os }}
+        run: |
+          echo "runner.os: $RUNNER_OS_VAL"
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert workspace still intact
+        run: |
+          if [ ! -d "$GITHUB_WORKSPACE/.git" ]; then
+            echo "FAIL: workspace git repo missing after cleanup"
+            exit 1
+          fi
+          git -C "$GITHUB_WORKSPACE" rev-parse HEAD
+          echo "PASS"

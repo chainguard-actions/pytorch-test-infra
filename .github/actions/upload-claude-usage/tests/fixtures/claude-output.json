@@ -1,0 +1,21 @@
+[
+  {"type": "system", "subtype": "init", "session_id": "abc"},
+  {"type": "assistant", "message": {"content": "hello"}},
+  {
+    "type": "result",
+    "subtype": "success",
+    "duration_ms": 12345,
+    "num_turns": 7,
+    "total_cost_usd": 0.42,
+    "result": "Some long text result",
+    "usage": {
+      "input_tokens": 100,
+      "output_tokens": 200,
+      "cache_read_input_tokens": 300,
+      "cache_creation_input_tokens": 400
+    },
+    "modelUsage": {
+      "claude-sonnet-4": {"inputTokens": 100}
+    }
+  }
+]

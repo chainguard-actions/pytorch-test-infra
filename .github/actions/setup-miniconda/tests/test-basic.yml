@@ -1,0 +1,59 @@
+name: Test basic conda setup
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          python-version: "3.9"
+          default-packages: "pip"
+      - name: Assert conda env vars exported
+        run: |
+          echo "CONDA_PREFIX=$CONDA_PREFIX"
+          echo "CONDA_ENV=$CONDA_ENV"
+          echo "CONDA_RUN=$CONDA_RUN"
+          echo "CONDA_INSTALL=$CONDA_INSTALL"
+          if [ -z "$CONDA_PREFIX" ] || [ "$CONDA_PREFIX" != "$CONDA_ENV" ]; then
+            echo "FAIL: CONDA_PREFIX/CONDA_ENV not set correctly"
+            exit 1
+          fi
+          if [ "$CONDA_PREFIX" != "${RUNNER_TEMP}/conda_environment_${GITHUB_RUN_ID}" ]; then
+            echo "FAIL: unexpected CONDA_PREFIX"
+            exit 1
+          fi
+          if [ ! -d "$CONDA_PREFIX" ]; then
+            echo "FAIL: conda env dir missing"
+            exit 1
+          fi
+          if [ -z "$CONDA_RUN" ] || [ -z "$CONDA_INSTALL" ]; then
+            echo "FAIL: CONDA_RUN/CONDA_INSTALL not set"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert python version in env
+        run: |
+          VER=$($CONDA_RUN python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          echo "python version: $VER"
+          if [ "$VER" != "3.9" ]; then
+            echo "FAIL: expected python 3.9"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda on PATH and channel priority reset
+        run: |
+          which conda
+          case "$(which conda)" in
+            "${RUNNER_TEMP}/miniconda/bin/conda") ;;
+            *) echo "FAIL: conda not from miniconda install"; exit 1 ;;
+          esac
+          PRIO=$(conda config --show channel_priority)
+          echo "$PRIO"
+          if ! echo "$PRIO" | grep -q "disabled"; then
+            echo "FAIL: channel_priority not disabled"
+            exit 1
+          fi
+          echo "PASS"

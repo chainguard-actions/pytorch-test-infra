@@ -1,0 +1,54 @@
+name: Test teardown with extra-delete-dir
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install powershell shim (Windows-only action running on Linux under act)
+        run: |
+          mkdir -p /tmp/ps-shim /tmp/ps-log
+          : > /tmp/ps-log/calls.log
+          cat > /tmp/ps-shim/powershell <<'EOF'
+          #!/bin/bash
+          cmd="${@: -1}"
+          script=$(printf '%s' "$cmd" | sed -n "s/^\. '\(.*\)'\$/\1/p")
+          echo "=== invocation: $*" >> /tmp/ps-log/calls.log
+          if [ -n "$script" ] && [ -f "$script" ]; then
+            cat "$script" >> /tmp/ps-log/calls.log
+          fi
+          if command -v pwsh >/dev/null 2>&1; then
+            exec pwsh -NoProfile -NonInteractive -Command "function Get-CimInstance { [CmdletBinding()] param([string]\$ClassName,[string]\$Filter) }; function Get-CimAssociatedInstance { [CmdletBinding()] param([Parameter(ValueFromPipeline=\$true)]\$InputObject,[string]\$Association) process { } }; $cmd"
+          fi
+          echo "pwsh not available; script logged but not executed"
+          exit 0
+          EOF
+          chmod +x /tmp/ps-shim/powershell
+          echo "/tmp/ps-shim" >> "$GITHUB_PATH"
+          mkdir -p /tmp/extra-dir
+          echo keep > /tmp/extra-dir/file.txt
+      - id: action
+        uses: .
+        with:
+          extra-delete-dir: /tmp/extra-dir
+      - name: Assert action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/ps-log/calls.log
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          n=$(grep -c '^=== invocation' /tmp/ps-log/calls.log)
+          if [ "$n" -ne 2 ]; then
+            echo "FAIL: expected 2 powershell invocations, got $n"
+            exit 1
+          fi
+          if [ ! -f /tmp/extra-dir/file.txt ]; then
+            echo "FAIL: teardown unexpectedly removed extra-delete-dir contents"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,33 @@
+name: Test default channel is nightly
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure CHANNEL is unset before action
+        run: |
+          echo "CHANNEL before: '${CHANNEL:-}'"
+          if [ -n "${CHANNEL:-}" ]; then
+            echo "FAIL: CHANNEL unexpectedly set before action"
+            exit 1
+          fi
+      - id: action
+        uses: .
+      - name: Assert CHANNEL is nightly
+        run: |
+          echo "CHANNEL: '${CHANNEL:-}'"
+          if [ "${CHANNEL:-}" != "nightly" ]; then
+            echo "FAIL: expected CHANNEL=nightly"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert GITHUB_ENV contains CHANNEL=nightly
+        run: |
+          cat "$GITHUB_ENV" || true
+          if ! grep -q '^CHANNEL=nightly$' "$GITHUB_ENV" && [ "${CHANNEL:-}" != "nightly" ]; then
+            echo "FAIL: CHANNEL=nightly not recorded"
+            exit 1
+          fi
+          echo "PASS"

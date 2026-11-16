@@ -1,0 +1,61 @@
+name: Test artifact name sanitization
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: pytorch/vision
+      REF: release/2.5/rc
+      PYTHON_VERSION: "3.12"
+      CU_VERSION: cu124
+      ARCH: x86_64
+      PACKAGE_TYPE: wheel
+      CHANNEL: nightly
+      GPU_ARCH_VERSION: ""
+      CONDA_PLUGINS_AUTO_ACCEPT_TOS: "yes"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check out test-infra (provides tools/pkg-helpers)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/vision
+          ref: main
+          submodules: "false"
+          setup-miniconda: "true"
+          python-version: "3.12"
+          cuda-version: cu124
+          arch: x86_64
+      - name: Assert ARTIFACT_NAME has slashes replaced
+        run: |
+          echo "ARTIFACT_NAME: ${ARTIFACT_NAME:-}"
+          EXPECTED="pytorch_vision_release_2.5_rc_3.12_cu124_x86_64"
+          if [ "${ARTIFACT_NAME:-}" != "$EXPECTED" ]; then
+            echo "FAIL: expected $EXPECTED"
+            exit 1
+          fi
+          case "$ARTIFACT_NAME" in
+            */*) echo "FAIL: artifact name contains '/'"; exit 1 ;;
+          esac
+          echo "PASS"
+      - name: Assert conda build env uses python 3.12
+        shell: bash -l {0}
+        run: |
+          echo "CONDA_ENV: ${CONDA_ENV:-}"
+          if [ -z "${CONDA_ENV:-}" ] || [ ! -d "$CONDA_ENV" ]; then
+            echo "FAIL: CONDA_ENV missing"
+            exit 1
+          fi
+          PYV=$(${CONDA_RUN} python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          echo "python in env: $PYV"
+          if [ "$PYV" != "3.12" ]; then
+            echo "FAIL: expected python 3.12"
+            exit 1
+          fi
+          echo "PASS"

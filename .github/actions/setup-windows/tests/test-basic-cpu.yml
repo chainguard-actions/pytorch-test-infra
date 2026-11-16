@@ -1,0 +1,58 @@
+name: Test setup-windows basic (cpu)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide shims for Windows-only tools (powershell, cygpath)
+        run: |
+          SHIM_DIR="$RUNNER_TEMP/win-shims"
+          mkdir -p "$SHIM_DIR"
+          cat > "$SHIM_DIR/powershell" <<'EOF'
+          #!/bin/sh
+          # Windows-only registry/Defender commands cannot run on Linux; log and succeed.
+          echo "[shim powershell] $*"
+          exit 0
+          EOF
+          cat > "$SHIM_DIR/cygpath" <<'EOF'
+          #!/bin/sh
+          # Identity path conversion on Linux.
+          echo "$1"
+          EOF
+          chmod +x "$SHIM_DIR/powershell" "$SHIM_DIR/cygpath"
+          echo "$SHIM_DIR" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: cpu
+      - name: Assert git global config set
+        run: |
+          for kv in core.longpaths=true core.symlinks=true core.fsmonitor=false; do
+            key="${kv%%=*}"; want="${kv#*=}"
+            got="$(git config --global --get "$key" || true)"
+            echo "$key: $got"
+            if [ "$got" != "$want" ]; then
+              echo "FAIL: expected $key=$want"
+              exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert environment variables exported and dirs created
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "$RUNNER_TEMP/artifacts" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR expected $RUNNER_TEMP/artifacts"
+            exit 1
+          fi
+          if [ "$RUNNER_TEST_RESULTS_DIR" != "$RUNNER_TEMP/test-results" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR expected $RUNNER_TEMP/test-results"
+            exit 1
+          fi
+          if [ ! -d "$RUNNER_ARTIFACT_DIR" ] || [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+            echo "FAIL: directories not created"
+            exit 1
+          fi
+          echo "PASS"

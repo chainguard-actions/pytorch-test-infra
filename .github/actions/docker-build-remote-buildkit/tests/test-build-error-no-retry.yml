@@ -1,0 +1,30 @@
+name: Test build error is not retried
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -f /tmp/fake-docker.*
+          echo build-error > /tmp/fake-docker.mode
+          chmod +x "$GITHUB_WORKSPACE/tests/fixtures/fake-docker/docker"
+          echo "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          tags: example/broken:1
+          connect-attempts: '5'
+          connect-delay: '0'
+      - name: Assert failed once
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          count=$(cat /tmp/fake-docker.count)
+          echo "outcome: $OUTCOME count: $count"
+          [ "$OUTCOME" = "failure" ] || { echo "FAIL: expected failure"; exit 1; }
+          [ "$count" = "1" ] || { echo "FAIL: build error must not be retried"; exit 1; }
+          echo "PASS"

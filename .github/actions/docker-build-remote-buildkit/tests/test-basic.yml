@@ -1,0 +1,50 @@
+name: Test basic build and push
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -f /tmp/fake-docker.*
+          echo ok > /tmp/fake-docker.mode
+          chmod +x "$GITHUB_WORKSPACE/tests/fixtures/fake-docker/docker"
+          echo "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: "ghcr.io/example/img:abc123, ghcr.io/example/img:latest"
+          context: tests
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.source=example
+          cache-from: type=registry,ref=ghcr.io/example/img:cache
+          cache-to: type=inline
+          connect-delay: '0'
+      - name: Assert output and args
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: $IMAGE"
+          echo "--- args ---"; cat /tmp/fake-docker.args
+          echo "--- setup ---"; cat /tmp/fake-docker.setup
+          fail=0
+          [ "$IMAGE" = "ghcr.io/example/img:abc123" ] || { echo "FAIL: image output"; fail=1; }
+          A=/tmp/fake-docker.args
+          for want in ghcr.io/example/img:abc123 ghcr.io/example/img:latest --push FOO=bar BAZ=qux \
+              org.opencontainers.image.source=example type=registry,ref=ghcr.io/example/img:cache \
+              type=inline --platform; do
+            grep -qFx -- "$want" "$A" || { echo "FAIL: missing arg '$want'"; fail=1; }
+          done
+          [ "$(grep -cFx -- --tag "$A")" = "2" ] || { echo "FAIL: expected 2 --tag"; fail=1; }
+          [ "$(tail -n1 "$A")" = "tests" ] || { echo "FAIL: context should be last arg"; fail=1; }
+          grep -q 'linux/amd64\|linux/arm64' "$A" || { echo "FAIL: platform"; fail=1; }
+          grep -qFx -- --file "$A" && { echo "FAIL: --file should not be set"; fail=1; }
+          grep -q "create --name remote-buildkit --driver remote" /tmp/fake-docker.setup || { echo "FAIL: builder not created"; fail=1; }
+          [ "$(cat /tmp/fake-docker.count)" = "1" ] || { echo "FAIL: expected 1 build"; fail=1; }
+          [ $fail -eq 0 ] || exit 1
+          echo "PASS"

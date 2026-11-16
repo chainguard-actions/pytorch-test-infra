@@ -1,0 +1,60 @@
+name: Test basic usage (driver update + verify)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake cmd interpreter and nvidia-smi
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$FAKEBIN"
+          LOG="$RUNNER_TEMP/cmd-calls.log"
+          : > "$LOG"
+          cat > "$FAKEBIN/cmd" <<EOF
+          #!/bin/bash
+          # Fake Windows cmd: log the invocation and the script content.
+          echo "ARGS: \$*" >> "$LOG"
+          script=\$(printf '%s\n' "\$*" | grep -oE '/[^" ]*\.(cmd|bat)' | head -n1)
+          if [ -n "\$script" ] && [ -f "\$script" ]; then
+            echo "SCRIPT-BEGIN" >> "$LOG"
+            cat "\$script" >> "$LOG"
+            echo "" >> "$LOG"
+            echo "SCRIPT-END" >> "$LOG"
+            if grep -q 'nvidia-smi' "\$script"; then
+              nvidia-smi
+            fi
+          fi
+          exit 0
+          EOF
+          chmod +x "$FAKEBIN/cmd"
+          cp "$FAKEBIN/cmd" "$FAKEBIN/%ComSpec%"
+          cat > "$FAKEBIN/nvidia-smi" <<EOF
+          #!/bin/bash
+          echo "NVIDIA-SMI-CALLED" >> "$LOG"
+          echo "NVIDIA-SMI 999.99 Driver Version: 999.99"
+          EOF
+          chmod +x "$FAKEBIN/nvidia-smi"
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert driver update script and nvidia-smi were invoked
+        run: |
+          LOG="$RUNNER_TEMP/cmd-calls.log"
+          echo "---- log ----"
+          cat "$LOG"
+          echo "-------------"
+          if ! grep -q 'driver_update.bat' "$LOG"; then
+            echo "FAIL: driver_update.bat was not invoked"
+            exit 1
+          fi
+          if ! grep -q 'scripts' "$LOG"; then
+            echo "FAIL: expected scripts directory reference"
+            exit 1
+          fi
+          if ! grep -q 'NVIDIA-SMI-CALLED' "$LOG"; then
+            echo "FAIL: nvidia-smi verification step was not run"
+            exit 1
+          fi
+          echo "PASS"

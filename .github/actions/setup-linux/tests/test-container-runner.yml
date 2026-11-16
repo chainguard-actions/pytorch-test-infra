@@ -1,0 +1,79 @@
+name: Test container runner path
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fakes and mark as container runner
+        run: |
+          set -eu
+          touch /.incontainer 2>/dev/null || sudo touch /.incontainer
+          [ -f /.incontainer ] || { echo "could not create marker"; exit 1; }
+          FAKE="$RUNNER_TEMP/fakebin"
+          LOG="$RUNNER_TEMP/fake-calls.log"
+          mkdir -p "$FAKE"
+          : > "$LOG"
+
+          cat > "$FAKE/curl" <<EOF
+          #!/bin/bash
+          echo "curl \$*" >> "$LOG"
+          echo "fake"
+          exit 0
+          EOF
+
+          cat > "$FAKE/aws" <<EOF
+          #!/bin/bash
+          echo "aws \$*" >> "$LOG"
+          if [ "\$1" = "sts" ]; then
+            printf '{\n    "Account": "210987654321",\n}\n'
+          else
+            echo "pw"
+          fi
+          exit 0
+          EOF
+
+          cat > "$FAKE/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG"
+          [ "\$1" = "login" ] && cat > /dev/null
+          exit 0
+          EOF
+
+          cat > "$FAKE/sudo" <<EOF
+          #!/bin/bash
+          echo "sudo \$*" >> "$LOG"
+          exec "\$@"
+          EOF
+
+          cat > "$FAKE/lspci" <<EOF
+          #!/bin/bash
+          echo "lspci \$*" >> "$LOG"
+          exit 0
+          EOF
+
+          cat > "$FAKE/systemctl" <<EOF
+          #!/bin/bash
+          echo "systemctl \$*" >> "$LOG"
+          exit 0
+          EOF
+
+          chmod +x "$FAKE"/*
+          echo "$FAKE" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert container-runner behavior
+        run: |
+          LOG="$RUNNER_TEMP/fake-calls.log"
+          cat "$LOG"
+          grep -q 'docker login --username AWS --password-stdin 210987654321.dkr.ecr.us-east-1.amazonaws.com' "$LOG" || { echo "FAIL: docker login wrong"; exit 1; }
+          if grep -q 'docker system prune' "$LOG"; then echo "FAIL: prune should be skipped in container runner"; exit 1; fi
+          if grep -q 'lspci' "$LOG"; then echo "FAIL: lspci should be skipped in container runner"; exit 1; fi
+          [ "${RUNNER_ARTIFACT_DIR:-}" = "$RUNNER_TEMP/artifacts" ] || { echo "FAIL: RUNNER_ARTIFACT_DIR='${RUNNER_ARTIFACT_DIR:-}'"; exit 1; }
+          if ls /dev/nvidia[0-9] >/dev/null 2>&1; then
+            echo "GPU present; GPU_FLAG=${GPU_FLAG:-}"
+          elif [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG set without GPU: '$GPU_FLAG'"; exit 1
+          fi
+          echo "PASS"

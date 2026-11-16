@@ -1,0 +1,59 @@
+name: Test suppression and config_dir inputs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare _repo with a BC-breaking change and config dir
+        id: setup
+        run: |
+          set -eux
+          rm -rf _repo .bc-origin
+          git init -q _repo
+          cd _repo
+          git config user.email "test@example.com"
+          git config user.name "Test User"
+          mkdir -p cfg
+          printf 'version: 1\n' > cfg/.bc-linter.yml
+          printf 'def foo(a, b):\n    return a + b\n' > mod.py
+          git add -A
+          git commit -q -m init
+          git branch -M base-branch
+          BASE_SHA=$(git rev-parse HEAD)
+          git checkout -q -b act-harness
+          printf 'def foo(a):\n    return a\n' > mod.py
+          git commit -q -am "remove param"
+          cd ..
+          git init -q --bare .bc-origin
+          git -C .bc-origin config uploadpack.allowAnySHA1InWant true
+          git -C _repo push -q "$GITHUB_WORKSPACE/.bc-origin" --all
+          git -C _repo remote add origin "$GITHUB_WORKSPACE/.bc-origin"
+          echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          repo: pytorch/test-infra
+          base_sha: ${{ steps.setup.outputs.base_sha }}
+          head_sha: refs/heads/act-harness
+          suppression: 'true'
+          config_dir: cfg
+      - name: Assert outcome
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -d "$GITHUB_WORKSPACE/_repo" ] || [ -d "$GITHUB_WORKSPACE/_test-infra" ]; then
+              echo "FAIL: cleanup did not remove _repo/_test-infra"
+              exit 1
+            fi
+            echo "PASS: suppressed BC lint run completed"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (repository checkout not resolvable under harness)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

@@ -1,0 +1,25 @@
+name: Test skip when build script missing
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          docker-image-name: another-image
+          docker-build-dir: tests/fixtures/docker
+          docker-build-script: ./nonexistent.sh
+          repo-name: myrepo
+      - name: Assert image name returned unchanged
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "another-image" ]; then
+            echo "FAIL: expected 'another-image'"
+            exit 1
+          fi
+          echo "PASS"

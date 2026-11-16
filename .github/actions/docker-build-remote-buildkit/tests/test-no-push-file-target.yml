@@ -1,0 +1,44 @@
+name: Test push false with file and target
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          rm -f /tmp/fake-docker.*
+          echo ok > /tmp/fake-docker.mode
+          chmod +x "$GITHUB_WORKSPACE/tests/fixtures/fake-docker/docker"
+          echo "$GITHUB_WORKSPACE/tests/fixtures/fake-docker" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: |
+            example/one:1
+
+            example/two:2
+          file: docker/Custom.Dockerfile
+          target: builder
+          push: 'false'
+          connect-delay: '0'
+      - name: Assert args
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: $IMAGE"
+          cat /tmp/fake-docker.args
+          A=/tmp/fake-docker.args
+          fail=0
+          [ "$IMAGE" = "example/one:1" ] || { echo "FAIL: image output"; fail=1; }
+          grep -qFx -- --push "$A" && { echo "FAIL: --push must not be set"; fail=1; }
+          grep -qFx -- docker/Custom.Dockerfile "$A" || { echo "FAIL: --file value"; fail=1; }
+          grep -qFx -- --file "$A" || { echo "FAIL: --file"; fail=1; }
+          grep -qFx -- builder "$A" || { echo "FAIL: target value"; fail=1; }
+          grep -qFx -- --target "$A" || { echo "FAIL: --target"; fail=1; }
+          [ "$(grep -cFx -- --tag "$A")" = "2" ] || { echo "FAIL: expected 2 --tag"; fail=1; }
+          grep -qFx -- --build-arg "$A" && { echo "FAIL: no build args expected"; fail=1; }
+          [ "$(tail -n1 "$A")" = "." ] || { echo "FAIL: default context '.'"; fail=1; }
+          [ $fail -eq 0 ] || exit 1
+          echo "PASS"

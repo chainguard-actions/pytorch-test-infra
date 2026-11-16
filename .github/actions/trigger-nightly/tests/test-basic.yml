@@ -1,0 +1,81 @@
+name: Test basic nightly commit creation
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Redirect git pushes to a local bare repo seeded with a nightly branch (never push to GitHub)
+        run: |
+          set -e
+          rm -rf /tmp/fake-github
+          mkdir -p /tmp/fake-github/pytorch
+          for r in /tmp/fake-github/pytorch/vision /tmp/fake-github/pytorch/vision.git; do
+            git init --bare "$r"
+            git --git-dir="$r" config receive.shallowUpdate true
+            # Seed refs/heads/nightly so the action's "<sha>:nightly" refspec
+            # resolves to an existing branch on the remote.
+            git --git-dir="$r" fetch --depth=1 https://github.com/pytorch/vision.git \
+              "+refs/heads/nightly:refs/heads/nightly"
+            echo "seeded $r nightly: $(git --git-dir="$r" rev-parse refs/heads/nightly)"
+            git --git-dir="$r" rev-parse refs/heads/nightly > "$r.seed"
+          done
+          git config --global url."/tmp/fake-github/".pushInsteadOf "https://github.com/"
+          git config --global --get-regexp 'url\..*'
+      - id: action
+        uses: .
+        with:
+          token: ${{ github.token }}
+          repository: pytorch/vision
+          ref: main
+          path: nightly-checkout
+      - name: Assert nightly commit was pushed to the redirected remote
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE/nightly-checkout"
+          HEAD_SHA=$(git rev-parse HEAD)
+          HEAD_TREE=$(git rev-parse 'HEAD^{tree}')
+          FETCHED=$(git rev-parse FETCH_HEAD)
+          REMOTE=""
+          for r in /tmp/fake-github/pytorch/vision /tmp/fake-github/pytorch/vision.git; do
+            CUR=$(git --git-dir="$r" rev-parse refs/heads/nightly)
+            if [ "$CUR" != "$(cat "$r.seed")" ]; then
+              REMOTE="$r"
+            fi
+          done
+          if [ -z "$REMOTE" ]; then
+            echo "FAIL: nightly branch on the fake remote was not updated"
+            exit 1
+          fi
+          echo "remote: $REMOTE"
+          NIGHTLY=$(git --git-dir="$REMOTE" rev-parse refs/heads/nightly)
+          MSG=$(git --git-dir="$REMOTE" log -1 --format=%s "$NIGHTLY")
+          TREE=$(git --git-dir="$REMOTE" rev-parse "$NIGHTLY^{tree}")
+          PARENT=$(git --git-dir="$REMOTE" cat-file -p "$NIGHTLY" | awk '/^parent /{print $2; exit}')
+          echo "message: $MSG"
+          echo "tree: $TREE (head tree $HEAD_TREE)"
+          echo "parent: $PARENT (fetched nightly $FETCHED)"
+          case "$MSG" in
+            *"nightly release (${HEAD_SHA})"*) ;;
+            *) echo "FAIL: commit message does not reference HEAD $HEAD_SHA"; exit 1 ;;
+          esac
+          if ! echo "$MSG" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2} nightly release'; then
+            echo "FAIL: commit message missing date prefix"
+            exit 1
+          fi
+          if [ "$TREE" != "$HEAD_TREE" ]; then
+            echo "FAIL: nightly tree differs from HEAD tree"
+            exit 1
+          fi
+          if [ "$PARENT" != "$FETCHED" ]; then
+            echo "FAIL: nightly parent is not the fetched origin/nightly"
+            exit 1
+          fi
+          AUTHOR=$(git --git-dir="$REMOTE" log -1 --format='%an <%ae>' "$NIGHTLY")
+          echo "author: $AUTHOR"
+          if [ "$AUTHOR" != "pytorchbot <pytorchbot@pytorch.com>" ]; then
+            echo "FAIL: unexpected author"
+            exit 1
+          fi
+          echo "PASS"

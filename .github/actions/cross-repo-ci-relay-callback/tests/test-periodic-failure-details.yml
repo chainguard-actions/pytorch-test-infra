@@ -1,0 +1,61 @@
+name: Test periodic failure callback with details
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:18082/token?api-version=2.0
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: mock-request-token
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          mkdir -p /tmp/relay
+          setsid nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" 18082 /tmp/relay > /tmp/relay-server.log 2>&1 < /dev/null &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:18082/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:18082/health || { cat /tmp/relay-server.log; exit 1; }
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: failure
+          delivery-id: abcdef0123456789abcdef0123456789abcdef01
+          event-type: periodic
+          failed-tests-detail: '[{"name":"test_foo","classname":"TestBar","message":"AssertionError"}]'
+          triage-verdict: '{"schema_version":1,"category":"upstream","confidence":"high","summary":"aten::foo changed"}'
+          callback-url: http://127.0.0.1:18082/github/callback
+          max-time: '5'
+      - name: Assert payload sent to relay
+        run: |
+          cat /tmp/relay-server.log || true
+          python3 - <<'EOF'
+          import json, sys
+          try:
+              p = json.load(open("/tmp/relay/req0.json"))
+          except Exception as e:
+              print(f"FAIL: no request recorded: {e}"); sys.exit(1)
+          print(json.dumps(p, indent=2))
+          w = p.get("workflow", {})
+          checks = [
+              (p.get("event_type") == "periodic", "event_type"),
+              (p.get("delivery_id") == "abcdef0123456789abcdef0123456789abcdef01", "delivery_id"),
+              (w.get("status") == "completed", "status"),
+              (w.get("conclusion") == "failure", "conclusion"),
+              (w.get("job_name") == "test", "default job_name = github.job"),
+              (w.get("failed_tests_detail") == [{"name":"test_foo","classname":"TestBar","message":"AssertionError"}], "failed_tests_detail"),
+              (isinstance(w.get("triage_verdict"), dict) and w["triage_verdict"].get("category") == "upstream", "triage_verdict"),
+              ("test_results" not in w, "no test_results"),
+              ("artifact_url" not in w, "no artifact_url"),
+          ]
+          bad = [n for ok, n in checks if not ok]
+          if bad:
+              print("FAIL:", bad); sys.exit(1)
+          print("PASS")
+          EOF

@@ -1,0 +1,71 @@
+name: Test basic upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          rm -f /tmp/aws-args.txt /tmp/aws-uploaded.json /tmp/claude_usage.json
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" >> /tmp/aws-args.txt
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-uploaded.json
+            echo "$4" > /tmp/aws-dest.txt
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ github.workspace }}/tests/fixtures/claude-output.json
+          s3-bucket: my-bucket
+          s3-prefix: my-prefix
+      - name: Assert upload happened with correct payload
+        env:
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -e
+          if [ ! -f /tmp/aws-uploaded.json ]; then
+            echo "FAIL: aws s3 cp was not invoked"
+            exit 1
+          fi
+          echo "args: $(cat /tmp/aws-args.txt)"
+          cat /tmp/aws-uploaded.json
+          DEST="$(cat /tmp/aws-dest.txt)"
+          echo "dest: $DEST"
+          case "$DEST" in
+            s3://my-bucket/my-prefix/*/${RUN_ID}_${RUN_ATTEMPT}.json) echo "PASS dest" ;;
+            *) echo "FAIL: unexpected destination"; exit 1 ;;
+          esac
+          f=/tmp/aws-uploaded.json
+          check() {
+            actual="$(jq -r "$1" "$f")"
+            echo "$1 = $actual"
+            if [ "$actual" != "$2" ]; then
+              echo "FAIL: expected '$2'"
+              exit 1
+            fi
+          }
+          check '.duration_ms' 12345
+          check '.num_turns' 7
+          check '.total_cost_usd' 0.42
+          check '.input_tokens' 100
+          check '.output_tokens' 200
+          check '.cache_read_input_tokens' 300
+          check '.cache_creation_input_tokens' 400
+          check '.model' 'claude-sonnet-4'
+          check '.event_name' 'workflow_dispatch'
+          check '.pr_number' 0
+          check '.run_id | type' 'number'
+          check '.run_attempt | type' 'number'
+          check 'has("result")' 'false'
+          check '.timestamp | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.000$")' 'true'
+          echo "PASS"

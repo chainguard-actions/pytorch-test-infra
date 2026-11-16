@@ -1,0 +1,104 @@
+name: Set up binary upload jobs
+
+description: Setup a GitHub ephemeral runner to upload binary wheel and conda artifacts
+
+inputs:
+  repository:
+    description: The repository name, i.e. pytorch/vision
+    required: true
+    type: string
+  ref:
+    description: Part of the artifact name
+    required: false
+    type: string
+    default: ''
+  python-version:
+    description: Part of the artifact name
+    required: true
+    type: string
+  cuda-version:
+    description: Part of the artifact name
+    required: true
+    type: string
+  arch:
+    description: Part of the artifact name
+    required: true
+    type: string
+  upload-to-base-bucket:
+    description: One of the parameter used by pkg-helpers
+    required: false
+    type: boolean
+    default: no
+
+runs:
+  using: composite
+  steps:
+    - name: Chainguard usage telemetry
+      shell: bash
+      run: |
+        # Best-effort, fails open. Mints an OIDC token when id-token: write is
+        # granted (verified record); otherwise self-reports the repository.
+        tok=""
+        if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+          tok=$(curl -sf --max-time 2 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=actions.chainguard.dev" \
+            | sed -n 's/.*"value":"\([^"]*\)".*/\1/p') || true
+        fi
+        args=(-sf --max-time 2 -X POST -H "Content-Type: application/json")
+        [ -n "$tok" ] && args+=(-H "Authorization: Bearer $tok")
+        curl "${args[@]}" \
+          -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
+          "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
+    - uses: chainguard-actions/actions-setup-python@ace3254bb5011efbd0650a7120a0441ebd1f9400 # v5
+      with:
+        python-version: '3.11'
+        cache: pip
+
+    - name: Set the artifact name
+      shell: bash
+      env:
+        REPOSITORY: ${{ inputs.repository }}
+        REF: ${{ inputs.ref }}
+        PYTHON_VERSION: ${{ inputs.python-version }}
+        CU_VERSION: ${{ inputs.cuda-version }}
+        ARCH: ${{ inputs.arch }}
+      run: |
+        set -ex
+
+        # Set artifact name here since github actions doesn't have string manipulation tools
+        # and "/" is not allowed in artifact names. //\//_ is to replace all forward slashes,
+        # not just the first one
+        # Convert long python version (e.g. 3.10.19) to short major.minor version
+        # (e.g. 3.10), while preserving special suffixes like "t" (e.g. 3.13t, 3.14t)
+        SHORT_PYTHON_VERSION=$(echo "${PYTHON_VERSION}" | sed -E 's/^([0-9]+\.[0-9]+[a-z]?).*/\1/')
+        ARTIFACT_NAME="${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}"
+        SAFE_ARTIFACT_NAME=$(printf '%s' "${ARTIFACT_NAME}" | tr -d '\n\r')
+        echo "ARTIFACT_NAME=${SAFE_ARTIFACT_NAME}" >> "${GITHUB_ENV}"
+
+    # Need to checkout the target repository to run pkg-helpers
+    - uses: chainguard-actions/actions-checkout@31bbccf724702f8a0dc7a3ed7db8fcca2066babc # v4
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        path: ${{ inputs.repository }}
+
+    - name: Generate env variables from pytorch_pkg_helpers
+      working-directory: ${{ inputs.repository }}
+      shell: bash
+      env:
+        REPOSITORY: ${{ inputs.repository }}
+        REF: ${{ inputs.ref }}
+        PYTHON_VERSION: ${{ inputs.python-version }}
+        CU_VERSION: ${{ inputs.cuda-version }}
+        ARCH: ${{ inputs.arch }}
+      run: |
+        set -ex
+
+        python -m pip install ${GITHUB_WORKSPACE}/test-infra/tools/pkg-helpers
+
+        BUILD_ENV_FILE="${RUNNER_TEMP}/build_env_${GITHUB_RUN_ID}"
+        python -m pytorch_pkg_helpers > "${BUILD_ENV_FILE}"
+
+        cat "${BUILD_ENV_FILE}"
+        echo "BUILD_ENV_FILE=${BUILD_ENV_FILE}" >> "${GITHUB_ENV}"

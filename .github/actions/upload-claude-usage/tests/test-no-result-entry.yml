@@ -1,0 +1,38 @@
+name: Test file without result entry skips upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          rm -f /tmp/aws-args.txt /tmp/aws-uploaded.json /tmp/claude_usage.json
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" >> /tmp/aws-args.txt
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ github.workspace }}/tests/fixtures/claude-output-noresult.json
+      - name: Assert no upload attempted
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: step did not succeed"; exit 1; fi
+          if [ -f /tmp/aws-args.txt ]; then
+            echo "FAIL: aws was invoked: $(cat /tmp/aws-args.txt)"
+            exit 1
+          fi
+          if [ -f /tmp/claude_usage.json ]; then
+            echo "FAIL: payload file should not be written"
+            exit 1
+          fi
+          echo "PASS"

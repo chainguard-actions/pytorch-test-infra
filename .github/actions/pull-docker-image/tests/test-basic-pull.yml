@@ -1,0 +1,55 @@
+name: Test basic pull (image not local)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock aws and docker
+        run: |
+          MOCK_BIN="$RUNNER_TEMP/mockbin"
+          mkdir -p "$MOCK_BIN"
+          rm -f /tmp/mock-docker.log /tmp/mock-docker-local /tmp/mock-docker-pull-fail
+          cat > "$MOCK_BIN/aws" <<'EOF'
+          #!/bin/sh
+          echo "aws $*" >> /tmp/mock-docker.log
+          echo "fake-password"
+          EOF
+          cat > "$MOCK_BIN/docker" <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/mock-docker.log
+          case "$1" in
+            login) cat >/dev/null; echo "Login Succeeded"; exit 0 ;;
+            manifest) echo '{"layers":[{"size":1048576}],"config":{"size":1048576}}'; exit 0 ;;
+            inspect) [ -f /tmp/mock-docker-local ] && exit 0; exit 1 ;;
+            pull) [ -f /tmp/mock-docker-pull-fail ] && exit 1; echo "pulled $2"; exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x "$MOCK_BIN/aws" "$MOCK_BIN/docker"
+          echo "$MOCK_BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/myimage:latest
+      - name: Assert login and pull happened
+        run: |
+          cat /tmp/mock-docker.log
+          if ! grep -q "^aws ecr get-login-password --region us-east-1" /tmp/mock-docker.log; then
+            echo "FAIL: aws ecr get-login-password not called"; exit 1
+          fi
+          if ! grep -q "^docker login -u AWS --password-stdin 308535385114.dkr.ecr.us-east-1.amazonaws.com$" /tmp/mock-docker.log; then
+            echo "FAIL: docker login to default registry not called"; exit 1
+          fi
+          if ! grep -q "^docker manifest inspect example.com/myimage:latest$" /tmp/mock-docker.log; then
+            echo "FAIL: manifest inspect not called"; exit 1
+          fi
+          if ! grep -q "^docker inspect --type=image example.com/myimage:latest$" /tmp/mock-docker.log; then
+            echo "FAIL: docker inspect not called"; exit 1
+          fi
+          COUNT=$(grep -c "^docker pull example.com/myimage:latest$" /tmp/mock-docker.log)
+          if [ "$COUNT" != "1" ]; then
+            echo "FAIL: expected exactly 1 pull, got $COUNT"; exit 1
+          fi
+          echo "PASS"

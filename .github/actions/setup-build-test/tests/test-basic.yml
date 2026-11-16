@@ -1,0 +1,30 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          submodules: "false"
+      - name: Assert repository checked out into subdirectory
+        run: |
+          ls -la "$GITHUB_WORKSPACE/actions/checkout" || true
+          if [ ! -f "$GITHUB_WORKSPACE/actions/checkout/action.yml" ]; then
+            echo "FAIL: actions/checkout/action.yml not found"
+            exit 1
+          fi
+          echo "PASS: checkout present"
+      - name: Assert RUNNER_ARTIFACT_DIR is set
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "${RUNNER_TEMP}/artifacts" ]; then
+            echo "FAIL: expected ${RUNNER_TEMP}/artifacts"
+            exit 1
+          fi
+          echo "PASS"

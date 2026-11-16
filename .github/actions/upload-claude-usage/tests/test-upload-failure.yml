@@ -1,0 +1,45 @@
+name: Test S3 upload failure is non-fatal
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install failing fake aws CLI
+        run: |
+          rm -f /tmp/aws-args.txt /tmp/aws-uploaded.json /tmp/claude_usage.json
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" >> /tmp/aws-args.txt
+          echo "upload failed: access denied" >&2
+          exit 1
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ github.workspace }}/tests/fixtures/claude-output.json
+      - name: Assert upload attempted and step still succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: step should succeed despite upload failure"; exit 1; fi
+          if [ ! -f /tmp/aws-args.txt ]; then
+            echo "FAIL: aws was not invoked"
+            exit 1
+          fi
+          echo "args: $(cat /tmp/aws-args.txt)"
+          if [ ! -f /tmp/claude_usage.json ]; then
+            echo "FAIL: payload file should have been written"
+            exit 1
+          fi
+          cat /tmp/claude_usage.json
+          if [ "$(jq -r '.model' /tmp/claude_usage.json)" != "claude-sonnet-4" ]; then
+            echo "FAIL: unexpected payload"
+            exit 1
+          fi
+          echo "PASS"

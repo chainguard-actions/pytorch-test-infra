@@ -1,0 +1,3313 @@
+from __future__ import annotations
+
+import itertools
+import logging
+import queue
+import threading
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any, cast
+from unittest.mock import Mock
+
+import pytest
+
+from greenlight import (
+    clickhouse_client,
+    cohort,
+    drci_poke,
+    github_client,
+    ineligible_approvals,
+    merge_authz,
+    revert_guard,
+    review,
+    scan_runner,
+    state_emit,
+)
+from greenlight.comment_format import RECHECK_REFUSAL_MARKER
+from greenlight.constants import (
+    DEFAULT_DISPATCH_REF,
+    DEFAULT_TIMEOUT_MINUTES,
+    FINGERPRINT_QUIET,
+    FULL_TICK_INTERVAL,
+    FULL_TICK_TOLERANCE,
+    STATUS_AI_REVIEW_STARTED,
+    STATUS_CANCELLED,
+    STATUS_FAILED,
+    STATUS_LAND,
+    STATUS_NO_LAND,
+    STATUS_REVERTED,
+    TARGET_REPO,
+)
+from greenlight.guards import IterationTimeout
+from greenlight.pr_listing import OpenPR
+from greenlight.review_gate import CHANGES_REQUESTED, HUMAN_APPROVED, ReviewSkip
+from greenlight.scan_memory import ScanMemory
+from greenlight.state import PRState
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from github import Github
+
+    from greenlight.config import Config
+
+# The scan client is threaded through every seam but never inspected by the fakes below,
+# so a bare sentinel cast to the client type is all the loop needs.
+_CLIENT = cast("Github", object())
+
+_HASH_A = "a" * 64
+_HASH_B = "b" * 64
+# albanD and huydhn are named by a catch-all rule, so their PRs are authoritative at zero file reads.
+# alice, bob and carol are named only by a docs rule, so their PRs are authoritative only when every
+# changed file is under docs/.
+_SCOPED_AUTHOR = "carol"
+_DOCS_FILE = "docs/source/index.rst"
+_TORCH_FILE = "torch/nn/functional.py"
+_RULES = (
+    merge_authz.compile_rule("superuser", ["*"], frozenset({"albanD", "huydhn"})),
+    merge_authz.compile_rule("docs", ["docs/**"], frozenset({"alice", "bob", _SCOPED_AUTHOR})),
+)
+
+
+def _snapshot(rules: tuple[merge_authz.MergeRule, ...]) -> merge_authz.MergeRulesSnapshot:
+    # The authorized set is derived from the rules, as merge_authz resolves it, so no test can hand
+    # the scan a cohort the rules could never produce.
+    return merge_authz.MergeRulesSnapshot(
+        authorized=frozenset(approver.lower() for rule in rules for approver in rule.approvers), rules=rules
+    )
+
+
+def _catch_all(*approvers: str) -> tuple[merge_authz.MergeRule, ...]:
+    return (merge_authz.compile_rule("everything", ["*"], frozenset(approvers)),)
+
+
+_SNAPSHOT = _snapshot(_RULES)
+_AUTHORIZED = _SNAPSHOT.authorized
+_NOW = datetime(2026, 7, 31, 12, 0, 0)
+_FRESH = _NOW - timedelta(minutes=10)
+_STALE = _NOW - timedelta(minutes=50)
+_OLD = _NOW - timedelta(days=2)
+_NEW = _NOW - timedelta(hours=1)
+
+
+def _open_pr(
+    number: int,
+    *,
+    head_sha: str | None = None,
+    updated_at: datetime | None = None,
+    labels: tuple[str, ...] = (),
+    author: str = "albanD",
+) -> OpenPR:
+    return OpenPR(
+        repo=TARGET_REPO,
+        number=number,
+        author=author,
+        title=f"fix {number}",
+        url=f"https://example.test/{number}",
+        head_sha=head_sha or f"headsha{number}",
+        updated_at=updated_at,
+        labels=labels,
+    )
+
+
+def _no_reverted(_repo: str, _numbers: Sequence[int]) -> set[int]:
+    return set()
+
+
+def _merge_rules() -> merge_authz.MergeRulesSnapshot:
+    return _SNAPSHOT
+
+
+@dataclass(frozen=True)
+class _FakeHead:
+    sha: str
+    ref: str = "feature-branch"
+
+
+@dataclass(frozen=True)
+class _FakeRef:
+    ref: str
+
+
+@dataclass(frozen=True)
+class _FakeUser:
+    login: str | None
+
+
+@dataclass(frozen=True)
+class _FakeFile:
+    filename: str
+
+
+@dataclass
+class _FakePR:
+    number: int
+    head: _FakeHead
+    user: _FakeUser | None = None
+    files: tuple[str, ...] = ()
+    files_error: Exception | None = None
+    files_read: list[int] = field(default_factory=list)
+    base: _FakeRef = field(default_factory=lambda: _FakeRef("main"))
+
+    def get_files(self) -> list[_FakeFile]:
+        self.files_read.append(self.number)
+        if self.files_error is not None:
+            raise self.files_error
+        return [_FakeFile(name) for name in self.files]
+
+
+def _target_pr(author: str) -> Callable[..., Any]:
+    # Any, not VerdictPR: the fake PR carries only what the scan reads, not the whole protocol.
+    def get_pr(_client, _repo, number):
+        return _FakePR(number, _FakeHead(f"headsha{number}"), _FakeUser(author))
+
+    return get_pr
+
+
+def _state(number: int, status: str, eval_hash: str, version: datetime, run_id: int = 0) -> PRState:
+    return PRState(
+        pr_number=number, status=status, eval_hash=eval_hash, head_sha=f"rec{number}", version=version, run_id=run_id
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_s3_upload(monkeypatch):
+    # review.run's default emit_dispatched seam PUTs the AI_REVIEW_DISPATCHED row to S3 via boto3;
+    # its default arg is bound at import, so neutralise the deeper upload so no test can touch AWS.
+    # Tests asserting the marker inject their own emit_dispatched seam and never reach this.
+    monkeypatch.setattr(state_emit, "_default_upload", lambda _row, _key: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_drci_post(monkeypatch):
+    # Same guard for review.run's default poke_drci seam, which POSTs to the live Dr. CI endpoint.
+    # Both its own `post` default and review.run's `poke_drci` default are bound at import, so the
+    # only interceptable layer is urllib3 itself. Tests asserting the poke inject their own seam.
+    import urllib3
+
+    def unreachable(**_kwargs: object) -> object:
+        raise AssertionError("a test reached the live Dr. CI endpoint")
+
+    monkeypatch.setattr(urllib3, "PoolManager", unreachable)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_clickhouse_read(monkeypatch):
+    # Same guard for review.run's default read_reverted seam, which SELECTs from ClickHouse. That
+    # default and read_reverted_pr_numbers' own `connect` default are both bound at import, so the
+    # only interceptable layer is inside connect() itself. Every test injects its own read_reverted.
+    def unreachable() -> str:
+        raise AssertionError("a test reached the live ClickHouse endpoint")
+
+    monkeypatch.setattr(clickhouse_client, "_host_from_env", unreachable)
+
+
+@dataclass
+class _Scan:
+    dispatched: list[tuple[int, str, str, str]]
+    read_calls: list[tuple[str, list[int]]]
+    fingerprinted: list[int]
+    listed_calls: int
+    listed_authors: list[frozenset[str]]
+    rules_reads: int
+    authorized_seen: list[frozenset[str]]
+    pr_fetches: list[int]
+    files_fetched: list[int]
+    skip_on_approval_seen: list[bool]
+    refusals: list[tuple[int, str, str, str]]
+    emitted: list[tuple[str, int, str, str, int]]
+    poked: list[tuple[str, int, Config]]
+    poke_threads: list[str]
+    events: list[str]
+    label_fetches: list[int]
+    dismissals: list[tuple[int, str, str]]
+    reverted_emitted: list[tuple[str, int, str, int]]
+    dispatch_shadow: list[tuple[int, bool]]
+    emit_shadow: list[tuple[int, bool]]
+    reverted_shadow: list[tuple[int, bool]]
+    updated_calls: list[datetime]
+    error: Exception | None
+
+
+def _run_scan(
+    make_config: Callable[..., Config],
+    *,
+    fingerprints: dict[int, tuple[str, str] | ReviewSkip],
+    listed: Sequence[OpenPR] = (),
+    states: dict[int, PRState] | None = None,
+    pr: int | None = None,
+    max_dispatches: int | None = None,
+    ref: str = DEFAULT_DISPATCH_REF,
+    timeout_minutes: int = DEFAULT_TIMEOUT_MINUTES,
+    force: bool = False,
+    rules: tuple[merge_authz.MergeRule, ...] = _RULES,
+    now: datetime = _NOW,
+    requester: str | None = None,
+    allow_untrusted_author: bool = False,
+    author: str | None = "albanD",
+    files: dict[int, tuple[str, ...]] | None = None,
+    files_errors: dict[int, Exception] | None = None,
+    head_refs: dict[int, str] | None = None,
+    base_refs: dict[int, str] | None = None,
+    bot_login: str = "",
+    config_kwargs: dict[str, object] | None = None,
+    reverted: frozenset[int] = frozenset(),
+    fetched_labels: dict[int, tuple[str, ...]] | None = None,
+    dismissed_ids: dict[int, list[int]] | None = None,
+    dismiss_errors: dict[int, Exception] | None = None,
+    raises: type[Exception] | None = None,
+    memory: ScanMemory | None = None,
+    updated: Sequence[OpenPR] = (),
+    listing_error: Exception | None = None,
+    clock: Callable[[], datetime] | None = None,
+    fingerprint_errors: dict[int, BaseException] | None = None,
+) -> _Scan:
+    states = states or {}
+    files = files or {}
+    files_errors = files_errors or {}
+    head_refs = head_refs or {}
+    base_refs = base_refs or {}
+    fetched_labels = fetched_labels or {}
+    dismissed_ids = dismissed_ids or {}
+    dismiss_errors = dismiss_errors or {}
+    dispatched: list[tuple[int, str, str, str]] = []
+    read_calls: list[tuple[str, list[int]]] = []
+    fingerprinted: list[int] = []
+    listed_calls: list[int] = []
+    listed_authors: list[frozenset[str]] = []
+    rules_reads: list[int] = []
+    authorized_seen: list[frozenset[str]] = []
+    pr_fetches: list[int] = []
+    files_fetched: list[int] = []
+    skip_on_approval_seen: list[bool] = []
+    refusals: list[tuple[int, str, str, str]] = []
+    emitted: list[tuple[str, int, str, str, int]] = []
+    poked: list[tuple[str, int, Config]] = []
+    poke_threads: list[str] = []
+    events: list[str] = []
+    label_fetches: list[int] = []
+    dismissals: list[tuple[int, str, str]] = []
+    reverted_emitted: list[tuple[str, int, str, int]] = []
+    dispatch_shadow: list[tuple[int, bool]] = []
+    emit_shadow: list[tuple[int, bool]] = []
+    reverted_shadow: list[tuple[int, bool]] = []
+    updated_calls: list[datetime] = []
+
+    def fake_fetch(_client, authors):
+        listed_calls.append(1)
+        listed_authors.append(authors)
+        if listing_error is not None:
+            raise listing_error
+        return list(listed)
+
+    def fake_fetch_updated(_client, authors, cutoff):
+        updated_calls.append(cutoff)
+        listed_authors.append(authors)
+        if listing_error is not None:
+            raise listing_error
+        return list(updated)
+
+    def fake_fingerprint(_client, number, authorized_logins, skip_on_approval):
+        fingerprinted.append(number)
+        authorized_seen.append(authorized_logins)
+        skip_on_approval_seen.append(skip_on_approval)
+        error = (fingerprint_errors or {}).get(number)
+        if error is not None:
+            raise error
+        return fingerprints[number]
+
+    def fake_read_state(repo, numbers):
+        nums = list(numbers)
+        read_calls.append((repo, nums))
+        return {n: states[n] for n in nums if n in states}
+
+    def fake_dispatch(_client, number, head_sha, eval_hash, dispatch_ref, *, shadow):
+        dispatched.append((number, head_sha, eval_hash, dispatch_ref))
+        dispatch_shadow.append((number, shadow))
+        events.append(f"dispatch:{number}")
+
+    def fake_resolve_merge_rules():
+        rules_reads.append(1)
+        return _snapshot(rules)
+
+    def fake_get_pr(_client, _repo, number):
+        # The comment upsert and the review dismissal are both faked, so the "PR" object need only
+        # carry back its number, the head_sha the reverted-PR row is written from, the author the
+        # --pr gate reads, and the changed files an eligibility check reads.
+        pr_fetches.append(number)
+        return _FakePR(
+            number,
+            _FakeHead(f"headsha{number}", head_refs.get(number, "feature-branch")),
+            _FakeUser(author) if author is not None else None,
+            files=files.get(number, ()),
+            files_error=files_errors.get(number),
+            files_read=files_fetched,
+            base=_FakeRef(base_refs.get(number, "main")),
+        )
+
+    def fake_upsert(pr, *, marker, body, author_login, run_id=None):
+        refusals.append((pr.number, marker, body, author_login))
+
+    def fake_emit(*, repo, pr_number, head_sha, eval_hash, run_id, shadow):
+        emitted.append((repo, pr_number, head_sha, eval_hash, run_id))
+        emit_shadow.append((pr_number, shadow))
+        events.append(f"emit:{pr_number}")
+
+    def fake_poke(repo, pr_number, poke_config):
+        poked.append((repo, pr_number, poke_config))
+        poke_threads.append(threading.current_thread().name)
+        events.append(f"poke:{pr_number}")
+
+    def fake_read_reverted(_repo, numbers):
+        return {n for n in numbers if n in reverted}
+
+    def fake_fetch_labels(_client, _repo, number):
+        label_fetches.append(number)
+        return fetched_labels.get(number, ())
+
+    def fake_dismiss(pr, *, bot_login, message):
+        dismissals.append((pr.number, bot_login, message))
+        events.append(f"dismiss:{pr.number}")
+        error = dismiss_errors.get(pr.number)
+        if error is not None:
+            raise error
+        return list(dismissed_ids.get(pr.number, ()))
+
+    def fake_emit_reverted(*, repo, pr_number, head_sha, run_id, shadow):
+        reverted_emitted.append((repo, pr_number, head_sha, run_id))
+        reverted_shadow.append((pr_number, shadow))
+        events.append(f"emit_reverted:{pr_number}")
+
+    def scan() -> None:
+        review.run(
+            make_config(github_token="t", **(config_kwargs or {})),
+            pr=pr,
+            max_dispatches=max_dispatches,
+            ref=ref,
+            timeout_minutes=timeout_minutes,
+            force=force,
+            requester=requester,
+            allow_untrusted_author=allow_untrusted_author,
+            bot_login=bot_login,
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=fake_fetch,
+            fetch_updated=fake_fetch_updated,
+            fetch_labels=fake_fetch_labels,
+            fingerprint=fake_fingerprint,
+            read_state=fake_read_state,
+            read_reverted=fake_read_reverted,
+            dispatch=fake_dispatch,
+            emit_dispatched=fake_emit,
+            emit_reverted=fake_emit_reverted,
+            poke_drci=fake_poke,
+            get_pr=fake_get_pr,
+            dismiss_approvals=fake_dismiss,
+            upsert_comment=fake_upsert,
+            resolve_merge_rules=fake_resolve_merge_rules,
+            now=clock or (lambda: now),
+            memory=memory,
+        )
+
+    # A pass that must fail is still observed: every fake has recorded into the lists by the time
+    # run raises, and pytest.raises fails the test if it does not.
+    error: Exception | None = None
+    if raises is None:
+        scan()
+    else:
+        with pytest.raises(raises) as excinfo:
+            scan()
+        error = excinfo.value
+    return _Scan(
+        dispatched=dispatched,
+        read_calls=read_calls,
+        fingerprinted=fingerprinted,
+        listed_calls=len(listed_calls),
+        listed_authors=listed_authors,
+        rules_reads=len(rules_reads),
+        authorized_seen=authorized_seen,
+        pr_fetches=pr_fetches,
+        files_fetched=files_fetched,
+        skip_on_approval_seen=skip_on_approval_seen,
+        refusals=refusals,
+        emitted=emitted,
+        poked=poked,
+        poke_threads=poke_threads,
+        events=events,
+        label_fetches=label_fetches,
+        dismissals=dismissals,
+        reverted_emitted=reverted_emitted,
+        dispatch_shadow=dispatch_shadow,
+        emit_shadow=emit_shadow,
+        reverted_shadow=reverted_shadow,
+        updated_calls=updated_calls,
+        error=error,
+    )
+
+
+def test_never_reviewed_dispatches(make_config):
+    scan = _run_scan(make_config, listed=[_open_pr(1)], fingerprints={1: ("headsha1", _HASH_A)})
+
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, DEFAULT_DISPATCH_REF)]
+    assert scan.fingerprinted == [1]
+    assert scan.read_calls == [(TARGET_REPO, [1])]
+
+
+def test_dispatch_emits_dispatched_marker_never_reviewed(make_config):
+    scan = _run_scan(make_config, listed=[_open_pr(1)], fingerprints={1: ("headsha1", _HASH_A)})
+
+    # review.run threads emit_dispatched to the dispatch loop: a never-reviewed PR emits one marker
+    # (run_id 1) carrying the same repo/head_sha/eval_hash the dispatch used.
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, DEFAULT_DISPATCH_REF)]
+    assert scan.emitted == [(TARGET_REPO, 1, "headsha1", _HASH_A, 1)]
+
+
+def test_dispatch_emits_dispatched_marker_supersedes_prior_run(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_B)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW, run_id=7)},
+    )
+
+    # A changed-hash re-dispatch supersedes the PR's prior terminal row (run_id 7) with run_id 8.
+    assert scan.dispatched == [(1, "headsha1", _HASH_B, DEFAULT_DISPATCH_REF)]
+    assert scan.emitted == [(TARGET_REPO, 1, "headsha1", _HASH_B, 8)]
+
+
+def test_skip_does_not_emit_dispatched_marker(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+    )
+
+    # A decided PR with an unchanged hash is neither dispatched nor marked in-flight.
+    assert scan.dispatched == []
+    assert scan.emitted == []
+    assert scan.poked == []
+
+
+def test_dispatch_pokes_drci_after_the_marker_emit(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2)],
+        fingerprints={1: ("headsha1", _HASH_A), 2: ("headsha2", _HASH_A)},
+        config_kwargs={"drci_token": "drci-key"},
+    )
+
+    # Dr. CI re-reads the state row when poked, so a PR's poke is only scheduled once its own marker
+    # emit has returned; without the poke the PR shows no in-flight marker until the 15-minute sweep.
+    assert scan.events.index("poke:1") > scan.events.index("emit:1")
+    assert scan.events.index("poke:2") > scan.events.index("emit:2")
+    # Where the two poke events land among the rest is the pool's business, but the main-thread
+    # sequence must run straight through: the dispatch loop never waits on a poke.
+    assert [event for event in scan.events if not event.startswith("poke:")] == [
+        "dispatch:1",
+        "emit:1",
+        "dispatch:2",
+        "emit:2",
+    ]
+    assert sorted((repo, number) for repo, number, _ in scan.poked) == [(TARGET_REPO, 1), (TARGET_REPO, 2)]
+
+
+def test_pokes_run_off_the_main_thread_and_are_drained_before_run_returns(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2)],
+        fingerprints={1: ("headsha1", _HASH_A), 2: ("headsha2", _HASH_A)},
+        config_kwargs={"drci_token": "drci-key"},
+    )
+
+    # Both pokes ran on the pool and both had finished by the time run returned, because the pool is
+    # entered on run's ExitStack. Draining is not optional: Lambda freezes the execution environment
+    # the instant the handler returns, so a poke left running would resume -- and log its outcome --
+    # inside some later invocation instead of this one.
+    assert len(scan.poke_threads) == 2
+    assert threading.main_thread().name not in scan.poke_threads
+    assert all(name.startswith("greenlight-poke") for name in scan.poke_threads)
+
+
+def test_poke_drops_the_ingestion_delay_but_keeps_the_credentials(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        config_kwargs={
+            "drci_token": "drci-key",
+            "drci_internal_token": "hud-key",
+            "drci_poke_delay_seconds": 30.0,
+        },
+    )
+
+    # The configured delay covers the verdict path's write-then-upload-in-a-later-step gap. The scan
+    # has already PUT the row to S3 by the time it pokes, and one such sleep per dispatch would
+    # accumulate against the Lambda's function timeout, so this path waits zero. Everything else the
+    # poke needs must survive the override -- a dropped token silently downgrades it to a warning.
+    (_, _, poke_config) = scan.poked[0]
+    assert poke_config.drci_poke_delay_seconds == 0.0
+    assert poke_config.drci_token == "drci-key"
+    assert poke_config.drci_internal_token == "hud-key"
+
+
+def test_run_default_poke_seam_is_drci_poke():
+    import inspect
+
+    # The injected fakes above cannot see the production wiring; pin it here so the seam cannot be
+    # left pointing at a stub.
+    assert inspect.signature(review.run).parameters["poke_drci"].default is drci_poke.poke
+
+
+def test_decided_same_hash_skips(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+    )
+
+    assert scan.dispatched == []
+
+
+def test_changed_hash_dispatches(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1b", _HASH_B)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+    )
+
+    assert scan.dispatched == [(1, "headsha1b", _HASH_B, DEFAULT_DISPATCH_REF)]
+
+
+def test_in_flight_fresh_waits(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, STATUS_AI_REVIEW_STARTED, _HASH_A, _FRESH)},
+    )
+
+    assert scan.dispatched == []
+
+
+def test_in_flight_stale_dispatches(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, STATUS_AI_REVIEW_STARTED, _HASH_A, _STALE)},
+    )
+
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_retry_backoff_waits(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, STATUS_CANCELLED, _HASH_A, _FRESH)},
+    )
+
+    assert scan.dispatched == []
+
+
+def test_retry_aged_dispatches(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, STATUS_CANCELLED, _HASH_A, _STALE)},
+    )
+
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_recency_window_in_window_pr_is_processed(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+    )
+
+    # Updated within the 24h window: fingerprinted and dispatched (never reviewed).
+    assert scan.fingerprinted == [1]
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_recency_window_out_of_window_never_reviewed_is_skipped(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_OLD)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+    )
+
+    # Stale and never reviewed: pruned before fingerprinting -- the whole point of the window.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    # State is still read for the full candidate set before the window prunes it.
+    assert scan.read_calls == [(TARGET_REPO, [1])]
+
+
+def test_recency_window_out_of_window_terminal_is_skipped(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_OLD)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _OLD)},
+    )
+
+    # Stale and terminal (decided): its hash cannot have changed, so skip without fingerprinting.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+
+
+@pytest.mark.parametrize("status", [STATUS_AI_REVIEW_STARTED, STATUS_CANCELLED, STATUS_FAILED])
+def test_recency_window_out_of_window_nonterminal_is_still_processed(make_config, status):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_OLD)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, status, _HASH_A, _STALE)},
+    )
+
+    # The guard: a non-terminal ledger state (in-flight / retry) is re-checked even when stale, so
+    # the aged version lets decide re-dispatch it (timed_out / retry) -- the window never hides it.
+    assert scan.fingerprinted == [1]
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_recency_window_updated_at_none_is_processed(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=None)],
+        fingerprints={1: ("headsha1b", _HASH_B)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _OLD)},
+    )
+
+    # A missing updated_at is never treated as stale: the PR is fingerprinted, and the changed hash
+    # re-dispatches it. Were None wrongly treated as out-of-window, this terminal PR would be skipped.
+    assert scan.fingerprinted == [1]
+    assert scan.dispatched == [(1, "headsha1b", _HASH_B, DEFAULT_DISPATCH_REF)]
+
+
+def test_recency_window_pr_target_is_exempt(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        states={5: _state(5, STATUS_LAND, _HASH_A, _OLD)},
+    )
+
+    # A single --pr target bypasses the window entirely: it is always fingerprinted and evaluated
+    # (here it only SKIPs because decide finds the hash unchanged, not because of the window).
+    assert scan.fingerprinted == [5]
+    assert scan.dispatched == []
+
+
+def test_recency_window_mixed_batch_prunes_only_stale_skippable(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW), _open_pr(2, updated_at=_OLD), _open_pr(3, updated_at=_OLD)],
+        fingerprints={1: ("h1", _HASH_A), 2: ("h2", _HASH_A), 3: ("h3", _HASH_A)},
+        states={2: _state(2, STATUS_LAND, _HASH_A, _OLD)},
+    )
+
+    # read_state covers all three candidates before the window prunes any. PR1 (in-window) is
+    # processed and dispatched; PR2 (stale terminal) and PR3 (stale never-reviewed) are pruned.
+    assert scan.read_calls == [(TARGET_REPO, [1, 2, 3])]
+    assert scan.fingerprinted == [1]
+    assert scan.dispatched == [(1, "h1", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_recency_window_config_value_drives_cutoff(make_config):
+    recent = _NOW - timedelta(minutes=30)
+    old = _NOW - timedelta(hours=2)
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=recent), _open_pr(2, updated_at=old)],
+        fingerprints={1: ("h1", _HASH_A), 2: ("h2", _HASH_A)},
+        config_kwargs={"review_window_hours": 1.0},
+    )
+
+    # With the window shrunk to 1h, the 30-min-old PR1 is kept but the 2h-old PR2 is pruned. At the
+    # 24h default both would be kept, so this proves the config value -- not a hardcoded 24h -- is
+    # the cutoff that drives the filter.
+    assert scan.fingerprinted == [1]
+    assert scan.dispatched == [(1, "h1", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_recency_window_exactly_at_edge_is_out_of_window(make_config):
+    at_edge = _NOW - timedelta(hours=24)
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=at_edge)],
+        fingerprints={1: ("h1", _HASH_A)},
+    )
+
+    # updated_at exactly window-old: now - updated_at == window, and the strict `<` treats the edge
+    # as out-of-window, so this never-reviewed PR is pruned rather than fingerprinted.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+
+
+def test_stale_label_in_window_never_reviewed_is_skipped(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            listed=[_open_pr(1, updated_at=_NEW, labels=("Stale",))],
+            fingerprints={1: ("headsha1", _HASH_A)},
+        )
+
+    # The stale bot bumps updated_at when it applies "Stale", so this PR is inside the window yet
+    # abandoned. The label prunes it -- never fingerprinted, never dispatched.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert "skipping PR #1: Stale label (never reviewed)" in caplog.text
+
+
+def test_stale_label_in_window_terminal_is_skipped(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            listed=[_open_pr(1, updated_at=_NEW, labels=("Stale",))],
+            fingerprints={1: ("headsha1", _HASH_A)},
+            states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+        )
+
+    # Stale-labeled and terminal (decided): its eval_hash cannot have changed, so the label prunes it
+    # without fingerprinting just as the never-reviewed case does -- but the skip log carries the
+    # recorded status, exercising the detail = recorded.status branch for a Stale-labeled PR.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert f"skipping PR #1: Stale label ({STATUS_LAND})" in caplog.text
+
+
+@pytest.mark.parametrize("status", [STATUS_AI_REVIEW_STARTED, STATUS_CANCELLED, STATUS_FAILED])
+def test_stale_label_nonterminal_state_is_still_processed(make_config, status):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW, labels=("Stale",))],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, status, _HASH_A, _STALE)},
+    )
+
+    # A non-terminal ledger state (in-flight / retry) survives the Stale label exactly as it survives
+    # the recency window: the PR is re-checked so decide can re-dispatch it on timeout/retry.
+    assert scan.fingerprinted == [1]
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+@pytest.mark.parametrize("label", ["enhancement", "stale", "STALE"])
+def test_non_stale_label_in_window_is_not_skipped(make_config, label):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW, labels=(label,))],
+        fingerprints={1: ("headsha1", _HASH_A)},
+    )
+
+    # Control: only the exact case-sensitive "Stale" prunes. Any other label -- including the
+    # lowercase/uppercase variants -- leaves an in-window never-reviewed PR fingerprinted.
+    assert scan.fingerprinted == [1]
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_stale_label_pr_target_is_exempt(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        listed=[_open_pr(5, updated_at=_OLD, labels=("Stale",))],
+        fingerprints={5: ("headsha5", _HASH_A)},
+    )
+
+    # A single --pr target bypasses listing entirely (listed_calls == 0), so the Stale label -- which
+    # only ever comes from the listing -- can never suppress a manual recheck.
+    assert scan.listed_calls == 0
+    assert scan.fingerprinted == [5]
+    assert scan.dispatched == [(5, "headsha5", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_reverted_label_drops_pr_before_fingerprinting(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            listed=[_open_pr(1, updated_at=_NEW, labels=("Reverted",)), _open_pr(2, updated_at=_NEW)],
+            fingerprints={1: ("headsha1", _HASH_A), 2: ("headsha2", _HASH_A)},
+            bot_login="greenlight-app[bot]",
+            dismissed_ids={1: [901]},
+        )
+
+    # The reverted PR is dropped before the fingerprint stage -- its approval revoked, its exclusion
+    # recorded, Dr. CI poked -- while the healthy PR2 in the same batch is unaffected.
+    assert scan.fingerprinted == [2]
+    assert [number for number, *_ in scan.dispatched] == [2]
+    assert scan.dismissals == [(1, "greenlight-app[bot]", revert_guard._DISMISS_MESSAGE)]
+    assert scan.reverted_emitted == [(TARGET_REPO, 1, "headsha1", 1)]
+    assert 1 in [pr_number for _repo, pr_number, _config in scan.poked]
+    assert "excluding 1 reverted PR(s) from review: [1]" in caplog.text
+
+
+def test_reverted_pr_poke_also_goes_through_the_pool(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW, labels=("Reverted",))],
+        fingerprints={},
+        bot_login="greenlight-app[bot]",
+    )
+
+    # revert_guard's poke seam and the dispatch loop's are one callable, so the revert path cannot
+    # regress to a blocking poke while the dispatch path stays fire-and-forget.
+    assert [number for _repo, number, _config in scan.poked] == [1]
+    assert [name.startswith("greenlight-poke") for name in scan.poke_threads] == [True]
+
+
+def test_reverted_row_still_excludes_after_the_label_is_removed(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, STATUS_REVERTED, _HASH_A, _NEW, run_id=3)},
+        reverted=frozenset({1}),
+        bot_login="greenlight-app[bot]",
+    )
+
+    # The no-escape guarantee: with the label gone the recorded row alone keeps the PR out, and the
+    # settled exclusion is not rewritten.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert scan.reverted_emitted == []
+    assert scan.poked == []
+
+
+def test_reverted_pr_target_is_not_exempt_and_is_dropped_silently(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        fetched_labels={5: ("Reverted",)},
+        bot_login="greenlight-app[bot]",
+    )
+
+    # Unlike Stale, a revert is not waived by an explicit recheck. The --pr path has no listing to
+    # read labels from, so it fetches them for its one target; the PR is then dropped with no
+    # refusal comment -- the recheck is simply a no-op.
+    assert scan.label_fetches == [5]
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert scan.refusals == []
+    assert scan.reverted_emitted == [(TARGET_REPO, 5, "headsha5", 1)]
+
+
+def test_reverted_dismissal_failure_fails_the_scan_and_writes_no_row(make_config, caplog):
+    with (
+        caplog.at_level(logging.ERROR, logger="greenlight"),
+        pytest.raises(RuntimeError, match=r"1 PR\(s\) failed during scan: \[1\]"),
+    ):
+        _run_scan(
+            make_config,
+            listed=[_open_pr(1, updated_at=_NEW, labels=("Reverted",))],
+            fingerprints={1: ("headsha1", _HASH_A)},
+            bot_login="greenlight-app[bot]",
+            dismiss_errors={1: RuntimeError("dismiss boom")},
+        )
+
+    # No row is written, so the next scan retries the dismissal; the scan still fails closed.
+    assert "failed to revoke greenlight approval on reverted PR #1" in caplog.text
+
+
+def test_reverted_rate_limit_defers_the_fanout_and_the_dispatch_phase(make_config, caplog):
+    from github import RateLimitExceededException
+
+    with caplog.at_level(logging.WARNING, logger="greenlight"), pytest.raises(RuntimeError) as excinfo:
+        _run_scan(
+            make_config,
+            listed=[_open_pr(1, updated_at=_NEW, labels=("Reverted",)), _open_pr(2, updated_at=_NEW)],
+            fingerprints={2: ("headsha2", _HASH_A)},
+            bot_login="greenlight-app[bot]",
+            dismiss_errors={1: RateLimitExceededException(403)},
+        )
+
+    # A rate limit here is classified exactly as one in the fingerprint stage: it trips the same
+    # shared cancel event, so PR2 is abandoned unfingerprinted and the dispatch phase is skipped.
+    message = str(excinfo.value)
+    assert "1 PR(s) failed during scan: [1]" in message
+    assert "1 PR(s) abandoned due to rate limit: [2]" in message
+    assert "abandoned 1 of 1" in caplog.text
+
+
+def test_reverted_without_app_bot_login_raises(make_config):
+    # BOT_LOGIN is load-bearing for the dismissal, so the scheduled path fails loudly rather than
+    # "dismissing" nothing and then recording an exclusion that suppresses every retry.
+    with pytest.raises(ValueError, match="BOT_LOGIN must be the greenlight App login"):
+        _run_scan(
+            make_config,
+            listed=[_open_pr(1, updated_at=_NEW, labels=("Reverted",))],
+            fingerprints={1: ("headsha1", _HASH_A)},
+            bot_login="",
+        )
+
+
+def test_max_caps_only_dispatches(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2), _open_pr(3)],
+        fingerprints={1: ("headsha1", _HASH_B), 2: ("headsha2", _HASH_A), 3: ("headsha3", _HASH_A)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW), 2: _state(2, STATUS_LAND, _HASH_A, _NEW)},
+        max_dispatches=1,
+    )
+
+    # PR2 skips (decided, same hash); PR1 and PR3 both dispatch, but the cap of 1 must go to
+    # the stalest (never-reviewed PR3) and the skip must not consume the single slot.
+    assert scan.dispatched == [(3, "headsha3", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_max_zero_dispatches_nothing(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        max_dispatches=0,
+    )
+
+    assert scan.dispatched == []
+    # A zero cap does no work at all: nothing is fingerprinted, not just nothing dispatched.
+    assert scan.fingerprinted == []
+
+
+def test_max_with_no_candidates_dispatches_nothing(make_config):
+    scan = _run_scan(make_config, listed=[], fingerprints={}, max_dispatches=1)
+
+    assert scan.dispatched == []
+    assert scan.fingerprinted == []
+    assert scan.read_calls == [(TARGET_REPO, [])]
+
+
+def test_max_early_stop_limits_fingerprints(make_config):
+    numbers = list(range(1, 30))
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(n) for n in numbers],
+        fingerprints={n: (f"headsha{n}", _HASH_A) for n in numbers},
+        max_dispatches=1,
+    )
+
+    # 29 equally stale never-reviewed PRs: staleness ties break on listing order, so PR1 takes the
+    # single slot. Early-stop fingerprints only the first worker-sized batch, never all 29.
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, DEFAULT_DISPATCH_REF)]
+    assert sorted(scan.fingerprinted) == list(range(1, review._FINGERPRINT_WORKERS + 1))
+
+
+def test_max_dispatches_most_stale_first(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2), _open_pr(3)],
+        fingerprints={1: ("headsha1", _HASH_B), 2: ("headsha2", _HASH_A), 3: ("headsha3", _HASH_B)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW), 3: _state(3, STATUS_LAND, _HASH_A, _OLD)},
+        max_dispatches=2,
+    )
+
+    # Same inputs as the --max-None fairness test but capped at 2: the two stalest dispatchable
+    # (never-reviewed PR2, then oldest-recorded PR3) dispatch in staleness order; PR1 is deferred.
+    assert [number for number, *_ in scan.dispatched] == [2, 3]
+
+
+def test_max_continues_past_non_dispatch_batches(make_config):
+    stale_decided = list(range(1, review._FINGERPRINT_WORKERS + 1))
+    target = review._FINGERPRINT_WORKERS + 1
+    numbers = [*stale_decided, target]
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(n) for n in numbers],
+        fingerprints={
+            **{n: (f"headsha{n}", _HASH_A) for n in stale_decided},
+            target: (f"headsha{target}", _HASH_B),
+        },
+        states={
+            **{n: _state(n, STATUS_LAND, _HASH_A, _OLD) for n in stale_decided},
+            target: _state(target, STATUS_LAND, _HASH_A, _NEW),
+        },
+        max_dispatches=1,
+    )
+
+    # The stalest PRs all SKIP (decided, unchanged) and fill the first batch with no dispatchable, so
+    # early-stop must fingerprint into the second batch to reach the lone changed PR -- SKIP PRs
+    # ahead of the Kth dispatchable are still fingerprinted.
+    assert scan.dispatched == [(target, f"headsha{target}", _HASH_B, DEFAULT_DISPATCH_REF)]
+    assert sorted(scan.fingerprinted) == numbers
+
+
+def test_max_fingerprint_failure_still_raises(make_config, caplog):
+    numbers = list(range(1, 30))
+    dispatched: list[int] = []
+
+    def boom_fingerprint(_client, number, _authorized, _skip):
+        if number == 3:
+            raise RuntimeError("fingerprint boom")
+        return (f"headsha{number}", _HASH_A)
+
+    def fake_dispatch(_client, number, head_sha, eval_hash, dispatch_ref, *, shadow):
+        dispatched.append(number)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="greenlight"),
+        pytest.raises(RuntimeError, match=r"1 PR\(s\) failed during scan: \[3\]"),
+    ):
+        review.run(
+            make_config(github_token="t"),
+            max_dispatches=1,
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(n) for n in numbers],
+            fingerprint=boom_fingerprint,
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=fake_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # PR3 sits in the first (only) launched batch, so its fingerprint failure is attempted and
+    # surfaces as the aggregate RuntimeError; the healthy stalest PR1 still dispatches first, and the
+    # never-fingerprinted PRs beyond that batch are absent from the sorted failed list.
+    assert dispatched == [1]
+    assert "skipping PR #3" in caplog.text
+
+
+def test_pr_targets_single_pr_bypasses_listing(make_config):
+    scan = _run_scan(make_config, pr=5, listed=[_open_pr(1)], fingerprints={5: ("headsha5", _HASH_A)})
+
+    assert scan.dispatched == [(5, "headsha5", _HASH_A, DEFAULT_DISPATCH_REF)]
+    assert scan.listed_calls == 0
+    assert scan.fingerprinted == [5]
+    assert scan.read_calls == [(TARGET_REPO, [5])]
+
+
+def test_pr_decided_still_skips(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        states={5: _state(5, STATUS_LAND, _HASH_A, _NEW)},
+    )
+
+    assert scan.dispatched == []
+    assert scan.listed_calls == 0
+
+
+def test_pr_untrusted_target_author_is_refused(make_config, caplog):
+    with caplog.at_level(logging.WARNING, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ("headsha5", _HASH_A)},
+            author="mallory",
+        )
+
+    # --pr on an untrusted-author PR with no requester (the scan/local path): the target-author gate
+    # still applies -- the PR is looked up, refused, and never fingerprinted or dispatched.
+    assert scan.pr_fetches == [5]
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    # The gate needs the merge rules, so they resolve before it runs.
+    assert scan.rules_reads == 1
+    assert "refusing --pr 5" in caplog.text
+
+
+def test_pr_target_with_no_author_login_is_refused(make_config, caplog):
+    with caplog.at_level(logging.WARNING, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ("headsha5", _HASH_A)},
+            author=None,
+        )
+
+    # A PR with no author login is untrusted by definition: refused.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert scan.files_fetched == []
+    assert "refusing --pr 5" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "requester",
+    [
+        pytest.param("mallory", id="named-by-no-rule"),
+        pytest.param("pytorchbot", id="bot-a-rule-names"),
+    ],
+)
+def test_requester_untrusted_is_refused_before_any_pr_fetch(make_config, caplog, requester):
+    with caplog.at_level(logging.WARNING, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ("headsha5", _HASH_A)},
+            requester=requester,
+            author="albanD",
+            rules=(*_RULES, *_catch_all("pytorchbot")),
+        )
+
+    # A requester outside the evaluation cohort is rejected before any PR is touched: the target is
+    # never even looked up, and nothing is fingerprinted or dispatched. A bot stays outside the cohort
+    # though a merge rule names it. The gate itself needs the rules.
+    assert scan.pr_fetches == []
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert scan.rules_reads == 1
+    assert f"refusing review: requester {requester!r} is not in the evaluation cohort" in caplog.text
+
+
+def test_requester_and_target_trusted_proceeds(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ("headsha5", _HASH_A)},
+            requester="huydhn",
+            author="albanD",
+        )
+
+    # Both gates pass: the recheck proceeds (never-reviewed PR dispatches) and the requester is
+    # logged for audit.
+    assert scan.pr_fetches == [5]
+    assert scan.dispatched == [(5, "headsha5", _HASH_A, DEFAULT_DISPATCH_REF)]
+    assert "review requested by evaluation-cohort member huydhn" in caplog.text
+
+
+def test_requester_trusted_matched_case_insensitively(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        requester="ALBAND",
+    )
+
+    # GitHub logins are case-insensitive, so a cohort member requesting in any case passes the gate.
+    assert scan.dispatched == [(5, "headsha5", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_allow_untrusted_author_bypasses_target_check(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        author="mallory",
+        allow_untrusted_author=True,
+    )
+
+    # The local override waives the refusal, not the lookup: the author is still resolved, and the
+    # otherwise-untrusted PR is fingerprinted and dispatched instead of being turned away.
+    assert scan.pr_fetches == [5]
+    assert scan.dispatched == [(5, "headsha5", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_allow_untrusted_author_does_not_bypass_requester_check(make_config, caplog):
+    with caplog.at_level(logging.WARNING, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ("headsha5", _HASH_A)},
+            requester="mallory",
+            author="mallory",
+            allow_untrusted_author=True,
+        )
+
+    # The override covers ONLY the target-author check; a requester outside the cohort is still refused.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert "refusing review: requester 'mallory'" in caplog.text
+
+
+def test_trusted_requester_does_not_bypass_untrusted_target_author(make_config, caplog):
+    with caplog.at_level(logging.WARNING, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ("headsha5", _HASH_A)},
+            requester="huydhn",
+            author="mallory",
+        )
+
+    # The core recheck-abuse guard: a requester the gate admits must NOT bypass the target-author gate.
+    # PR 5's untrusted author is still looked up and refused -- no fingerprint, no dispatch -- so an
+    # admitted requester can never get an arbitrary (untrusted-author) PR reviewed/approved.
+    assert scan.pr_fetches == [5]
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert "refusing --pr 5" in caplog.text
+
+
+def test_force_dispatches_decided_pr_via_fingerprint_all(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ("headsha5", _HASH_A)},
+            states={5: _state(5, STATUS_LAND, _HASH_A, _NEW)},
+            force=True,
+        )
+
+    # The decided PR from test_pr_decided_still_skips (terminal LAND, unchanged hash) normally SKIPs;
+    # force bypasses decide on the max_dispatches=None path (_fingerprint_all) and dispatches it,
+    # still using the fingerprint's head_sha/eval_hash and tagging the reason "forced".
+    assert scan.dispatched == [(5, "headsha5", _HASH_A, DEFAULT_DISPATCH_REF)]
+    assert "PR #5: DISPATCH (forced)" in caplog.text
+    assert "dispatched review for PR #5 (forced)" in caplog.text
+
+
+def test_force_dispatches_decided_pr_via_until_dispatchable(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ("headsha5", _HASH_A)},
+            states={5: _state(5, STATUS_LAND, _HASH_A, _NEW)},
+            max_dispatches=1,
+            force=True,
+        )
+
+    # The capped path (_fingerprint_until_dispatchable, selected by a non-None --max) must honor
+    # force identically: the same decided PR is dispatched with reason "forced".
+    assert scan.dispatched == [(5, "headsha5", _HASH_A, DEFAULT_DISPATCH_REF)]
+    assert "PR #5: DISPATCH (forced)" in caplog.text
+
+
+def test_force_fingerprint_failure_still_raises(make_config, caplog):
+    dispatched: list[int] = []
+
+    def boom_fingerprint(_client, _number, _authorized, _skip):
+        raise RuntimeError("fingerprint boom")
+
+    def fake_dispatch(_client, number, head_sha, eval_hash, dispatch_ref, *, shadow):
+        dispatched.append(number)
+
+    with (
+        caplog.at_level(logging.ERROR, logger="greenlight"),
+        pytest.raises(RuntimeError, match=r"1 PR\(s\) failed during scan: \[7\]"),
+    ):
+        review.run(
+            make_config(github_token="t"),
+            pr=7,
+            force=True,
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [],
+            get_pr=_target_pr("albanD"),
+            fetch_labels=lambda _client, _repo, _number: (),
+            fingerprint=boom_fingerprint,
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=fake_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # force short-circuits decide, not the try/except: the fingerprint failure is raised before the
+    # force branch is reached, so PR7 is still caught, recorded as failed, and surfaces as the
+    # aggregate RuntimeError -- force never bypasses failure handling nor dispatches a failed PR.
+    assert dispatched == []
+    assert "skipping PR #7" in caplog.text
+    assert any(record.exc_info is not None for record in caplog.records)
+
+
+def test_ref_forwarded_to_dispatch(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        ref="release/2.9",
+    )
+
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, "release/2.9")]
+
+
+def test_fair_ordering_never_reviewed_then_oldest_first(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2), _open_pr(3)],
+        fingerprints={1: ("headsha1", _HASH_B), 2: ("headsha2", _HASH_A), 3: ("headsha3", _HASH_B)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW), 3: _state(3, STATUS_LAND, _HASH_A, _OLD)},
+    )
+
+    assert [number for number, *_ in scan.dispatched] == [2, 3, 1]
+
+
+def test_timeout_minutes_default_waits(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, STATUS_AI_REVIEW_STARTED, _HASH_A, _NOW - timedelta(minutes=20))},
+    )
+
+    assert scan.dispatched == []
+
+
+def test_timeout_minutes_override_dispatches(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states={1: _state(1, STATUS_AI_REVIEW_STARTED, _HASH_A, _NOW - timedelta(minutes=20))},
+        timeout_minutes=10,
+    )
+
+    assert scan.dispatched == [(1, "headsha1", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_read_state_called_once_with_all_candidates(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2), _open_pr(3)],
+        fingerprints={1: ("h1", _HASH_A), 2: ("h2", _HASH_A), 3: ("h3", _HASH_A)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW), 2: _state(2, STATUS_LAND, _HASH_A, _NEW)},
+    )
+
+    assert scan.read_calls == [(TARGET_REPO, [1, 2, 3])]
+
+
+def test_no_candidates_dispatches_nothing(make_config):
+    scan = _run_scan(make_config, listed=[], fingerprints={})
+
+    assert scan.dispatched == []
+    assert scan.fingerprinted == []
+    assert scan.read_calls == [(TARGET_REPO, [])]
+
+
+def test_poison_pill_isolates_pr_but_scan_still_raises(make_config, caplog):
+    dispatched: list[tuple[int, str, str, str]] = []
+
+    def boom_fingerprint(_client, number, _authorized, _skip):
+        if number == 1:
+            raise RuntimeError("fingerprint boom")
+        return (f"headsha{number}", _HASH_A)
+
+    def fake_dispatch(_client, number, head_sha, eval_hash, dispatch_ref, *, shadow):
+        dispatched.append((number, head_sha, eval_hash, dispatch_ref))
+
+    with (
+        caplog.at_level(logging.ERROR, logger="greenlight"),
+        pytest.raises(RuntimeError, match=r"1 PR\(s\) failed during scan: \[1\]"),
+    ):
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2), _open_pr(3)],
+            fingerprint=boom_fingerprint,
+            read_state=lambda _repo, _numbers: {2: _state(2, STATUS_LAND, _HASH_A, _NEW)},
+            read_reverted=_no_reverted,
+            dispatch=fake_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # PR1's fingerprint raises: it is skipped and recorded as failed, yet PR2 (SKIP, same
+    # hash) and PR3 (never-reviewed) are still evaluated and healthy PR3 is dispatched
+    # before the aggregate failure surfaces.
+    assert [number for number, *_ in dispatched] == [3]
+    assert "skipping PR #1" in caplog.text
+    assert any(record.exc_info is not None for record in caplog.records)
+
+
+def test_concurrent_fingerprint_failures_aggregate_sorted(make_config, caplog):
+    dispatched: list[tuple[int, str, str, str]] = []
+
+    def boom_fingerprint(_client, number, _authorized, _skip):
+        if number in (1, 3):
+            raise RuntimeError(f"fingerprint boom {number}")
+        return (f"headsha{number}", _HASH_A)
+
+    def fake_dispatch(_client, number, head_sha, eval_hash, dispatch_ref, *, shadow):
+        dispatched.append((number, head_sha, eval_hash, dispatch_ref))
+
+    with (
+        caplog.at_level(logging.ERROR, logger="greenlight"),
+        pytest.raises(RuntimeError, match=r"2 PR\(s\) failed during scan: \[1, 3\]"),
+    ):
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(3), _open_pr(1), _open_pr(2)],
+            fingerprint=boom_fingerprint,
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=fake_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # Scanned in fetch order [3, 1, 2], so failed is collected as [3, 1]; the sorted(failed) in
+    # the RuntimeError reorders that to ascending [1, 3] -- drop that sort and this match fails.
+    # Healthy PR2 still dispatches before the aggregate failure surfaces.
+    assert [number for number, *_ in dispatched] == [2]
+    assert "skipping PR #1" in caplog.text
+    assert "skipping PR #3" in caplog.text
+
+
+def test_dispatch_failure_isolated_others_still_dispatched(make_config, caplog):
+    attempted: list[int] = []
+
+    def boom_dispatch(_client, number, _head_sha, _eval_hash, _ref, *, shadow):
+        attempted.append(number)
+        if number == 2:
+            raise RuntimeError("dispatch boom")
+
+    with (
+        caplog.at_level(logging.ERROR, logger="greenlight"),
+        pytest.raises(RuntimeError, match=r"failed to dispatch 1 PR\(s\): \[2\]"),
+    ):
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2), _open_pr(3)],
+            fingerprint=lambda _client, number, _authorized, _skip: (f"headsha{number}", _HASH_A),
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=boom_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # PR2's dispatch raises but is isolated: every candidate's dispatch is still attempted, and the
+    # failure only surfaces as the aggregate RuntimeError once the whole batch has been processed.
+    assert attempted == [1, 2, 3]
+    assert "failed to dispatch review for PR #2" in caplog.text
+    assert any(record.exc_info is not None for record in caplog.records)
+
+
+def test_all_dispatch_failures_all_attempted_then_raise(make_config, caplog):
+    attempted: list[int] = []
+
+    def boom_dispatch(_client, number, _head_sha, _eval_hash, _ref, *, shadow):
+        attempted.append(number)
+        raise RuntimeError(f"dispatch boom {number}")
+
+    with (
+        caplog.at_level(logging.ERROR, logger="greenlight"),
+        pytest.raises(RuntimeError, match=r"failed to dispatch 3 PR\(s\): \[1, 2, 3\]"),
+    ):
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2), _open_pr(3)],
+            fingerprint=lambda _client, number, _authorized, _skip: (f"headsha{number}", _HASH_A),
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=boom_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # Even when every dispatch raises, all three are attempted and collected into the single
+    # aggregate RuntimeError -- one bad PR never stalls the rest.
+    assert attempted == [1, 2, 3]
+
+
+def test_dispatch_iteration_timeout_propagates_and_halts(make_config):
+    attempted: list[int] = []
+
+    def timeout_dispatch(_client, number, _head_sha, _eval_hash, _ref, *, shadow):
+        attempted.append(number)
+        if number == 1:
+            raise IterationTimeout("iteration exceeded")
+
+    with pytest.raises(IterationTimeout):
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2), _open_pr(3)],
+            fingerprint=lambda _client, number, _authorized, _skip: (f"headsha{number}", _HASH_A),
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=timeout_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # IterationTimeout is the soft per-iteration control signal, not a dispatch failure: it must
+    # propagate immediately past the bare-Exception arm, halting the loop so PR2 and PR3 are never
+    # attempted and PR1 is never collected as a dispatch failure.
+    assert attempted == [1]
+
+
+def test_fingerprint_and_dispatch_failures_surface_together(make_config, caplog):
+    attempted: list[int] = []
+
+    def boom_fingerprint(_client, number, _authorized, _skip):
+        if number == 1:
+            raise RuntimeError("fingerprint boom")
+        return (f"headsha{number}", _HASH_A)
+
+    def boom_dispatch(_client, number, _head_sha, _eval_hash, _ref, *, shadow):
+        attempted.append(number)
+        if number == 2:
+            raise RuntimeError("dispatch boom")
+
+    with caplog.at_level(logging.ERROR, logger="greenlight"), pytest.raises(RuntimeError) as excinfo:
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2), _open_pr(3)],
+            fingerprint=boom_fingerprint,
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=boom_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # PR1 fails fingerprinting and PR2 fails dispatch: a single end-of-scan RuntimeError surfaces
+    # both failure classes distinctly, and healthy PR3 still dispatches.
+    message = str(excinfo.value)
+    assert "1 PR(s) failed during scan: [1]" in message
+    assert "failed to dispatch 1 PR(s): [2]" in message
+    assert attempted == [2, 3]
+
+
+def test_scan_larger_than_worker_pool_fingerprints_every_pr(make_config):
+    numbers = list(range(1, review._FINGERPRINT_WORKERS + 5))
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(n) for n in numbers],
+        fingerprints={n: (f"headsha{n}", _HASH_A) for n in numbers},
+    )
+
+    # More tasks than workers must all run with none dropped; worker threads append in
+    # nondeterministic order, so the fingerprinted set is compared rather than its order.
+    assert sorted(scan.fingerprinted) == numbers
+    assert [number for number, *_ in scan.dispatched] == numbers
+
+
+def test_fingerprints_run_concurrently_across_workers(make_config):
+    # Fill the pool to prove full concurrency, but demand >=2 parties even if the pool is
+    # shrunk to 1: a 1-party barrier is satisfied by a single serial task and proves nothing.
+    k = max(2, review._FINGERPRINT_WORKERS)
+    numbers = list(range(1, k + 1))
+    barrier = threading.Barrier(k, timeout=5)
+    dispatched: list[int] = []
+
+    def barrier_fingerprint(_client, number, _authorized, _skip):
+        barrier.wait()
+        return (f"headsha{number}", _HASH_A)
+
+    def fake_dispatch(_client, number, head_sha, eval_hash, dispatch_ref, *, shadow):
+        dispatched.append(number)
+
+    review.run(
+        make_config(github_token="t"),
+        build_github=lambda _token, **_kwargs: _CLIENT,
+        fetch=lambda _client, _authors: [_open_pr(n) for n in numbers],
+        fingerprint=barrier_fingerprint,
+        read_state=lambda _repo, _numbers: {},
+        read_reverted=_no_reverted,
+        dispatch=fake_dispatch,
+        resolve_merge_rules=_merge_rules,
+        now=lambda: _NOW,
+    )
+
+    # Every task blocks on the k-party barrier before returning, so only genuine concurrency
+    # (k workers running at once) lets all parties arrive and release. Serial execution would
+    # leave the barrier short, time out into BrokenBarrierError, and raise RuntimeError here.
+    assert sorted(dispatched) == numbers
+
+
+def test_worker_clients_are_isolated_and_exclude_main_client(make_config):
+    # Force >=2 tasks in flight at once (see the concurrency test): isolation is only
+    # meaningful when multiple borrowed clients are held simultaneously.
+    k = max(2, review._FINGERPRINT_WORKERS)
+    numbers = list(range(1, k + 1))
+    barrier = threading.Barrier(k, timeout=5)
+    built: list[object] = []
+
+    def factory(_token, **_kwargs):
+        client = object()
+        built.append(client)
+        return cast("Github", client)
+
+    seen: dict[int, object] = {}
+
+    def recording_fingerprint(client, number, _authorized, _skip):
+        seen[number] = client
+        barrier.wait()
+        return (f"headsha{number}", _HASH_A)
+
+    dispatched: list[int] = []
+
+    def fake_dispatch(_client, number, head_sha, eval_hash, dispatch_ref, *, shadow):
+        dispatched.append(number)
+
+    review.run(
+        make_config(github_token="t"),
+        build_github=factory,
+        fetch=lambda _client, _authors: [_open_pr(n) for n in numbers],
+        fingerprint=recording_fingerprint,
+        read_state=lambda _repo, _numbers: {},
+        read_reverted=_no_reverted,
+        dispatch=fake_dispatch,
+        resolve_merge_rules=_merge_rules,
+        now=lambda: _NOW,
+    )
+
+    main_client = built[0]
+    worker_clients = set(built[1:])
+    passed = set(seen.values())
+    # The barrier holds all k tasks in-flight at once, so each must be holding a different
+    # borrowed client -- proving per-task isolation. The main client drives fetch/dispatch
+    # only and must never reach a worker, or the shared-client data race would be back.
+    assert passed <= worker_clients
+    assert main_client not in passed
+    assert len(passed) > 1
+    assert sorted(dispatched) == numbers
+
+
+def test_run_closes_main_and_worker_clients(make_config):
+    class _Closeable:
+        def __init__(self, seconds_between_requests: float | None) -> None:
+            self.closed = 0
+            self.seconds_between_requests = seconds_between_requests
+
+        def close(self) -> None:
+            self.closed += 1
+
+    built: list[_Closeable] = []
+
+    def factory(_token, *, seconds_between_requests=None):
+        client = _Closeable(seconds_between_requests)
+        built.append(client)
+        return cast("Github", client)
+
+    review.run(
+        make_config(github_token="t"),
+        build_github=factory,
+        fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2)],
+        fingerprint=lambda _client, number, _authorized, _skip: (f"headsha{number}", _HASH_A),
+        read_state=lambda _repo, _numbers: {},
+        read_reverted=_no_reverted,
+        dispatch=lambda *_args, **_kwargs: None,
+        resolve_merge_rules=_merge_rules,
+        now=lambda: _NOW,
+    )
+
+    # main client + min(_FINGERPRINT_WORKERS, 2 PRs) = 2 worker clients are all built, and
+    # each is closed exactly once as the scan unwinds -- the connection pools are not leaked.
+    assert len(built) == 3
+    assert all(client.closed == 1 for client in built)
+    # The main client (built first) keeps PyGithub's default pacing -- no kwarg passed -- while the
+    # two fingerprint worker clients are throttled to bound the fan-out's aggregate request rate.
+    assert built[0].seconds_between_requests is None
+    assert [c.seconds_between_requests for c in built[1:]] == [review._FINGERPRINT_SECONDS_BETWEEN_REQUESTS] * 2
+
+
+def test_fingerprint_throttle_stays_under_burst_limit():
+    # The asserted quantity is the fan-out's aggregate request rate (workers / seconds-between-requests).
+    # 8 req/s is our own conservative budget, NOT a GitHub-published limit -- it is the ceiling we chose
+    # to stay comfortably under GitHub's (undocumented, variable) secondary/burst rate limit. It bounds
+    # only this fingerprint fan-out; the listing, dispatch, verdict, and authz clients each pace
+    # themselves independently and sit outside this budget.
+    assert review._FINGERPRINT_WORKERS / review._FINGERPRINT_SECONDS_BETWEEN_REQUESTS <= 8
+
+
+def test_fingerprint_task_returns_client_on_exception():
+    pool: queue.Queue[Github] = queue.Queue()
+    client = cast("Github", object())
+    pool.put(client)
+    cancel_event = threading.Event()
+
+    def boom(_client, _number, _authorized, _skip):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        scan_runner._fingerprint_task(boom, pool, 1, _AUTHORIZED, True, cancel_event)
+
+    # The borrowed client must return to the pool even when fingerprint raises; otherwise a scan
+    # with more PRs than workers drains the pool and queue.get blocks the scan forever.
+    assert pool.get_nowait() is client
+    # A non-rate-limit failure must not trip the shared cancel event -- only rate limits abandon.
+    assert not cancel_event.is_set()
+
+
+def test_rate_limit_abandons_remaining_fingerprints(make_config, monkeypatch, caplog):
+    from github import RateLimitExceededException
+
+    # Pin one worker for a deterministic FIFO order: PR1 runs first and trips the cancel event before
+    # PR2/PR3 start, so the "stop starting new tasks" behaviour is observable without racing workers.
+    monkeypatch.setattr(review, "_FINGERPRINT_WORKERS", 1)
+    fingerprinted: list[int] = []
+    dispatched: list[int] = []
+
+    def fingerprint(_client, number, _authorized, _skip):
+        fingerprinted.append(number)
+        if number == 1:
+            raise RateLimitExceededException(403)
+        return (f"headsha{number}", _HASH_A)
+
+    def fake_dispatch(_client, number, _head_sha, _eval_hash, _ref, *, shadow):
+        dispatched.append(number)
+
+    with caplog.at_level(logging.WARNING, logger="greenlight"), pytest.raises(RuntimeError) as excinfo:
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2), _open_pr(3)],
+            fingerprint=fingerprint,
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=fake_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # PR1's rate limit sets the shared cancel event, so the queued PR2/PR3 short-circuit to _CANCELLED
+    # without ever calling fingerprint (only PR1 appears). A cancelled task is not a failure: PR1 lands
+    # in `failed`, PR2/PR3 are counted as abandoned (not failed), and nothing dispatches.
+    assert fingerprinted == [1]
+    assert dispatched == []
+    # The abandonment is surfaced, never silently dropped: a warning names the count, and the
+    # end-of-scan RuntimeError carries both the failed PR and the abandoned ones distinctly so the
+    # scan still fails closed on an incomplete pass.
+    message = str(excinfo.value)
+    assert "1 PR(s) failed during scan: [1]" in message
+    assert "2 PR(s) abandoned due to rate limit: [2, 3]" in message
+    assert "abandoned 2 of 3" in caplog.text
+
+
+def test_rate_limit_defers_completed_candidate_without_dispatching(make_config, monkeypatch, caplog):
+    from github import RateLimitExceededException
+
+    monkeypatch.setattr(review, "_FINGERPRINT_WORKERS", 1)
+    fingerprinted: list[int] = []
+    dispatched: list[int] = []
+    poked: list[int] = []
+
+    def fingerprint(_client, number, _authorized, _skip):
+        fingerprinted.append(number)
+        if number == 2:
+            raise RateLimitExceededException(403)
+        return (f"headsha{number}", _HASH_A)
+
+    def fake_dispatch(_client, number, _head_sha, _eval_hash, _ref, *, shadow):
+        dispatched.append(number)
+
+    def record_poke(_repo, pr_number, _config):
+        poked.append(pr_number)
+
+    with caplog.at_level(logging.WARNING, logger="greenlight"), pytest.raises(RuntimeError) as excinfo:
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2), _open_pr(3)],
+            fingerprint=fingerprint,
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=fake_dispatch,
+            poke_drci=record_poke,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # PR1 completes as a candidate before PR2 hits the rate limit, but a dispatch is a workflow_dispatch
+    # POST on the same throttled token -- exactly what secondary-rate-limit detection punishes -- so the
+    # whole dispatch phase is skipped once the cancel event trips. PR1 is deferred, not lost: no state
+    # row is written, so the next scan re-fingerprints and dispatches it once the limit clears. PR2 trips
+    # the event, so PR3 short-circuits without being fingerprinted.
+    assert fingerprinted == [1, 2]
+    assert dispatched == []
+    # Nothing dispatched, so nothing is poked -- readable here because the end-of-scan RuntimeError is
+    # raised inside the ExitStack, so the poke pool is drained even on the failing path.
+    assert poked == []
+    # The deferral is surfaced by the merged rate-limit warning, and the scan still fails closed: PR2
+    # (failed) and PR3 (abandoned) are carried distinctly in the end-of-scan RuntimeError.
+    assert "skipping dispatch of 1 completed candidate(s) this pass" in caplog.text
+    assert "abandoned 1 of 3" in caplog.text
+    message = str(excinfo.value)
+    assert "1 PR(s) failed during scan: [2]" in message
+    assert "1 PR(s) abandoned due to rate limit: [3]" in message
+
+
+def test_rate_limit_on_last_task_skips_dispatch_with_no_abandoned(make_config, monkeypatch, caplog):
+    from github import RateLimitExceededException
+
+    # The gate keys off cancel_event, not the `abandoned` list, precisely for this case: the rate limit
+    # hits the LAST task to run, so no queued task is left to short-circuit to _CANCELLED and `abandoned`
+    # stays empty -- yet the event IS set, so dispatch must still be skipped. A regression to `if abandoned:`
+    # would pass every other test but wrongly dispatch the completed candidates onto the throttled token here.
+    monkeypatch.setattr(review, "_FINGERPRINT_WORKERS", 1)
+    fingerprinted: list[int] = []
+    dispatched: list[int] = []
+
+    def fingerprint(_client, number, _authorized, _skip):
+        fingerprinted.append(number)
+        if number == 3:
+            raise RateLimitExceededException(403)
+        return (f"headsha{number}", _HASH_A)
+
+    def fake_dispatch(_client, number, _head_sha, _eval_hash, _ref, *, shadow):
+        dispatched.append(number)
+
+    with caplog.at_level(logging.WARNING, logger="greenlight"), pytest.raises(RuntimeError) as excinfo:
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2), _open_pr(3)],
+            fingerprint=fingerprint,
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=fake_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # PR1 and PR2 complete as candidates; PR3 (the last task) trips the cancel event with nothing left to
+    # cancel, so abandoned is empty. Dispatch is still skipped -- the two completed candidates are deferred.
+    assert fingerprinted == [1, 2, 3]
+    assert dispatched == []
+    assert "skipping dispatch of 2 completed candidate(s) this pass" in caplog.text
+    # abandoned is empty, so the fail-closed RuntimeError carries only the failed clause (the last PR) and
+    # no "abandoned" clause -- the scan still signals incomplete via the rate-limited task landing in failed.
+    message = str(excinfo.value)
+    assert "1 PR(s) failed during scan: [3]" in message
+    assert "abandoned" not in message
+
+
+def test_rate_limit_abandonment_breaks_max_dispatch_batches(make_config, monkeypatch):
+    from github import RateLimitExceededException
+
+    monkeypatch.setattr(review, "_FINGERPRINT_WORKERS", 1)
+    fingerprinted: list[int] = []
+    dispatched: list[int] = []
+
+    def fingerprint(_client, number, _authorized, _skip):
+        fingerprinted.append(number)
+        if number == 2:
+            raise RateLimitExceededException(403)
+        return (f"headsha{number}", _HASH_A)
+
+    def fake_dispatch(_client, number, _head_sha, _eval_hash, _ref, *, shadow):
+        dispatched.append(number)
+
+    with pytest.raises(RuntimeError, match=r"1 PR\(s\) failed during scan: \[2\]"):
+        review.run(
+            make_config(github_token="t"),
+            max_dispatches=5,
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2), _open_pr(3)],
+            fingerprint=fingerprint,
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=fake_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # The capped path (_fingerprint_until_dispatchable) fingerprints in worker-sized batches (size 1
+    # here). PR1 completes, PR2 hits the rate limit and trips the cancel event, so the batch loop
+    # breaks before submitting PR3 -- the cap of 5 is never the limiter, the cancellation is. The
+    # tripped event then gates the dispatch phase, so PR1 is deferred rather than dispatched.
+    assert fingerprinted == [1, 2]
+    assert dispatched == []
+
+
+def test_normal_scan_dispatches_when_not_rate_limited(make_config, monkeypatch, caplog):
+    # Guard against over-gating: with no rate limit the cancel event never trips, so the dispatch phase
+    # must run exactly as before -- every completed candidate is dispatched and no deferral warning fires.
+    monkeypatch.setattr(review, "_FINGERPRINT_WORKERS", 1)
+    fingerprinted: list[int] = []
+    dispatched: list[int] = []
+
+    def fingerprint(_client, number, _authorized, _skip):
+        fingerprinted.append(number)
+        return (f"headsha{number}", _HASH_A)
+
+    def fake_dispatch(_client, number, _head_sha, _eval_hash, _ref, *, shadow):
+        dispatched.append(number)
+
+    with caplog.at_level(logging.WARNING, logger="greenlight"):
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=lambda _client, _authors: [_open_pr(1), _open_pr(2), _open_pr(3)],
+            fingerprint=fingerprint,
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=fake_dispatch,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    assert fingerprinted == [1, 2, 3]
+    assert dispatched == [1, 2, 3]
+    assert "skipping dispatch" not in caplog.text
+    assert "rate limit" not in caplog.text
+
+
+def test_fetch_failure_still_closes_main_client(make_config):
+    client = Mock()
+
+    def boom_fetch(_client, _authors):
+        raise RuntimeError("fetch boom")
+
+    with pytest.raises(RuntimeError, match="fetch boom"):
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: cast("Github", client),
+            fetch=boom_fetch,
+            fingerprint=lambda _client, number, _authorized, _skip: (f"headsha{number}", _HASH_A),
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=lambda *_args, **_kwargs: None,
+            resolve_merge_rules=_merge_rules,
+            now=lambda: _NOW,
+        )
+
+    # fetch raises after the main client is built but before any worker exists; the ExitStack must
+    # still close it as it unwinds, or every early failure leaks the client's connection pool.
+    client.close.assert_called_once()
+
+
+def test_deferred_dispatch_is_logged(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        _run_scan(
+            make_config,
+            listed=[_open_pr(1), _open_pr(2)],
+            fingerprints={1: ("h1", _HASH_A), 2: ("h2", _HASH_A)},
+            max_dispatches=1,
+        )
+
+    assert "dispatched review for PR #" in caplog.text
+    assert "deferred PR #" in caplog.text
+    assert "--max cap reached" in caplog.text
+
+
+def test_listing_path_logs_open_prs_and_decisions(make_config, caplog):
+    with caplog.at_level(logging.DEBUG, logger="greenlight"):
+        _run_scan(
+            make_config,
+            listed=[_open_pr(1), _open_pr(2)],
+            fingerprints={1: ("h1", _HASH_A), 2: ("h2", _HASH_A)},
+            states={2: _state(2, STATUS_LAND, _HASH_A, _NEW)},
+        )
+
+    messages = caplog.text
+    assert "found 2 open PR(s)" in messages
+    assert "open PR #1 by albanD" in messages
+    assert "PR #1: DISPATCH (never_reviewed)" in messages
+    assert "PR #2: SKIP (decided)" in messages
+
+
+def test_per_pr_listing_detail_is_below_info(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        _run_scan(
+            make_config,
+            listed=[_open_pr(1), _open_pr(2)],
+            fingerprints={1: ("h1", _HASH_A), 2: ("h2", _HASH_A)},
+        )
+
+    # The listing logs only its count at info; the per-PR detail is debug-only.
+    assert "found 2 open PR(s)" in caplog.text
+    assert "open PR #" not in caplog.text
+
+
+def test_run_without_token_raises(make_config):
+    with pytest.raises(ValueError, match="PYTORCH_GREENLIGHT_GITHUB_TOKEN"):
+        review.run(make_config(github_token=None), resolve_merge_rules=_merge_rules)
+
+
+def test_run_missing_token_never_resolves_the_merge_rules(make_config):
+    resolved: list[str] = []
+
+    def counting_rules() -> merge_authz.MergeRulesSnapshot:
+        resolved.append("rules")
+        return _SNAPSHOT
+
+    with pytest.raises(ValueError, match="PYTORCH_GREENLIGHT_GITHUB_TOKEN"):
+        review.run(make_config(github_token=None), resolve_merge_rules=counting_rules)
+
+    # The token check precedes the resolution, so a tokenless scan never builds a client -- it
+    # fails fast on the cheaper local check.
+    assert resolved == []
+
+
+def test_run_cold_merge_rules_failure_propagates(make_config):
+    def boom_resolve() -> merge_authz.MergeRulesSnapshot:
+        raise RuntimeError("merge_rules unreachable")
+
+    fetched: list[int] = []
+
+    def fetch(_client, _authors):
+        fetched.append(1)
+        return [_open_pr(1)]
+
+    # A cold resolver failure must propagate out of run() (the daemon backs off, the one-shot exits
+    # non-zero); run never falls back to hashing all human comments.
+    with pytest.raises(RuntimeError, match="merge_rules unreachable"):
+        review.run(
+            make_config(github_token="t"),
+            build_github=lambda _token, **_kwargs: _CLIENT,
+            fetch=fetch,
+            fingerprint=lambda _client, number, _authorized, _skip: (f"headsha{number}", _HASH_A),
+            read_state=lambda _repo, _numbers: {},
+            read_reverted=_no_reverted,
+            dispatch=lambda *_args, **_kwargs: None,
+            resolve_merge_rules=boom_resolve,
+            now=lambda: _NOW,
+        )
+    assert fetched == []
+
+
+def test_run_resolves_the_rules_once_and_threads_the_authorized_set_to_fingerprints(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2), _open_pr(3)],
+        fingerprints={1: ("h1", _HASH_A), 2: ("h2", _HASH_A), 3: ("h3", _HASH_A)},
+    )
+
+    assert scan.rules_reads == 1
+    assert scan.authorized_seen == [_AUTHORIZED] * 3
+
+
+def test_default_fingerprint_forwards_to_fingerprint_pr(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_fingerprint_pr(client, repo, pr_number, *, authorized_logins, allow_skip, skip_on_approval):
+        captured["client"] = client
+        captured["repo"] = repo
+        captured["pr_number"] = pr_number
+        captured["authorized_logins"] = authorized_logins
+        captured["allow_skip"] = allow_skip
+        captured["skip_on_approval"] = skip_on_approval
+        return ("headsha", _HASH_A)
+
+    monkeypatch.setattr(github_client, "fingerprint_pr", fake_fingerprint_pr)
+
+    result = review._default_fingerprint(_CLIENT, 7, _AUTHORIZED, True)
+
+    assert result == ("headsha", _HASH_A)
+    assert captured["client"] is _CLIENT
+    assert captured["repo"] == TARGET_REPO
+    assert captured["pr_number"] == 7
+    assert captured["authorized_logins"] is _AUTHORIZED
+    # allow_skip is always True; skip_on_approval is forwarded verbatim from the caller.
+    assert captured["allow_skip"] is True
+    assert captured["skip_on_approval"] is True
+
+
+def test_utcnow_is_naive_utc():
+    now = review._utcnow()
+
+    assert now.tzinfo is None
+
+
+def test_scan_changes_requested_is_dropped_no_dispatch(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            listed=[_open_pr(1)],
+            fingerprints={1: ReviewSkip(CHANGES_REQUESTED, "changes requested by bob")},
+        )
+
+    # A human-decided PR short-circuits on the listing scan: dropped, never dispatched, and no
+    # refusal comment (the listing path drops silently). It is not a failure, so run() does not raise.
+    assert scan.dispatched == []
+    assert scan.refusals == []
+    assert scan.skip_on_approval_seen == [True]
+    assert "PR #1: SKIP (changes_requested): changes requested by bob" in caplog.text
+
+
+def test_scan_human_approved_is_dropped_no_dispatch(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ReviewSkip(HUMAN_APPROVED, "approved by alice")},
+    )
+
+    # On the listing scan an authorized-human approval also short-circuits: dropped, no dispatch.
+    assert scan.dispatched == []
+    assert scan.refusals == []
+
+
+def test_scan_skip_alongside_healthy_pr_does_not_raise(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2)],
+        fingerprints={1: ReviewSkip(HUMAN_APPROVED, "approved by alice"), 2: ("headsha2", _HASH_A)},
+    )
+
+    # Regression: a ReviewSkip must never be counted as a failure. PR1 is dropped and PR2 still
+    # dispatches; run() returning normally (a _Scan, not a raise) proves the skip was not in `failed`.
+    assert [number for number, *_ in scan.dispatched] == [2]
+    assert scan.refusals == []
+
+
+def test_scan_skip_on_approval_is_true_on_listing_path(make_config):
+    scan = _run_scan(make_config, listed=[_open_pr(1)], fingerprints={1: ("headsha1", _HASH_A)})
+
+    # The listing scan passes skip_on_approval=True so an approval can short-circuit it.
+    assert scan.skip_on_approval_seen == [True]
+
+
+def test_pr_changes_requested_refuses_with_comment(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ReviewSkip(CHANGES_REQUESTED, "changes requested by bob")},
+            bot_login="greenlight-app[bot]",
+        )
+
+    # On the --pr recheck a changes-requested review is refused, not dispatched: no dispatch, and a
+    # single refusal comment authored as the bot, carrying the distinct refusal marker and the detail.
+    assert scan.dispatched == []
+    assert scan.skip_on_approval_seen == [False]
+    assert len(scan.refusals) == 1
+    pr_number, marker, body, author_login = scan.refusals[0]
+    assert pr_number == 5
+    assert marker == RECHECK_REFUSAL_MARKER
+    assert author_login == "greenlight-app[bot]"
+    assert body.startswith(RECHECK_REFUSAL_MARKER)
+    assert "changes requested by bob" in body
+    assert "posted recheck refusal for PR #5" in caplog.text
+
+
+def test_a_forced_recheck_still_skips_and_refuses_a_pr_with_changes_requested(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            force=True,
+            fingerprints={5: ReviewSkip(CHANGES_REQUESTED, "changes requested by bob")},
+            bot_login="greenlight-app[bot]",
+        )
+
+    # --force overrides a recorded decision, never a human one: the changes-requested PR is skipped, not
+    # dispatched, and still gets its refusal comment.
+    assert scan.dispatched == []
+    assert "PR #5: SKIP (changes_requested): changes requested by bob" in caplog.text
+    assert [(number, marker) for number, marker, _body, _author in scan.refusals] == [(5, RECHECK_REFUSAL_MARKER)]
+
+
+def test_pr_approval_is_not_skipped_and_dispatches(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        bot_login="greenlight-app[bot]",
+    )
+
+    # The --pr recheck passes skip_on_approval=False, so an approval never short-circuits it: the PR
+    # is fingerprinted to a real (head_sha, eval_hash) and dispatched, and no refusal is posted.
+    assert scan.skip_on_approval_seen == [False]
+    assert scan.dispatched == [(5, "headsha5", _HASH_A, DEFAULT_DISPATCH_REF)]
+    assert scan.refusals == []
+
+
+def test_pr_changes_requested_without_bot_login_logs_and_skips_posting(make_config, caplog):
+    with caplog.at_level(logging.ERROR, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ReviewSkip(CHANGES_REQUESTED, "changes requested by bob")},
+            bot_login="",
+        )
+
+    # A refusal needs the bot login to author-scope the comment; with none set the post is skipped
+    # with an error rather than crashing the scan, and nothing is dispatched.
+    assert scan.dispatched == []
+    assert scan.refusals == []
+    assert "BOT_LOGIN is required to post" in caplog.text
+
+
+# GitHub's casing of the approver the catch-all rule names as albanD: in the evaluation cohort, but
+# rule membership is exact-case, so no rule names this login and its PRs are shadow without a read.
+_MISCASED_AUTHOR = "AlbanD"
+
+_AUTHORITATIVE_VS_SHADOW = [
+    pytest.param(_SCOPED_AUTHOR, (_DOCS_FILE,), False, id="path-scoped-author-whose-rule-covers-the-pr"),
+    pytest.param(_SCOPED_AUTHOR, (_DOCS_FILE, _TORCH_FILE), True, id="path-scoped-author-whose-rule-misses-a-file"),
+    pytest.param(_MISCASED_AUTHOR, (_DOCS_FILE,), True, id="approver-a-rule-names-only-in-another-case"),
+]
+
+
+def test_listing_scans_the_evaluation_cohort_minus_bots_and_greenlight(make_config):
+    rules = _catch_all("Alice", "bob", "pytorchbot", cohort.GREENLIGHT_APP_SLUG)
+    scan = _run_scan(make_config, listed=[], fingerprints={}, rules=rules)
+
+    # What reaches list_open_prs_by_authors is the resolved merge_rules approver set, lowercased,
+    # minus bots and greenlight itself.
+    assert scan.listed_authors == [frozenset({"alice", "bob"})]
+
+
+def test_requester_gate_admits_every_evaluation_cohort_member(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            pr=5,
+            fingerprints={5: ("headsha5", _HASH_A)},
+            requester="alice",
+            author="albanD",
+        )
+
+    # The requester gate is cohort membership, so an approver whose own rule covers only docs/ may ask
+    # for a review; whether that review carries authority is still the target gate's answer.
+    assert "alice" in cohort.evaluation_cohort(_AUTHORIZED)
+    assert scan.pr_fetches == [5]
+    assert scan.dispatch_shadow == [(5, False)]
+    assert "review requested by evaluation-cohort member alice" in caplog.text
+
+
+@pytest.mark.parametrize(("author", "changed", "shadow"), _AUTHORITATIVE_VS_SHADOW)
+def test_pr_target_gate_admits_exactly_the_prs_the_listing_scan_dispatches(make_config, author, changed, shadow):
+    listing = _run_scan(
+        make_config, listed=[_open_pr(5, author=author)], fingerprints={5: ("headsha5", _HASH_A)}, files={5: changed}
+    )
+    target = _run_scan(make_config, pr=5, fingerprints={5: ("headsha5", _HASH_A)}, author=author, files={5: changed})
+
+    # Both paths ask the same merge-rule question of the same author and files, so --pr reviews
+    # exactly what the scheduled scan would, and refuses every PR the scan leaves undispatched.
+    expected = [] if shadow else [(5, False)]
+    assert listing.dispatch_shadow == expected
+    assert target.dispatch_shadow == expected
+
+
+def test_pr_target_gate_admits_a_path_scoped_author_whose_rule_covers_the_pr(make_config):
+    scan = _run_scan(
+        make_config, pr=5, fingerprints={5: ("headsha5", _HASH_A)}, author=_SCOPED_AUTHOR, files={5: (_DOCS_FILE,)}
+    )
+
+    # One GET yields the author, head and base, and the files are read once: the gate's answer
+    # seeds the pass, so nothing downstream reads them again.
+    assert scan.pr_fetches == [5]
+    assert scan.files_fetched == [5]
+    assert scan.dispatch_shadow == [(5, False)]
+
+
+def test_pr_target_gate_refuses_a_path_scoped_author_whose_rule_misses_a_file(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        author=_SCOPED_AUTHOR,
+        files={5: (_DOCS_FILE, _TORCH_FILE)},
+    )
+
+    # Being named by a rule is not enough: trymerge would refuse this author's merge of this PR, so
+    # greenlight must not be pointed at it either.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+
+
+@pytest.mark.parametrize(("author", "changed", "shadow"), _AUTHORITATIVE_VS_SHADOW)
+def test_the_listing_fingerprints_dispatches_marks_and_pokes_only_an_eligible_pr(make_config, author, changed, shadow):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, author=author)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        files={1: changed},
+    )
+
+    # An eligible PR is fingerprinted, dispatched, marked in flight and poked, never as shadow; the
+    # listing does none of that for an ineligible one.
+    expected = [] if shadow else [(1, False)]
+    assert scan.fingerprinted == ([] if shadow else [1])
+    assert scan.dispatch_shadow == expected
+    assert scan.emit_shadow == expected
+    assert [number for _repo, number, _config in scan.poked] == ([] if shadow else [1])
+
+
+@pytest.mark.parametrize(("author", "changed", "shadow"), _AUTHORITATIVE_VS_SHADOW)
+def test_reverted_row_carries_the_prs_shadow_and_gates_the_poke(make_config, author, changed, shadow):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW, labels=("Reverted",), author=author)],
+        fingerprints={},
+        files={1: changed},
+        bot_login="greenlight-app[bot]",
+        dismissed_ids={1: [901]},
+    )
+
+    # revert_guard writes the scan's other state row, and it has no author of its own -- the scan's
+    # answer for the PR is threaded in, read from the same memo dispatch would use.
+    assert scan.reverted_shadow == [(1, shadow)]
+    assert scan.reverted_emitted == [(TARGET_REPO, 1, "headsha1", 1)]
+    assert scan.dismissals == [(1, "greenlight-app[bot]", revert_guard._DISMISS_MESSAGE)]
+    assert [number for _repo, number, _config in scan.poked] == ([] if shadow else [1])
+
+
+def test_mixed_cohort_batch_dispatches_only_its_eligible_prs(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, author="albanD"), _open_pr(2, author=_SCOPED_AUTHOR)],
+        fingerprints={1: ("headsha1", _HASH_A), 2: ("headsha2", _HASH_A)},
+        files={2: (_TORCH_FILE,)},
+    )
+
+    # Every steady-state scan carries eligible and ineligible PRs at once, so a single per-scan
+    # answer would be wrong for part of the batch in either direction.
+    assert scan.fingerprinted == [1]
+    assert scan.dispatch_shadow == [(1, False)]
+    assert scan.emit_shadow == [(1, False)]
+    assert [number for _repo, number, _config in scan.poked] == [1]
+
+
+def test_pr_recheck_is_never_shadow_because_its_author_gate_already_ran(make_config):
+    scan = _run_scan(make_config, pr=5, fingerprints={5: ("headsha5", _HASH_A)}, author="albanD")
+
+    # The --pr path has no listing to read an author from, so it reuses the answer the target gate
+    # already reached -- which that gate has already required to be eligible.
+    assert scan.pr_fetches == [5]
+    assert scan.dispatch_shadow == [(5, False)]
+    assert scan.emit_shadow == [(5, False)]
+
+
+def test_allow_untrusted_author_still_resolves_the_author_so_a_trusted_pr_stays_authoritative(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        author="albanD",
+        allow_untrusted_author=True,
+    )
+
+    # A shadow verdict's LAND dismisses greenlight's existing approval, so a flag that skipped the
+    # eligibility lookup would, pointed at an eligible author's PR, revoke a production approval. The
+    # lookup is unconditional, so the flag cannot change what cohort a PR is in -- only whether an
+    # ineligible one is turned away.
+    assert scan.pr_fetches == [5]
+    assert scan.dispatch_shadow == [(5, False)]
+    assert scan.emit_shadow == [(5, False)]
+
+
+def test_allow_untrusted_author_keeps_an_untrusted_pr_shadow(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        author="mallory",
+        allow_untrusted_author=True,
+    )
+
+    # The other half of that same lookup: waiving the refusal must not waive shadow. The override
+    # stays a way to exercise the reviewer, never a way to have an arbitrary PR approved -- and the
+    # Dr. CI query drops shadow rows, so there is nothing to poke for.
+    assert scan.pr_fetches == [5]
+    assert scan.dispatch_shadow == [(5, True)]
+    assert scan.emit_shadow == [(5, True)]
+    assert scan.poked == []
+
+
+def test_allow_untrusted_author_with_an_unnameable_author_fails_closed_to_shadow(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        author=None,
+        allow_untrusted_author=True,
+    )
+
+    # An author GitHub cannot name is not eligible, so the flag is what lets this review run at all --
+    # and it still resolves to shadow. Pin the unknown author explicitly: it is the one input where a
+    # skipped lookup and the fail-closed answer would agree by coincidence.
+    assert scan.pr_fetches == [5]
+    assert scan.dispatch_shadow == [(5, True)]
+    assert scan.emit_shadow == [(5, True)]
+    assert scan.dispatched == [(5, "headsha5", _HASH_A, DEFAULT_DISPATCH_REF)]
+
+
+def test_catch_all_authors_cost_no_github_read_for_their_authority(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW), _open_pr(2, updated_at=_NEW, author="huydhn")],
+        fingerprints={1: ("headsha1", _HASH_A), 2: ("headsha2", _HASH_A)},
+    )
+
+    assert scan.dispatch_shadow == [(1, False), (2, False)]
+    assert scan.pr_fetches == []
+    assert scan.files_fetched == []
+
+
+def test_a_recorded_reverted_pr_is_revoked_without_reading_its_files(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW, labels=("Reverted",), author=_SCOPED_AUTHOR)],
+        fingerprints={},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+        files={1: (_DOCS_FILE,)},
+        files_errors={1: RuntimeError("files boom")},
+        bot_login="greenlight-app[bot]",
+        dismissed_ids={1: [901]},
+    )
+
+    # The recorded row already settles the stamp, so the read -- here one that would fail the pass --
+    # is never made.
+    assert scan.files_fetched == []
+    assert scan.dismissals == [(1, "greenlight-app[bot]", revert_guard._DISMISS_MESSAGE)]
+    assert scan.reverted_shadow == [(1, False)]
+    assert [number for _repo, number, _config in scan.poked] == [1]
+
+
+def test_after_a_rate_limit_files_reads_are_skipped_and_those_prs_are_abandoned_not_failed(make_config):
+    from github import RateLimitExceededException
+
+    scan = _run_scan(
+        make_config,
+        listed=[
+            _open_pr(1, updated_at=_NEW, labels=("Reverted",)),
+            _open_pr(2, updated_at=_NEW, author=_SCOPED_AUTHOR),
+            _open_pr(3, updated_at=_NEW),
+        ],
+        fingerprints={3: ("headsha3", _HASH_A)},
+        files={2: (_DOCS_FILE,)},
+        bot_login="greenlight-app[bot]",
+        dismiss_errors={1: RateLimitExceededException(403)},
+        raises=RuntimeError,
+    )
+
+    # PR 1's dismissal hits the rate limit, so PR 2's files are never read on the throttled token: it
+    # is abandoned, like PR 3, whose fingerprint never ran, and neither is dispatched.
+    assert scan.files_fetched == []
+    assert scan.dispatched == []
+    assert str(scan.error) == "1 PR(s) failed during scan: [1]; 2 PR(s) abandoned due to rate limit: [2, 3]"
+
+
+def test_a_recorded_reverted_pr_is_stamped_non_shadow_even_when_its_author_is_not_eligible(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[
+            _open_pr(1, updated_at=_NEW, labels=("Reverted",), author=_SCOPED_AUTHOR),
+            _open_pr(2, updated_at=_NEW, labels=("Reverted",), author=_SCOPED_AUTHOR),
+        ],
+        fingerprints={},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+        files={1: (_TORCH_FILE,), 2: (_TORCH_FILE,)},
+        bot_login="greenlight-app[bot]",
+        dismissed_ids={1: [901], 2: [902]},
+    )
+
+    # A REVERTED row can only deny, so on a PR greenlight has recorded it is stamped non-shadow though
+    # no rule naming the author covers the PR; an unrecorded PR keeps its own answer.
+    assert scan.dismissals == [
+        (1, "greenlight-app[bot]", revert_guard._DISMISS_MESSAGE),
+        (2, "greenlight-app[bot]", revert_guard._DISMISS_MESSAGE),
+    ]
+    assert scan.reverted_shadow == [(1, False), (2, True)]
+    assert scan.files_fetched == [2]
+    assert [number for _repo, number, _config in scan.poked] == [1]
+
+
+def test_a_push_between_the_authority_read_and_the_fingerprint_defers_only_a_pr_whose_files_were_read(
+    make_config,
+):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW, author=_SCOPED_AUTHOR), _open_pr(2, updated_at=_NEW)],
+        fingerprints={1: ("pushed1", _HASH_A), 2: ("pushed2", _HASH_A)},
+        files={1: (_DOCS_FILE,)},
+    )
+
+    # PR 1's authority was decided on the head its files were read at, and the fingerprint saw a newer
+    # head nobody decided, so it waits for the next pass without failing it. PR 2 needed no read, so a
+    # new head changes nothing for it.
+    assert sorted(scan.fingerprinted) == [1, 2]
+    assert scan.dispatch_shadow == [(2, False)]
+
+
+def test_a_non_ghstack_pr_on_a_non_main_base_leaves_a_path_scoped_author_undispatched_but_not_a_catch_all_one(
+    make_config,
+):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW, author=_SCOPED_AUTHOR), _open_pr(2, updated_at=_NEW)],
+        fingerprints={1: ("headsha1", _HASH_A), 2: ("headsha2", _HASH_A)},
+        files={1: (_DOCS_FILE,)},
+        base_refs={1: "release/2.9", 2: "release/2.9"},
+    )
+
+    # trymerge refuses to land a non-ghstack PR on any base but main, so the path-scoped author's PR is
+    # not dispatched, and its files are never listed. A catch-all author's authority never depends on
+    # the files.
+    assert scan.fingerprinted == [2]
+    assert scan.dispatch_shadow == [(2, False)]
+    assert scan.files_fetched == []
+
+
+@pytest.mark.parametrize(
+    ("changed", "dispatched"),
+    [
+        pytest.param((_DOCS_FILE,), [(1, False)], id="covered"),
+        pytest.param((_DOCS_FILE, _TORCH_FILE), [], id="uncovered"),
+    ],
+)
+def test_a_ghstack_pr_on_its_own_base_dispatches_a_path_scoped_author_only_when_its_rule_covers_the_pr(
+    make_config, changed, dispatched
+):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW, author=_SCOPED_AUTHOR)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        files={1: changed},
+        head_refs={1: "gh/carol/7/head"},
+        base_refs={1: "gh/carol/7/base"},
+    )
+
+    # trymerge checks each PR of a ghstack stack against that PR's own file list, whatever its base.
+    assert scan.files_fetched == [1]
+    assert scan.dispatch_shadow == dispatched
+
+
+def test_a_refused_pr_target_by_an_author_outside_every_rule_still_has_its_revert_revoked(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        author="Dave",
+        fetched_labels={5: ("Reverted",)},
+        states={5: _state(5, STATUS_LAND, _HASH_A, _NEW, run_id=1)},
+        bot_login="greenlight-app[bot]",
+        dismissed_ids={5: [901]},
+    )
+
+    # No rule names Dave, so Dave is outside the cohort the scheduled scan lists, and this --pr is
+    # what revokes greenlight's approval on the reverted PR. The target stays refused: revoked and
+    # recorded, never fingerprinted or dispatched.
+    assert scan.dismissals == [(5, "greenlight-app[bot]", revert_guard._DISMISS_MESSAGE)]
+    assert scan.reverted_emitted == [(TARGET_REPO, 5, "headsha5", 2)]
+    assert scan.reverted_shadow == [(5, False)]
+    assert [number for _repo, number, _config in scan.poked] == [5]
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+
+
+def test_a_refused_pr_target_with_no_author_login_never_reaches_the_revert_guard(make_config):
+    scan = _run_scan(
+        make_config,
+        pr=5,
+        fingerprints={5: ("headsha5", _HASH_A)},
+        author=None,
+        fetched_labels={5: ("Reverted",)},
+        states={5: _state(5, STATUS_LAND, _HASH_A, _NEW)},
+        bot_login="greenlight-app[bot]",
+        dismissed_ids={5: [901]},
+    )
+
+    assert scan.label_fetches == []
+    assert scan.read_calls == []
+    assert scan.dismissals == []
+    assert scan.reverted_emitted == []
+
+
+def test_the_scan_lists_the_full_cohort_and_dispatches_only_its_eligible_prs(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[
+            _open_pr(1, updated_at=_NEW, labels=("Reverted",), author=_SCOPED_AUTHOR),
+            _open_pr(2, updated_at=_NEW, author=_SCOPED_AUTHOR),
+            _open_pr(3, updated_at=_NEW),
+        ],
+        fingerprints={3: ("headsha3", _HASH_A)},
+        files={1: (_TORCH_FILE,), 2: (_TORCH_FILE,)},
+        bot_login="greenlight-app[bot]",
+        dismissed_ids={1: [901]},
+    )
+
+    # The listing is the whole cohort, and a reverted ineligible PR in it is still revoked and
+    # recorded, but no ineligible PR is fingerprinted or dispatched.
+    assert scan.listed_authors == [cohort.evaluation_cohort(_AUTHORIZED)]
+    assert scan.dismissals == [(1, "greenlight-app[bot]", revert_guard._DISMISS_MESSAGE)]
+    assert scan.reverted_shadow == [(1, True)]
+    assert scan.fingerprinted == [3]
+    assert scan.dispatch_shadow == [(3, False)]
+
+
+def _ineligible_pr_scan(make_config: Callable[..., Config], **kwargs: Any) -> _Scan:
+    # carol's docs rule misses the torch file, so this PR is determined ineligible after one files read.
+    defaults: dict[str, Any] = {
+        "listed": [_open_pr(1, updated_at=_NEW, author=_SCOPED_AUTHOR)],
+        "fingerprints": {},
+        "files": {1: (_TORCH_FILE,)},
+        "bot_login": "greenlight-app[bot]",
+    }
+    return _run_scan(make_config, **{**defaults, **kwargs})
+
+
+def test_an_ineligible_pr_whose_latest_row_is_a_land_has_greenlights_approval_dismissed(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _ineligible_pr_scan(
+            make_config, states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)}, dismissed_ids={1: [901]}
+        )
+
+    # The approval greenlight gave while the PR was eligible would still authorize a merge, and no
+    # review is dispatched that could revoke it, so the scan dismisses it itself and does nothing else.
+    assert scan.dismissals == [(1, "greenlight-app[bot]", ineligible_approvals._NO_LONGER_ELIGIBLE_MESSAGE)]
+    assert "dismissed 1 greenlight approval(s) on PR #1, which is no longer eligible" in caplog.text
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert scan.emitted == []
+    assert scan.reverted_emitted == []
+    assert scan.poked == []
+
+
+@pytest.mark.parametrize(
+    "states",
+    [
+        pytest.param({}, id="no-row"),
+        pytest.param({1: _state(1, STATUS_NO_LAND, _HASH_A, _NEW)}, id="latest-row-no-land"),
+        pytest.param({1: _state(1, STATUS_AI_REVIEW_STARTED, _HASH_A, _NEW)}, id="latest-row-in-flight"),
+    ],
+)
+def test_an_ineligible_pr_whose_latest_row_is_not_a_land_is_left_alone(make_config, states):
+    # No BOT_LOGIN either: with nothing to dismiss the scan never needs one.
+    scan = _ineligible_pr_scan(make_config, states=states, bot_login="")
+
+    assert scan.dismissals == []
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+
+
+@pytest.mark.parametrize(
+    "listed",
+    [
+        pytest.param([_open_pr(1, updated_at=_OLD, author=_SCOPED_AUTHOR)], id="outside-review-window"),
+        pytest.param([_open_pr(1, updated_at=_NEW, labels=("Stale",), author=_SCOPED_AUTHOR)], id="stale-labeled"),
+    ],
+)
+def test_an_ineligible_land_pr_outside_the_review_window_or_labelled_stale_is_never_dismissed(make_config, listed):
+    scan = _ineligible_pr_scan(make_config, listed=listed, states={1: _state(1, STATUS_LAND, _HASH_A, _OLD)})
+
+    # A LAND row is terminal, so the recency filter drops this PR, and the dismissal covers only the PRs
+    # it keeps.
+    assert scan.dismissals == []
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+
+
+def test_an_undetermined_pr_is_never_dismissed_when_its_files_read_fails(make_config):
+    scan = _ineligible_pr_scan(
+        make_config,
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+        files_errors={1: RuntimeError("files boom")},
+        raises=RuntimeError,
+    )
+
+    # A failed read decides nothing about the author, so the approval stands and the pass fails.
+    assert scan.dismissals == []
+    assert scan.fingerprinted == []
+    assert str(scan.error) == "1 PR(s) failed during scan: [1]"
+
+
+def test_an_undetermined_pr_is_never_dismissed_when_a_rate_limit_skips_its_files_read(make_config):
+    from github import RateLimitExceededException
+
+    scan = _ineligible_pr_scan(
+        make_config,
+        listed=[
+            _open_pr(1, updated_at=_NEW, author=_SCOPED_AUTHOR),
+            _open_pr(2, updated_at=_NEW, labels=("Reverted",)),
+        ],
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+        dismiss_errors={2: RateLimitExceededException(403)},
+        raises=RuntimeError,
+    )
+
+    # PR 2's revert-guard dismissal trips the rate limit, so PR 1's files are never read: undetermined,
+    # and abandoned rather than dismissed.
+    assert scan.dismissals == [(2, "greenlight-app[bot]", revert_guard._DISMISS_MESSAGE)]
+    assert scan.files_fetched == []
+    assert str(scan.error) == "1 PR(s) failed during scan: [2]; 1 PR(s) abandoned due to rate limit: [1]"
+
+
+def test_an_eligible_pr_whose_latest_row_is_a_land_keeps_its_approval_and_is_left_to_decide(make_config):
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW, author=_SCOPED_AUTHOR), _open_pr(2, updated_at=_NEW)],
+        fingerprints={1: ("headsha1", _HASH_A), 2: ("headsha2", _HASH_B)},
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW), 2: _state(2, STATUS_LAND, _HASH_A, _NEW)},
+        files={1: (_DOCS_FILE,)},
+        bot_login="greenlight-app[bot]",
+    )
+
+    # decide alone answers for an eligible PR: an unchanged one is skipped, a changed one re-reviewed.
+    assert scan.dismissals == []
+    assert sorted(scan.fingerprinted) == [1, 2]
+    assert scan.dispatched == [(2, "headsha2", _HASH_B, DEFAULT_DISPATCH_REF)]
+
+
+def test_a_failed_dismissal_is_logged_and_fails_the_pass_but_the_scan_goes_on(make_config, caplog):
+    with caplog.at_level(logging.ERROR, logger="greenlight"):
+        scan = _ineligible_pr_scan(
+            make_config,
+            listed=[_open_pr(1, updated_at=_NEW, author=_SCOPED_AUTHOR), _open_pr(2, updated_at=_NEW)],
+            fingerprints={2: ("headsha2", _HASH_A)},
+            states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+            dismiss_errors={1: RuntimeError("dismiss boom")},
+            raises=RuntimeError,
+        )
+
+    assert "failed to revoke greenlight approval on PR #1, which is no longer eligible" in caplog.text
+    assert any(record.exc_info is not None for record in caplog.records)
+    assert scan.dispatched == [(2, "headsha2", _HASH_A, DEFAULT_DISPATCH_REF)]
+    assert str(scan.error) == "1 PR(s) failed during scan: [1]"
+
+
+def test_a_rate_limited_dismissal_abandons_the_fanout_and_skips_the_dispatch_phase(make_config, caplog):
+    from github import RateLimitExceededException
+
+    with caplog.at_level(logging.WARNING, logger="greenlight"):
+        scan = _ineligible_pr_scan(
+            make_config,
+            listed=[_open_pr(1, updated_at=_NEW, author=_SCOPED_AUTHOR), _open_pr(2, updated_at=_NEW)],
+            fingerprints={2: ("headsha2", _HASH_A)},
+            states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+            dismiss_errors={1: RateLimitExceededException(403)},
+            raises=RuntimeError,
+        )
+
+    # Accounted exactly as a rate limit in the revert guard: the shared cancel event abandons PR 2's
+    # fingerprint, and nothing is dispatched on the throttled token.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert "abandoned 1 of 1" in caplog.text
+    assert str(scan.error) == "1 PR(s) failed during scan: [1]; 1 PR(s) abandoned due to rate limit: [2]"
+
+
+@pytest.mark.parametrize("bot_login", ["", "pytorchgreenlight"])
+def test_a_due_dismissal_without_the_app_bot_login_refuses_the_scan(make_config, bot_login):
+    scan = _ineligible_pr_scan(
+        make_config, states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)}, bot_login=bot_login, raises=ValueError
+    )
+
+    assert "BOT_LOGIN must be the greenlight App login" in str(scan.error)
+    assert scan.dismissals == []
+    assert scan.fingerprinted == []
+
+
+def test_an_iteration_timeout_during_a_dismissal_halts_the_pass_instead_of_failing_the_pr(make_config):
+    scan = _ineligible_pr_scan(
+        make_config,
+        states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)},
+        dismiss_errors={1: IterationTimeout("iteration exceeded")},
+        raises=IterationTimeout,
+    )
+
+    assert scan.dismissals == [(1, "greenlight-app[bot]", ineligible_approvals._NO_LONGER_ELIGIBLE_MESSAGE)]
+    assert scan.fingerprinted == []
+
+
+def test_a_land_whose_approval_is_already_gone_is_asked_again_and_logs_nothing(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _ineligible_pr_scan(make_config, states={1: _state(1, STATUS_LAND, _HASH_A, _NEW)})
+
+    # No row records the dismissal, so every scan that lists the PR asks again; finding no live
+    # approval is not worth a log line.
+    assert scan.dismissals == [(1, "greenlight-app[bot]", ineligible_approvals._NO_LONGER_ELIGIBLE_MESSAGE)]
+    assert "dismissed" not in caplog.text
+
+
+def _marked_memory(at: datetime) -> ScanMemory:
+    memory = ScanMemory()
+    memory.mark_full_tick(at)
+    return memory
+
+
+def test_a_scan_with_no_memory_lists_in_full(make_config):
+    scan = _run_scan(make_config, listed=[_open_pr(1)], fingerprints={1: ("headsha1", _HASH_A)})
+
+    assert scan.listed_calls == 1
+    assert scan.updated_calls == []
+
+
+def test_a_cold_memory_lists_in_full_and_marks_the_tick_at_its_listing_time(make_config):
+    memory = ScanMemory()
+
+    scan = _run_scan(make_config, listed=[_open_pr(1)], fingerprints={1: ("headsha1", _HASH_A)}, memory=memory)
+
+    assert scan.listed_calls == 1
+    assert scan.updated_calls == []
+    assert not memory.full_tick_due(_NOW + FULL_TICK_INTERVAL - FULL_TICK_TOLERANCE - timedelta(seconds=1))
+    assert memory.full_tick_due(_NOW + FULL_TICK_INTERVAL - FULL_TICK_TOLERANCE)
+
+
+def test_a_tick_inside_the_interval_lists_only_recent_prs_and_leaves_the_mark_alone(make_config, caplog):
+    memory = _marked_memory(_NOW - timedelta(minutes=5))
+
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            listed=[_open_pr(1), _open_pr(2)],
+            updated=[_open_pr(2, updated_at=_FRESH)],
+            fingerprints={2: ("headsha2", _HASH_A)},
+            memory=memory,
+        )
+
+    # The cutoff is the review window back from the listing time, and the fast listing's result is
+    # all the state read and the fan-out see.
+    assert scan.listed_calls == 0
+    assert scan.updated_calls == [_NOW - timedelta(hours=24)]
+    assert scan.read_calls == [(TARGET_REPO, [2])]
+    assert scan.fingerprinted == [2]
+    assert "fast tick, updated since 2026-07-30 12:00:00 UTC" in caplog.text
+    # A fast tick leaves the last full tick's mark alone.
+    assert memory.full_tick_due(_NOW + timedelta(minutes=10))
+
+
+def test_the_fast_listing_cutoff_follows_the_configured_review_window(make_config):
+    scan = _run_scan(
+        make_config,
+        fingerprints={},
+        config_kwargs={"review_window_hours": 6.0},
+        memory=_marked_memory(_NOW - timedelta(minutes=1)),
+    )
+
+    assert scan.updated_calls == [_NOW - timedelta(hours=6)]
+
+
+def test_a_tick_once_the_interval_has_passed_lists_in_full_again(make_config):
+    memory = _marked_memory(_NOW - FULL_TICK_INTERVAL)
+
+    scan = _run_scan(make_config, listed=[_open_pr(1)], fingerprints={1: ("headsha1", _HASH_A)}, memory=memory)
+
+    assert scan.listed_calls == 1
+    assert scan.updated_calls == []
+    assert not memory.full_tick_due(_NOW + timedelta(minutes=14))
+
+
+def test_a_full_tick_is_marked_even_when_a_pr_fails_and_the_scan_raises(make_config):
+    memory = ScanMemory()
+
+    # PR2 has no fingerprint, so its evaluation fails and the pass raises after the dispatch phase.
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        memory=memory,
+        raises=RuntimeError,
+    )
+
+    assert "1 PR(s) failed during scan: [2]" in str(scan.error)
+    assert [number for number, *_ in scan.dispatched] == [1]
+    assert not memory.full_tick_due(_NOW)
+
+
+def test_a_full_tick_is_not_marked_when_its_listing_fails(make_config):
+    memory = ScanMemory()
+
+    scan = _run_scan(
+        make_config, fingerprints={}, memory=memory, listing_error=RuntimeError("listing boom"), raises=RuntimeError
+    )
+
+    assert "listing boom" in str(scan.error)
+    assert memory.full_tick_due(_NOW)
+
+
+def test_a_full_tick_is_not_marked_after_a_rate_limit(make_config):
+    from github import RateLimitExceededException
+
+    memory = ScanMemory()
+
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1, updated_at=_NEW, labels=("Reverted",)), _open_pr(2, updated_at=_NEW)],
+        fingerprints={2: ("headsha2", _HASH_A)},
+        bot_login="greenlight-app[bot]",
+        dismiss_errors={1: RateLimitExceededException(403)},
+        memory=memory,
+        raises=RuntimeError,
+    )
+
+    assert "abandoned due to rate limit: [2]" in str(scan.error)
+    assert memory.full_tick_due(_NOW)
+
+
+def test_a_fast_tick_listing_failure_fails_the_scan(make_config):
+    memory = _marked_memory(_NOW - timedelta(minutes=5))
+
+    scan = _run_scan(
+        make_config, fingerprints={}, memory=memory, listing_error=RuntimeError("listing boom"), raises=RuntimeError
+    )
+
+    assert "listing boom" in str(scan.error)
+    assert scan.read_calls == []
+
+
+def test_the_pr_path_neither_lists_nor_marks_a_memory_it_is_handed(make_config):
+    memory = ScanMemory()
+
+    scan = _run_scan(make_config, pr=5, fingerprints={5: ("headsha5", _HASH_A)}, memory=memory)
+
+    assert scan.listed_calls == 0
+    assert scan.updated_calls == []
+    assert memory.full_tick_due(_NOW)
+
+
+def _advancing_clock(start: datetime, step: timedelta) -> Callable[[], datetime]:
+    readings = itertools.count()
+    return lambda: start + step * next(readings)
+
+
+def test_a_full_tick_is_marked_at_the_instant_read_before_its_listing(make_config):
+    memory = ScanMemory()
+
+    _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        memory=memory,
+        clock=_advancing_clock(_NOW, timedelta(minutes=1)),
+    )
+
+    # The scan reads the clock before the listing (_NOW) and again for the window filter a minute
+    # later; coming due exactly one interval, less the tolerance, after _NOW pins the mark to the first.
+    due_at = _NOW + FULL_TICK_INTERVAL - FULL_TICK_TOLERANCE
+    assert memory.full_tick_due(due_at)
+    assert not memory.full_tick_due(due_at - timedelta(microseconds=1))
+
+
+def test_a_fast_tick_cuts_off_at_its_listing_instant_and_the_window_filter_reads_a_later_one(make_config, caplog):
+    # Updated 30 s inside the listing's cutoff, so the fast listing keeps it, but outside the window by
+    # the time the window filter reads the clock a minute later.
+    edge = _NOW - timedelta(hours=24) + timedelta(seconds=30)
+
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            updated=[_open_pr(4, updated_at=edge)],
+            fingerprints={4: ("headsha4", _HASH_A)},
+            memory=_marked_memory(_NOW - timedelta(minutes=5)),
+            clock=_advancing_clock(_NOW, timedelta(minutes=1)),
+        )
+
+    assert scan.updated_calls == [_NOW - timedelta(hours=24)]
+    assert scan.read_calls == [(TARGET_REPO, [4])]
+    assert scan.fingerprinted == []
+    assert "skipping stale PR #4: no recent activity (never reviewed)" in caplog.text
+
+
+def test_a_fast_tick_lists_for_the_evaluation_cohort(make_config):
+    rules = _catch_all("Alice", "bob", "pytorchbot", cohort.GREENLIGHT_APP_SLUG)
+
+    scan = _run_scan(make_config, fingerprints={}, rules=rules, memory=_marked_memory(_NOW - timedelta(minutes=5)))
+
+    assert scan.listed_calls == 0
+    assert scan.listed_authors == [frozenset({"alice", "bob"})]
+
+
+def test_a_fast_tick_revokes_and_records_an_idle_reverted_pr_its_supplement_listed(make_config):
+    scan = _run_scan(
+        make_config,
+        updated=[_open_pr(3, updated_at=_OLD, labels=("Reverted",)), _open_pr(4, updated_at=_FRESH)],
+        fingerprints={4: ("headsha4", _HASH_A)},
+        bot_login="greenlight-app[bot]",
+        dismissed_ids={3: [901]},
+        memory=_marked_memory(_NOW - timedelta(minutes=5)),
+    )
+
+    # PR3 is outside the review window, so only the Reverted supplement lists it on a fast tick; the
+    # revert guard still revokes greenlight's approval and records the exclusion.
+    assert scan.listed_calls == 0
+    assert scan.dismissals == [(3, "greenlight-app[bot]", revert_guard._DISMISS_MESSAGE)]
+    assert scan.reverted_emitted == [(TARGET_REPO, 3, "headsha3", 1)]
+    assert scan.fingerprinted == [4]
+    assert [number for number, *_ in scan.dispatched] == [4]
+
+
+def test_a_full_tick_is_not_marked_when_its_fan_out_times_out(make_config):
+    memory = ScanMemory()
+
+    _run_scan(
+        make_config,
+        listed=[_open_pr(1)],
+        fingerprints={},
+        fingerprint_errors={1: IterationTimeout("iteration exceeded")},
+        memory=memory,
+        raises=IterationTimeout,
+    )
+
+    assert memory.full_tick_due(_NOW)
+
+
+@pytest.mark.parametrize("max_dispatches", [0, 1])
+def test_a_full_tick_the_dispatch_cap_cut_short_is_marked(make_config, max_dispatches):
+    memory = ScanMemory()
+
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2)],
+        fingerprints={1: ("headsha1", _HASH_A), 2: ("headsha2", _HASH_A)},
+        max_dispatches=max_dispatches,
+        memory=memory,
+    )
+
+    assert len(scan.dispatched) == max_dispatches
+    assert not memory.full_tick_due(_NOW)
+
+
+def test_a_full_tick_under_the_dispatch_cap_is_marked(make_config):
+    memory = ScanMemory()
+
+    scan = _run_scan(
+        make_config,
+        listed=[_open_pr(1), _open_pr(2)],
+        fingerprints={1: ("headsha1", _HASH_A), 2: ("headsha2", _HASH_A)},
+        max_dispatches=3,
+        memory=memory,
+    )
+
+    assert len(scan.dispatched) == 2
+    assert not memory.full_tick_due(_NOW)
+
+
+_LANDED = {1: _state(1, STATUS_LAND, _HASH_A, _NEW)}
+
+
+def _warm_memory(
+    make_config: Callable[..., Config],
+    listed: Sequence[OpenPR],
+    fingerprints: dict[int, tuple[str, str] | ReviewSkip],
+    states: dict[int, PRState],
+) -> ScanMemory:
+    """A memory whose full tick at _NOW listed, fingerprinted and completed ``listed``."""
+    memory = ScanMemory()
+    _run_scan(make_config, listed=listed, fingerprints=fingerprints, states=states, memory=memory)
+    assert not memory.full_tick_due(_NOW)
+    return memory
+
+
+def test_a_fast_tick_reuses_the_fingerprint_of_a_pr_listed_as_it_was(make_config, caplog):
+    listed = [_open_pr(1, updated_at=_FRESH)]
+    memory = _warm_memory(make_config, listed, {1: ("headsha1", _HASH_A)}, _LANDED)
+
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(make_config, updated=listed, fingerprints={}, states=_LANDED, memory=memory)
+
+    # No fingerprint is fetched: a fetch would find no fake result, fail the PR and raise.
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert "PR #1: SKIP (decided, cached)" in caplog.text
+    assert "fingerprints: 1 reused from the cache, 0 fetched fresh" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("listed", "rules"),
+    [
+        pytest.param(_open_pr(1, updated_at=_FRESH + timedelta(seconds=1)), _RULES, id="updated-at"),
+        pytest.param(_open_pr(1, head_sha="headsha1-pushed", updated_at=_FRESH), _RULES, id="head"),
+        pytest.param(replace(_open_pr(1, updated_at=_FRESH), head_sha=None), _RULES, id="no-head"),
+        pytest.param(
+            _open_pr(1, updated_at=_FRESH),
+            (*_RULES, merge_authz.compile_rule("newcomer", ["*"], frozenset({"zoe"}))),
+            id="approvers",
+        ),
+    ],
+)
+def test_a_fast_tick_fingerprints_afresh_a_pr_whose_cache_key_changed(make_config, listed, rules):
+    memory = _warm_memory(make_config, [_open_pr(1, updated_at=_FRESH)], {1: ("headsha1", _HASH_A)}, _LANDED)
+
+    scan = _run_scan(
+        make_config,
+        updated=[listed],
+        fingerprints={1: ("headsha1", _HASH_A)},
+        states=_LANDED,
+        rules=rules,
+        memory=memory,
+    )
+
+    assert scan.fingerprinted == [1]
+
+
+def test_a_cached_result_that_would_dispatch_is_fingerprinted_afresh_and_dispatched_on_the_fresh_one(make_config):
+    listed = [_open_pr(1, updated_at=_FRESH)]
+    memory = _warm_memory(make_config, listed, {1: ("headsha1", _HASH_A)}, _LANDED)
+
+    # The latest recorded review has since failed and aged out, so the cached result would be retried.
+    scan = _run_scan(
+        make_config,
+        updated=listed,
+        fingerprints={1: ("headsha1", _HASH_B)},
+        states={1: _state(1, STATUS_FAILED, _HASH_A, _OLD)},
+        memory=memory,
+    )
+
+    assert scan.fingerprinted == [1]
+    assert scan.dispatched == [(1, "headsha1", _HASH_B, DEFAULT_DISPATCH_REF)]
+    assert scan.emitted == [(TARGET_REPO, 1, "headsha1", _HASH_B, 1)]
+
+
+@pytest.mark.parametrize(
+    ("age", "reused"),
+    [
+        pytest.param(FINGERPRINT_QUIET, True, id="quiet"),
+        pytest.param(FINGERPRINT_QUIET - timedelta(seconds=1), False, id="too-recent"),
+    ],
+)
+def test_a_fingerprint_is_reused_only_if_its_pr_had_gone_quiet_when_it_was_fetched(make_config, age, reused):
+    listed = [_open_pr(1, updated_at=_NOW - age)]
+    memory = _warm_memory(make_config, listed, {1: ("headsha1", _HASH_A)}, _LANDED)
+
+    scan = _run_scan(
+        make_config, updated=listed, fingerprints={1: ("headsha1", _HASH_A)}, states=_LANDED, memory=memory
+    )
+
+    assert scan.fingerprinted == ([] if reused else [1])
+
+
+def test_a_full_tick_fingerprints_every_pr_afresh_and_the_next_fast_tick_reuses_its_results(make_config, caplog):
+    listed = [_open_pr(1, updated_at=_FRESH)]
+    memory = _warm_memory(make_config, listed, {1: ("headsha1", _HASH_A)}, _LANDED)
+    landed_b = {1: _state(1, STATUS_LAND, _HASH_B, _NEW)}
+
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        full = _run_scan(
+            make_config,
+            listed=listed,
+            fingerprints={1: ("headsha1", _HASH_B)},
+            states=_LANDED,
+            memory=memory,
+            now=_NOW + FULL_TICK_INTERVAL,
+        )
+
+    # PR1's cached hash matches its recorded LAND, so read it would have settled PR1: the full tick's
+    # fingerprint shows it never read the cache.
+    assert full.listed_calls == 1
+    assert full.fingerprinted == [1]
+    assert "fingerprints: 0 reused from the cache, 1 fetched fresh" in caplog.text
+
+    fast = _run_scan(
+        make_config,
+        updated=listed,
+        fingerprints={},
+        states=landed_b,
+        memory=memory,
+        now=_NOW + FULL_TICK_INTERVAL + timedelta(minutes=1),
+    )
+
+    # The fast tick after it reuses the full tick's hash, the one the recorded LAND then matches.
+    assert fast.updated_calls != []
+    assert fast.fingerprinted == []
+
+
+def test_a_pr_a_tick_did_not_evaluate_loses_its_cached_result(make_config):
+    states = {n: _state(n, STATUS_LAND, _HASH_A, _NEW) for n in (1, 2)}
+    prs = [_open_pr(1, updated_at=_FRESH), _open_pr(2, updated_at=_FRESH)]
+    memory = _warm_memory(make_config, prs, {1: ("headsha1", _HASH_A), 2: ("headsha2", _HASH_A)}, states)
+
+    without_pr2 = _run_scan(make_config, updated=prs[:1], fingerprints={}, states=states, memory=memory)
+    with_pr2 = _run_scan(
+        make_config, updated=prs, fingerprints={2: ("headsha2", _HASH_A)}, states=states, memory=memory
+    )
+
+    # PR2 missed one fast listing, so that tick dropped its result, though PR2 returns listed as it was.
+    assert without_pr2.fingerprinted == []
+    assert with_pr2.fingerprinted == [2]
+
+
+@pytest.mark.parametrize(
+    ("pr", "force"),
+    [pytest.param(5, False, id="pr"), pytest.param(5, True, id="pr-force"), pytest.param(None, True, id="force")],
+)
+def test_the_pr_and_force_paths_neither_read_nor_write_the_cache(make_config, pr, force):
+    states = {n: _state(n, STATUS_LAND, _HASH_A, _NEW) for n in (1, 5)}
+    prs = [_open_pr(1, updated_at=_FRESH), _open_pr(5, updated_at=_FRESH)]
+    fingerprints: dict[int, tuple[str, str] | ReviewSkip] = {1: ("headsha1", _HASH_A), 5: ("headsha5", _HASH_A)}
+    memory = _warm_memory(make_config, prs[:1], fingerprints, states)
+
+    bypass = _run_scan(
+        make_config, pr=pr, force=force, updated=prs, fingerprints=fingerprints, states=states, memory=memory
+    )
+    after = _run_scan(make_config, updated=prs, fingerprints={5: ("headsha5", _HASH_A)}, states=states, memory=memory)
+
+    # The bypassing run fingerprinted PR1 too when it listed it, reading no cached result, and stored
+    # and evicted nothing: the next fast tick still reuses PR1 and still has to fingerprint PR5.
+    assert sorted(bypass.fingerprinted) == ([5] if pr is not None else [1, 5])
+    assert after.fingerprinted == [5]
+
+
+def test_a_scan_without_a_memory_logs_no_fingerprint_cache_counts(make_config, caplog):
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        _run_scan(make_config, listed=[_open_pr(1, updated_at=_FRESH)], fingerprints={1: ("headsha1", _HASH_A)})
+
+    assert "fingerprints:" not in caplog.text
+
+
+def test_a_capped_fast_tick_spends_its_dispatch_cap_on_fingerprinted_prs_not_on_cache_hits(make_config):
+    cached = [_open_pr(1, updated_at=_FRESH), _open_pr(2, updated_at=_FRESH)]
+    uncached = [_open_pr(n, updated_at=_FRESH) for n in range(3, 3 + 2 * review._FINGERPRINT_WORKERS)]
+    states = {
+        **{pr.number: _state(pr.number, STATUS_LAND, _HASH_A, _OLD) for pr in cached},
+        **{pr.number: _state(pr.number, STATUS_LAND, _HASH_A, _NEW) for pr in uncached},
+    }
+    cached_fingerprints: dict[int, tuple[str, str] | ReviewSkip] = {
+        pr.number: (f"headsha{pr.number}", _HASH_A) for pr in cached
+    }
+    memory = _warm_memory(make_config, cached, cached_fingerprints, states)
+
+    scan = _run_scan(
+        make_config,
+        updated=[*cached, *uncached],
+        fingerprints={**cached_fingerprints, **{pr.number: (f"headsha{pr.number}", _HASH_B) for pr in uncached}},
+        states=states,
+        max_dispatches=1,
+        memory=memory,
+    )
+
+    # Their older LANDs rank the cached PRs stalest, yet they settle before anything is submitted, so the
+    # first worker-sized batch goes to the changed uncached PRs and the cap of one stops submission there.
+    # Submitted with the rest, PRs 1 and 2 would take two of that batch's slots.
+    assert scan.dispatched == [(3, "headsha3", _HASH_B, DEFAULT_DISPATCH_REF)]
+    assert sorted(scan.fingerprinted) == list(range(3, 3 + review._FINGERPRINT_WORKERS))
+
+
+def test_after_a_rate_limit_a_fast_tick_still_settles_its_cache_hits_and_abandons_the_rest(make_config, caplog):
+    from github import RateLimitExceededException
+
+    memory = _warm_memory(make_config, [_open_pr(1, updated_at=_FRESH)], {1: ("headsha1", _HASH_A)}, _LANDED)
+
+    with caplog.at_level(logging.INFO, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            updated=[
+                _open_pr(1, updated_at=_FRESH),
+                _open_pr(2, updated_at=_FRESH),
+                _open_pr(3, updated_at=_FRESH, labels=("Reverted",)),
+            ],
+            fingerprints={2: ("headsha2", _HASH_A)},
+            states=_LANDED,
+            bot_login="greenlight-app[bot]",
+            dismiss_errors={3: RateLimitExceededException(403)},
+            memory=memory,
+            raises=RuntimeError,
+        )
+
+    # The revert guard's rate limit cancels the fan-out before it starts: PR1 still settles from the
+    # cache, while PR2's fingerprint is abandoned as it would be without one.
+    assert "PR #1: SKIP (decided, cached)" in caplog.text
+    assert scan.fingerprinted == []
+    assert scan.dispatched == []
+    assert "abandoned due to rate limit: [2]" in str(scan.error)
+
+
+def test_a_cached_pr_whose_judgment_raises_is_fingerprinted_afresh_and_the_tick_goes_on(
+    make_config, monkeypatch, caplog
+):
+    listed = [_open_pr(1, updated_at=_FRESH), _open_pr(2, updated_at=_FRESH)]
+    from greenlight.decision import decide as real_decide
+
+    memory = _warm_memory(make_config, listed[:1], {1: ("headsha1", _HASH_A)}, _LANDED)
+
+    def decide_failing_on_the_cached_hash(**kwargs: Any) -> Any:
+        if kwargs["current_eval_hash"] == _HASH_A:
+            raise RuntimeError("decide boom")
+        return real_decide(**kwargs)
+
+    monkeypatch.setattr(scan_runner, "decide", decide_failing_on_the_cached_hash)
+
+    with caplog.at_level(logging.ERROR, logger="greenlight"):
+        scan = _run_scan(
+            make_config,
+            updated=listed,
+            fingerprints={1: ("headsha1", _HASH_B), 2: ("headsha2", _HASH_B)},
+            states=_LANDED,
+            memory=memory,
+        )
+
+    # Judging PR1's cached result raised: the error is logged against PR1, which is fingerprinted afresh
+    # instead of aborting the tick, and both PRs still dispatch.
+    assert "PR #1: failed to judge its cached fingerprint; fingerprinting it afresh" in caplog.text
+    assert sorted(scan.fingerprinted) == [1, 2]
+    assert sorted(number for number, *_ in scan.dispatched) == [1, 2]

@@ -1,0 +1,109 @@
+name: Test basic usage (non-container runner, mocked tools)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake curl/aws/docker/sudo/lspci/systemctl on PATH
+        run: |
+          set -eu
+          FAKE="$RUNNER_TEMP/fakebin"
+          LOG="$RUNNER_TEMP/fake-calls.log"
+          mkdir -p "$FAKE"
+          : > "$LOG"
+          rm -f /.inarc /.incontainer 2>/dev/null || true
+
+          cat > "$FAKE/curl" <<EOF
+          #!/bin/bash
+          echo "curl \$*" >> "$LOG"
+          case "\$*" in
+            *api/token*) echo "faketoken" ;;
+            *meta-data/ami-id*) echo "ami-0123456789" ;;
+            *meta-data/instance-id*) echo "i-0123456789" ;;
+            *meta-data/instance-type*) echo "c5.large" ;;
+          esac
+          exit 0
+          EOF
+
+          cat > "$FAKE/aws" <<EOF
+          #!/bin/bash
+          echo "aws \$*" >> "$LOG"
+          if [ "\$1" = "sts" ]; then
+            printf '{\n    "UserId": "AIDAEXAMPLE",\n    "Account": "123456789012",\n    "Arn": "arn:aws:iam::123456789012:user/test"\n}\n'
+          elif [ "\$1" = "ecr" ]; then
+            echo "fake-ecr-password"
+          fi
+          exit 0
+          EOF
+
+          cat > "$FAKE/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG"
+          if [ "\$1" = "login" ]; then
+            pw=\$(cat)
+            echo "docker-login-password \$pw" >> "$LOG"
+          fi
+          exit 0
+          EOF
+
+          cat > "$FAKE/sudo" <<EOF
+          #!/bin/bash
+          echo "sudo \$*" >> "$LOG"
+          if [ "\$1" = "systemctl" ]; then exit 0; fi
+          exec "\$@"
+          EOF
+
+          cat > "$FAKE/systemctl" <<EOF
+          #!/bin/bash
+          echo "systemctl \$*" >> "$LOG"
+          exit 0
+          EOF
+
+          cat > "$FAKE/lspci" <<EOF
+          #!/bin/bash
+          echo "lspci \$*" >> "$LOG"
+          echo "00:00.0 Host bridge: Intel Corporation Fake"
+          exit 0
+          EOF
+
+          chmod +x "$FAKE"/*
+          echo "$FAKE" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert environment variables and directories
+        run: |
+          set -u
+          echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR:-}"
+          echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR:-}"
+          echo "RUNNER_DOCS_DIR=${RUNNER_DOCS_DIR:-}"
+          [ "${RUNNER_ARTIFACT_DIR:-}" = "$RUNNER_TEMP/artifacts" ] || { echo "FAIL: RUNNER_ARTIFACT_DIR"; exit 1; }
+          [ "${RUNNER_TEST_RESULTS_DIR:-}" = "$RUNNER_TEMP/test-results" ] || { echo "FAIL: RUNNER_TEST_RESULTS_DIR"; exit 1; }
+          [ "${RUNNER_DOCS_DIR:-}" = "$RUNNER_TEMP/docs" ] || { echo "FAIL: RUNNER_DOCS_DIR"; exit 1; }
+          for d in "$RUNNER_ARTIFACT_DIR" "$RUNNER_TEST_RESULTS_DIR" "$RUNNER_DOCS_DIR"; do
+            [ -d "$d" ] || { echo "FAIL: dir $d missing"; exit 1; }
+          done
+          if [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG should not be set, got '$GPU_FLAG'"; exit 1
+          fi
+          echo "PASS"
+      - name: Assert github env file preserved
+        run: |
+          F="$RUNNER_TEMP/github_env_${GITHUB_RUN_ID}"
+          [ -f "$F" ] || { echo "FAIL: $F missing"; exit 1; }
+          grep -q '^GITHUB' "$F" || { echo "FAIL: no GITHUB vars"; exit 1; }
+          grep -q '^RUNNER' "$F" || { echo "FAIL: no RUNNER vars"; exit 1; }
+          echo "PASS"
+      - name: Assert ECR login and docker cleanup calls
+        run: |
+          LOG="$RUNNER_TEMP/fake-calls.log"
+          cat "$LOG"
+          grep -q 'curl .*meta-data/ami-id' "$LOG" || { echo "FAIL: ec2 metadata not queried"; exit 1; }
+          grep -q 'aws sts get-caller-identity' "$LOG" || { echo "FAIL: sts not called"; exit 1; }
+          grep -q 'aws ecr get-login-password --region us-east-1' "$LOG" || { echo "FAIL: ecr password not requested"; exit 1; }
+          grep -q 'docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com' "$LOG" || { echo "FAIL: docker login wrong"; exit 1; }
+          grep -q 'docker-login-password fake-ecr-password' "$LOG" || { echo "FAIL: password not piped"; exit 1; }
+          grep -q 'lspci -v' "$LOG" || { echo "FAIL: lspci not called"; exit 1; }
+          grep -q 'docker system prune -af' "$LOG" || { echo "FAIL: prune not called"; exit 1; }
+          echo "PASS"
