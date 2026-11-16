@@ -98,7 +98,7 @@ runs:
 
     - name: Install nvidia driver, nvidia-docker runtime, set GPU_FLAG
       if: ${{ steps.detect-gpu.outputs.HAS_NVIDIA == 'true' && steps.check-container.outputs.IN_CONTAINER_RUNNER != 'true' }}
-      uses: nick-fields/retry@3e91a01664abd3c5cd539100d10d33b9c5b68482
+      uses: chainguard-actions/nick-fields-retry@e7fdffcd7ddf9b04bb32ed4483c922df29ae322c
       env:
         REQUESTED_DRIVER_VERSION: ${{ inputs.driver-version }}
       with:
