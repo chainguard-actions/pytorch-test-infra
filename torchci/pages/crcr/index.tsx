@@ -1,0 +1,1348 @@
+import {
+  Box,
+  ButtonBase,
+  Chip,
+  Divider,
+  FormControl,
+  InputLabel,
+  Link,
+  MenuItem,
+  Paper,
+  Select,
+  SelectChangeEvent,
+  Skeleton,
+  Stack,
+  Tab,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Tabs,
+  Typography,
+} from "@mui/material";
+import { durationDisplay } from "components/common/TimeUtils";
+import L3SummaryChip from "components/crcr/L3SummaryChip";
+import type {
+  RelayHealthJob,
+  RelayHealthRun,
+} from "components/crcr/RelayHealthDetailsDialog";
+import RelayHealthDetailsDialog, {
+  isHealthJobPassing,
+} from "components/crcr/RelayHealthDetailsDialog";
+import { buildDemotionStatuses } from "lib/crcr/demotionStatus";
+import {
+  CRCR_HEALTH_STALE_AFTER_MINUTES,
+  CRCR_HEALTH_WINDOW_LABEL,
+  CRCR_HEALTH_WINDOW_MINUTES,
+  summarizeCrcrHealth,
+} from "lib/crcr/healthProbe";
+import type { L3SummaryRow, TenureInfo } from "lib/crcr/l3Readiness";
+import {
+  buildCriteriaRows,
+  buildDemotionRows,
+  tenureInfoFromL2Since,
+} from "lib/crcr/l3Readiness";
+import { L3_DEMOTION_WINDOW_DAYS } from "lib/crcr/l3Thresholds";
+import type {
+  CiMetricsRow,
+  CrcrOverviewData,
+  CrcrOverviewResponse,
+  CrcrOverviewSection,
+  HealthPrRow,
+  NightlyHealthJobRow,
+  NightlyMetricsRow,
+} from "lib/crcr/overview";
+import { mergeCrcrOverviewData } from "lib/crcr/overview";
+import { CRCR_TIME_RANGES } from "lib/crcr/timeRanges";
+import {
+  CRCR_HEALTH_REPO,
+  DEFAULT_CRCR_EVENTS,
+  filterCrcrEntriesByEvent,
+} from "lib/crcrAllowlist";
+import { fetcherHandleError } from "lib/GeneralUtils";
+import Head from "next/head";
+import NextLink from "next/link";
+import { Fragment, useMemo, useRef, useState } from "react";
+import useSWR from "swr";
+
+import type { AllowlistEntry, AllowlistResponse } from "../api/crcr/allowlist";
+
+interface HealthPrDetailRow {
+  pr_number: number;
+  job_name: string;
+  status: string;
+  conclusion: string | null;
+  started_at: string;
+  completed_at: string | null;
+  workflow_run_url: string | null;
+  check_run_id: string | null;
+  is_overdue: number;
+}
+
+type EventTab = "pr" | "nightly";
+
+type Level = "L1" | "L2" | "L3" | "L4";
+
+const OVERVIEW_SECTION_LABELS: Record<CrcrOverviewSection, string> = {
+  prSummary: "Pull request summary",
+  nightlySummary: "Nightly summary",
+  prHealth: "Pull request relay health",
+  nightlyHealth: "Nightly relay health",
+  promotionReadiness: "Promotion readiness",
+  demotionReadiness: "Demotion readiness",
+  tenure: "Configured-level tenure",
+};
+
+function useRetainedOverviewData(
+  url: string | null,
+  response: CrcrOverviewResponse | undefined
+) {
+  const dataByUrl = useRef(new Map<string, Partial<CrcrOverviewData>>());
+  const responseByUrl = useRef(new Map<string, CrcrOverviewResponse>());
+
+  if (url === null) return undefined;
+  if (responseByUrl.current.get(url) !== response && response !== undefined) {
+    dataByUrl.current.set(
+      url,
+      mergeCrcrOverviewData(dataByUrl.current.get(url), response)
+    );
+    responseByUrl.current.set(url, response);
+  }
+  return dataByUrl.current.get(url);
+}
+
+const LEVEL_META: Record<
+  Level,
+  { label: string; description: string; color: string }
+> = {
+  L4: {
+    label: "L4 Backends (merge-gating)",
+    description:
+      "Blocking check run on every PR; reserved for critical accelerators.",
+    color: "#7b1fa2",
+  },
+  L3: {
+    label: "L3 Backends (check runs on PR)",
+    description:
+      "Non-blocking check run on PRs when ciflow/crcr/<name> label is applied.",
+    color: "#ed6c02",
+  },
+  L2: {
+    label: "L2 Backends (callback-only)",
+    description: "CI results displayed on the HUD page, but not on PRs.",
+    color: "#0288d1",
+  },
+  L1: {
+    label: "L1 Integrations (webhook-only)",
+    description:
+      "Repos receive webhook notifications on new commits. No CI results reported back.",
+    color: "#9e9e9e",
+  },
+};
+
+const LEVELS_ORDERED: Level[] = ["L4", "L3", "L2", "L1"];
+
+function PassRateChip({ rate }: { rate: number }) {
+  const pct = (rate * 100).toFixed(1) + "%";
+  if (rate >= 1.0) return <Chip label={pct} color="success" size="small" />;
+  if (rate >= 0.9) return <Chip label={pct} color="warning" size="small" />;
+  return <Chip label={pct} color="error" size="small" />;
+}
+
+function LevelChip({ level }: { level: Level }) {
+  const meta = LEVEL_META[level];
+  return (
+    <Chip
+      label={level}
+      size="small"
+      variant="outlined"
+      sx={{ borderColor: meta.color, color: meta.color }}
+    />
+  );
+}
+
+function timeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function ReadinessChip({
+  repo,
+  tenure,
+  l3SummaryMap,
+  l3SummaryMapDemotion,
+}: {
+  repo: string;
+  tenure: TenureInfo | null;
+  l3SummaryMap: Map<string, L3SummaryRow>;
+  l3SummaryMapDemotion: Map<string, L3SummaryRow>;
+}) {
+  const promotionRows = buildCriteriaRows(
+    l3SummaryMap.get(repo) ?? null,
+    tenure
+  );
+  const demotionRows = buildDemotionRows(
+    l3SummaryMapDemotion.get(repo) ?? null
+  );
+
+  return (
+    <Stack direction="row" spacing={0.5} justifyContent="center">
+      <L3SummaryChip
+        label="Promotion"
+        rows={promotionRows}
+        variant="promotion"
+      />
+      <L3SummaryChip label="Demotion" rows={demotionRows} variant="demotion" />
+    </Stack>
+  );
+}
+
+function CiHealthTable({
+  level,
+  repos,
+  metricsMap,
+  tenureMap,
+  l3SummaryMap,
+  l3SummaryMapDemotion,
+  activeDotColor = "success.main",
+  activeDotLabel = "Active",
+}: {
+  level: Level;
+  repos: AllowlistEntry[];
+  metricsMap: Map<string, CiMetricsRow>;
+  tenureMap: Map<string, TenureInfo | null>;
+  l3SummaryMap: Map<string, L3SummaryRow>;
+  l3SummaryMapDemotion: Map<string, L3SummaryRow>;
+  // Red for the Temporary Demotion section — every row there is already
+  // flagged at-risk, so the usual "active and reporting" green would read
+  // backwards. Rows with no data at all stay grey either way.
+  activeDotColor?: string;
+  // Travels with activeDotColor: a red dot tooltipped "Active" reads as a
+  // contradiction, so the caller recolouring the dot renames it too.
+  activeDotLabel?: string;
+}) {
+  return (
+    <TableContainer component={Paper} elevation={1}>
+      <Table size="small">
+        <TableHead>
+          <TableRow>
+            <TableCell sx={{ width: 28 }} />
+            <TableCell>
+              <strong>Backend Repository</strong>
+            </TableCell>
+            <TableCell align="center">
+              <strong>Level</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>Pass Rate</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>Success</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>Failures</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>Total</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>Avg Duration</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>Last Run</strong>
+            </TableCell>
+            <TableCell align="center">
+              <strong>L3 Readiness</strong>
+            </TableCell>
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {repos.map((entry) => {
+            const metrics = metricsMap.get(entry.repo);
+            const parts = entry.repo.split("/");
+            if (parts.length !== 2) return null;
+            const [org, repo] = parts;
+            const hasData = !!metrics;
+            return (
+              <TableRow
+                key={entry.repo}
+                hover
+                sx={{ cursor: hasData ? "pointer" : "default" }}
+              >
+                <TableCell align="center">
+                  <Box
+                    sx={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: "50%",
+                      bgcolor: hasData ? activeDotColor : "grey.400",
+                      display: "inline-block",
+                    }}
+                    title={hasData ? activeDotLabel : "No data"}
+                  />
+                </TableCell>
+                <TableCell>
+                  {hasData ? (
+                    <NextLink
+                      href={`/crcr/${org}/${repo}`}
+                      passHref
+                      legacyBehavior
+                    >
+                      <Link underline="hover">{entry.repo}</Link>
+                    </NextLink>
+                  ) : (
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      component="span"
+                    >
+                      {entry.repo}
+                    </Typography>
+                  )}
+                </TableCell>
+                <TableCell align="center">
+                  <LevelChip level={level} />
+                </TableCell>
+                <TableCell align="right">
+                  {metrics ? (
+                    <PassRateChip rate={metrics.pass_rate} />
+                  ) : (
+                    <Typography variant="body2" color="text.disabled">
+                      –
+                    </Typography>
+                  )}
+                </TableCell>
+                <TableCell align="right">{metrics?.successes ?? "–"}</TableCell>
+                <TableCell align="right">
+                  {metrics ? (
+                    <Typography
+                      variant="body2"
+                      component="span"
+                      sx={{
+                        color:
+                          metrics.failures > 0 ? "error.main" : "text.primary",
+                        fontWeight: metrics.failures > 0 ? 500 : 400,
+                      }}
+                    >
+                      {metrics.failures}
+                    </Typography>
+                  ) : (
+                    "–"
+                  )}
+                </TableCell>
+                <TableCell align="right">{metrics?.total ?? "–"}</TableCell>
+                <TableCell align="right">
+                  {metrics
+                    ? durationDisplay(Math.round(metrics.avg_duration_s))
+                    : "–"}
+                </TableCell>
+                <TableCell align="right">
+                  {metrics ? (
+                    <Typography variant="body2" color="text.secondary">
+                      {timeAgo(metrics.last_run)}
+                    </Typography>
+                  ) : (
+                    "–"
+                  )}
+                </TableCell>
+                <TableCell align="center">
+                  <ReadinessChip
+                    repo={entry.repo}
+                    tenure={tenureMap.get(entry.repo) ?? null}
+                    l3SummaryMap={l3SummaryMap}
+                    l3SummaryMapDemotion={l3SummaryMapDemotion}
+                  />
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </TableContainer>
+  );
+}
+
+function L1Section({ repos }: { repos: AllowlistEntry[] }) {
+  if (repos.length === 0) return null;
+  return (
+    <Paper elevation={1} sx={{ p: 2 }}>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+        {LEVEL_META.L1.description}
+      </Typography>
+      <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+        {repos.map((entry) => (
+          <Link
+            key={entry.repo}
+            href={`https://github.com/${entry.repo}`}
+            target="_blank"
+            rel="noopener"
+            underline="hover"
+            sx={{
+              fontSize: "0.85rem",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 0.5,
+            }}
+          >
+            <LevelChip level="L1" />
+            {entry.repo}
+          </Link>
+        ))}
+      </Box>
+    </Paper>
+  );
+}
+
+function NightlyTable({
+  nightlyData,
+  days,
+}: {
+  nightlyData: NightlyMetricsRow[];
+  days: number;
+}) {
+  return (
+    <TableContainer component={Paper} elevation={1}>
+      <Table size="small">
+        <TableHead>
+          <TableRow>
+            <TableCell sx={{ width: 28 }} />
+            <TableCell>
+              <strong>Repository</strong>
+            </TableCell>
+            <TableCell align="center">
+              <strong>Level</strong>
+            </TableCell>
+            <TableCell align="center">
+              <strong>Pass Rate</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>Success</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>Failures</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>Total</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>SHA</strong>
+            </TableCell>
+            <TableCell align="right">
+              <strong>Last Run</strong>
+            </TableCell>
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {nightlyData.map((row) => {
+            const parts = row.repo.split("/");
+            if (parts.length !== 2) return null;
+            const [org, repo] = parts;
+            const level = (row.downstream_repo_level || "L2") as Level;
+            return (
+              <TableRow key={row.repo} hover>
+                <TableCell align="center">
+                  <Box
+                    sx={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: "50%",
+                      bgcolor:
+                        row.pass_rate >= 1.0
+                          ? "success.main"
+                          : row.pass_rate >= 0.9
+                          ? "warning.main"
+                          : "error.main",
+                      display: "inline-block",
+                    }}
+                  />
+                </TableCell>
+                <TableCell>
+                  <NextLink
+                    href={`/crcr/${org}/${repo}?event=nightly&days=${days}`}
+                    passHref
+                    legacyBehavior
+                  >
+                    <Link underline="hover">{row.repo}</Link>
+                  </NextLink>
+                </TableCell>
+                <TableCell align="center">
+                  <LevelChip level={level} />
+                </TableCell>
+                <TableCell align="center">
+                  <PassRateChip rate={row.pass_rate} />
+                </TableCell>
+                <TableCell align="right">{row.successes}</TableCell>
+                <TableCell align="right">
+                  <Typography
+                    variant="body2"
+                    component="span"
+                    sx={{
+                      color: row.failures > 0 ? "error.main" : "text.primary",
+                      fontWeight: row.failures > 0 ? 500 : 400,
+                    }}
+                  >
+                    {row.failures}
+                  </Typography>
+                </TableCell>
+                <TableCell align="right">{row.total}</TableCell>
+                <TableCell align="right">
+                  {row.latest_sha ? (
+                    <Link
+                      href={`https://github.com/pytorch/pytorch/commit/${row.latest_sha}`}
+                      target="_blank"
+                      rel="noopener"
+                      sx={{ fontFamily: "monospace", fontSize: "0.8rem" }}
+                    >
+                      {row.latest_sha.slice(0, 7)}
+                    </Link>
+                  ) : (
+                    "–"
+                  )}
+                </TableCell>
+                <TableCell align="right">
+                  <Typography variant="body2" color="text.secondary">
+                    {timeAgo(row.last_run)}
+                  </Typography>
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </TableContainer>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string | number;
+  sub?: string;
+}) {
+  return (
+    <Paper
+      elevation={1}
+      sx={{ p: 2, minWidth: 160, flex: 1, textAlign: "center" }}
+    >
+      <Typography variant="caption" color="text.secondary">
+        {label}
+      </Typography>
+      <Typography variant="h5" sx={{ fontWeight: 600 }}>
+        {value}
+      </Typography>
+      {sub && (
+        <Typography variant="caption" color="text.secondary">
+          {sub}
+        </Typography>
+      )}
+    </Paper>
+  );
+}
+
+function CrcrTestHealthCard({
+  healthPrs,
+}: {
+  healthPrs: HealthPrRow[] | undefined;
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsUrl = detailsOpen
+    ? `/api/clickhouse/crcr_health_pr_job_details?parameters=${encodeURIComponent(
+        JSON.stringify({
+          window_minutes: String(CRCR_HEALTH_WINDOW_MINUTES),
+          stale_after_minutes: String(CRCR_HEALTH_STALE_AFTER_MINUTES),
+        })
+      )}`
+    : null;
+  const { data: healthJobDetails, error: healthJobDetailsError } = useSWR<
+    HealthPrDetailRow[]
+  >(detailsUrl, fetcherHandleError);
+  const healthRuns = useMemo(() => {
+    const runs = new Map<
+      number,
+      { jobs: RelayHealthJob[]; latestTime: number }
+    >();
+    for (const job of healthJobDetails ?? []) {
+      const current = runs.get(job.pr_number) ?? {
+        jobs: [],
+        latestTime: 0,
+      };
+      current.jobs.push({
+        jobName: job.job_name,
+        status: job.status,
+        conclusion: job.conclusion,
+        startedAt: job.started_at,
+        completedAt: job.completed_at,
+        workflowRunUrl: job.workflow_run_url,
+        checkRunId: job.check_run_id,
+        isOverdue: job.is_overdue === 1,
+      });
+      current.latestTime = Math.max(
+        current.latestTime,
+        new Date(job.started_at).getTime()
+      );
+      runs.set(job.pr_number, current);
+    }
+    return Array.from(runs.entries())
+      .sort(([, a], [, b]) => b.latestTime - a.latestTime)
+      .map(
+        ([prNumber, run]): RelayHealthRun => ({
+          label: `PR #${prNumber}`,
+          url: `https://github.com/pytorch/pytorch/pull/${prNumber}`,
+          jobs: run.jobs,
+        })
+      );
+  }, [healthJobDetails]);
+
+  if (!healthPrs || healthPrs.length === 0) return null;
+  const { pending, overdue, passedCount, state } =
+    summarizeCrcrHealth(healthPrs);
+  const borderColor = state === "degraded" ? "#ed6c02" : "#2e7d32";
+  const label = state === "degraded" ? "Degraded" : "Healthy";
+  const detail =
+    state === "degraded" && overdue > 0
+      ? `${overdue} job${overdue === 1 ? "" : "s"} overdue`
+      : pending > 0
+      ? `${pending} job${pending === 1 ? "" : "s"} pending`
+      : `${passedCount}/${healthPrs.length} probe PRs passed in the last ${CRCR_HEALTH_WINDOW_LABEL}`;
+  return (
+    <>
+      <ButtonBase
+        onClick={() => setDetailsOpen(true)}
+        aria-label="View CRCR pull request health details"
+        sx={{ flex: 1, minWidth: 160, textAlign: "initial", borderRadius: 1 }}
+      >
+        <Paper
+          elevation={2}
+          sx={{
+            p: 2,
+            flex: 1,
+            width: "100%",
+            textAlign: "center",
+            borderLeft: `4px solid ${borderColor}`,
+            color: "inherit",
+            "&:hover": { bgcolor: "action.hover" },
+          }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            CRCR Relay Health
+          </Typography>
+          <Typography variant="h5" sx={{ fontWeight: 600, color: borderColor }}>
+            {label}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {detail} · pytorch/crcr-test
+          </Typography>
+        </Paper>
+      </ButtonBase>
+      <RelayHealthDetailsDialog
+        open={detailsOpen}
+        onClose={() => setDetailsOpen(false)}
+        title="CRCR Relay Health — pull requests"
+        runs={healthRuns}
+        fullPageHref="/crcr/pytorch/crcr-test"
+        loading={detailsOpen && !healthJobDetails && !healthJobDetailsError}
+        error={!!healthJobDetailsError}
+      />
+    </>
+  );
+}
+
+const NIGHTLY_HEALTH_COUNT = 5;
+
+function isNightlyJobPassing(job: NightlyHealthJobRow): boolean {
+  return isHealthJobPassing({
+    jobName: job.job_name,
+    status: job.status,
+    conclusion: job.conclusion,
+    startedAt: job.started_at,
+    completedAt: job.completed_at,
+    workflowRunUrl: job.workflow_run_url,
+    checkRunId: job.check_run_id,
+  });
+}
+
+function CrcrNightlyHealthCard({
+  nightlyJobs,
+}: {
+  nightlyJobs: NightlyHealthJobRow[] | undefined;
+}) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  if (!nightlyJobs || nightlyJobs.length === 0) {
+    const staleColor = "#9e9e9e";
+    return (
+      <NextLink
+        href="/crcr/pytorch/crcr-test?event=nightly"
+        passHref
+        legacyBehavior
+      >
+        <Paper
+          component="a"
+          elevation={2}
+          sx={{
+            p: 2,
+            flex: 1,
+            minWidth: 160,
+            textAlign: "center",
+            borderLeft: `4px solid ${staleColor}`,
+            textDecoration: "none",
+            color: "inherit",
+            cursor: "pointer",
+            "&:hover": { bgcolor: "action.hover" },
+          }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            CRCR Relay Health - Nightly
+          </Typography>
+          <Typography variant="h5" sx={{ fontWeight: 600, color: staleColor }}>
+            No Data
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            no nightly results in last 14 days
+          </Typography>
+        </Paper>
+      </NextLink>
+    );
+  }
+
+  const shaMap = new Map<string, NightlyHealthJobRow[]>();
+  for (const job of nightlyJobs) {
+    if (!job.pytorch_head_sha) continue;
+    const jobs = shaMap.get(job.pytorch_head_sha) ?? [];
+    jobs.push(job);
+    shaMap.set(job.pytorch_head_sha, jobs);
+  }
+
+  const shasByTime = Array.from(shaMap.entries())
+    .map(([sha, jobs]) => ({
+      sha,
+      jobs,
+      latestTime: Math.max(
+        ...jobs.map((j) => new Date(j.started_at).getTime())
+      ),
+    }))
+    .sort((a, b) => b.latestTime - a.latestTime)
+    .slice(0, NIGHTLY_HEALTH_COUNT);
+
+  if (shasByTime.length === 0) {
+    const staleColor = "#9e9e9e";
+    return (
+      <NextLink
+        href="/crcr/pytorch/crcr-test?event=nightly"
+        passHref
+        legacyBehavior
+      >
+        <Paper
+          component="a"
+          elevation={2}
+          sx={{
+            p: 2,
+            flex: 1,
+            minWidth: 160,
+            textAlign: "center",
+            borderLeft: `4px solid ${staleColor}`,
+            textDecoration: "none",
+            color: "inherit",
+            cursor: "pointer",
+            "&:hover": { bgcolor: "action.hover" },
+          }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            CRCR Relay Health - Nightly
+          </Typography>
+          <Typography variant="h5" sx={{ fontWeight: 600, color: staleColor }}>
+            No Data
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            no nightly results in last 14 days
+          </Typography>
+        </Paper>
+      </NextLink>
+    );
+  }
+
+  const allPassed = shasByTime.every((entry) =>
+    entry.jobs.every(isNightlyJobPassing)
+  );
+  const passedCount = shasByTime.filter((entry) =>
+    entry.jobs.every(isNightlyJobPassing)
+  ).length;
+  const borderColor = allPassed ? "#2e7d32" : "#ed6c02";
+  const label = allPassed ? "Healthy" : "Degraded";
+  const healthRuns: RelayHealthRun[] = shasByTime.map(({ sha, jobs }) => ({
+    label: `SHA ${sha.slice(0, 7)}`,
+    url: `https://github.com/pytorch/pytorch/commit/${sha}`,
+    jobs: jobs.map((job) => ({
+      jobName: job.job_name,
+      status: job.status,
+      conclusion: job.conclusion,
+      startedAt: job.started_at,
+      completedAt: job.completed_at,
+      workflowRunUrl: job.workflow_run_url,
+      checkRunId: job.check_run_id,
+    })),
+  }));
+
+  return (
+    <>
+      <ButtonBase
+        onClick={() => setDetailsOpen(true)}
+        aria-label="View CRCR nightly health details"
+        sx={{ flex: 1, minWidth: 160, textAlign: "initial", borderRadius: 1 }}
+      >
+        <Paper
+          elevation={2}
+          sx={{
+            p: 2,
+            flex: 1,
+            width: "100%",
+            textAlign: "center",
+            borderLeft: `4px solid ${borderColor}`,
+            color: "inherit",
+            "&:hover": { bgcolor: "action.hover" },
+          }}
+        >
+          <Typography variant="caption" color="text.secondary">
+            CRCR Relay Health - Nightly
+          </Typography>
+          <Typography variant="h5" sx={{ fontWeight: 600, color: borderColor }}>
+            {label}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {passedCount}/{shasByTime.length} recent nightlies passed
+          </Typography>
+        </Paper>
+      </ButtonBase>
+      <RelayHealthDetailsDialog
+        open={detailsOpen}
+        onClose={() => setDetailsOpen(false)}
+        title="CRCR Relay Health — nightlies"
+        runs={healthRuns}
+        fullPageHref="/crcr/pytorch/crcr-test?event=nightly"
+      />
+    </>
+  );
+}
+
+export default function CrcrSummaryPage() {
+  const [days, setDays] = useState(7);
+  const [activeTab, setActiveTab] = useState<EventTab>("pr");
+
+  const overviewUrl = `/api/crcr/overview?days=${days}`;
+  const { data: overview, error: overviewError } = useSWR<CrcrOverviewResponse>(
+    overviewUrl,
+    fetcherHandleError,
+    { refreshInterval: 60_000 }
+  );
+  const nightlyOverviewUrl =
+    activeTab === "nightly"
+      ? `/api/crcr/overview?days=${days}&view=nightly`
+      : null;
+  const { data: nightlyOverview, error: nightlyOverviewError } =
+    useSWR<CrcrOverviewResponse>(nightlyOverviewUrl, fetcherHandleError, {
+      refreshInterval: 60_000,
+    });
+  const { data: allowlist, error: alError } = useSWR<AllowlistResponse>(
+    "/api/crcr/allowlist",
+    fetcherHandleError,
+    { refreshInterval: 5 * 60_000 }
+  );
+
+  const overviewData = useRetainedOverviewData(overviewUrl, overview);
+  const nightlyOverviewData = useRetainedOverviewData(
+    nightlyOverviewUrl,
+    nightlyOverview
+  );
+  const ciData = overviewData?.prSummary;
+  const nightlyData = nightlyOverviewData?.nightlySummary;
+  const healthPrs = overviewData?.prHealth;
+  const nightlyHealthJobs = overviewData?.nightlyHealth;
+  const overviewErrorMessage = Object.entries(overview?.errors ?? {})
+    .map(
+      ([section, message]) =>
+        `${OVERVIEW_SECTION_LABELS[section as CrcrOverviewSection]}: ${message}`
+    )
+    .join("; ");
+  const nightlyErrorMessage = Object.entries(nightlyOverview?.errors ?? {})
+    .map(
+      ([section, message]) =>
+        `${OVERVIEW_SECTION_LABELS[section as CrcrOverviewSection]}: ${message}`
+    )
+    .join("; ");
+
+  const visibleNightlyData = useMemo(
+    () => nightlyData?.filter((r) => r.repo !== CRCR_HEALTH_REPO) ?? [],
+    [nightlyData]
+  );
+  const nightlyRepoCount = nightlyOverview
+    ? visibleNightlyData.length
+    : undefined;
+
+  // L3 readiness uses fixed promotion/demotion windows, independent of the
+  // Time Range selector above. The overview endpoint returns each aggregate
+  // window in its serial query plan rather than fetching per table row.
+  const l3SummaryMap = useMemo(
+    () =>
+      new Map(
+        (overviewData?.promotionReadiness ?? []).map((row) => [row.repo, row])
+      ),
+    [overviewData?.promotionReadiness]
+  );
+  const l3SummaryMapDemotion = useMemo(
+    () =>
+      new Map(
+        (overviewData?.demotionReadiness ?? []).map((row) => [row.repo, row])
+      ),
+    [overviewData?.demotionReadiness]
+  );
+  const l3SummaryDemotionHasResult =
+    overviewData?.demotionReadiness !== undefined &&
+    overview?.errors.demotionReadiness === undefined;
+  const tenureMap = useMemo(
+    () =>
+      new Map(
+        (overviewData?.tenure ?? []).map((row) => [
+          row.repo,
+          tenureInfoFromL2Since(row.l2_since),
+        ])
+      ),
+    [overviewData?.tenure]
+  );
+
+  const metricsMap = useMemo(() => {
+    const map = new Map<string, CiMetricsRow>();
+    if (!ciData) return map;
+    for (const row of ciData) {
+      map.set(row.repo, row);
+    }
+    return map;
+  }, [ciData]);
+
+  // Merge: for L2-L4, combine allowlist repos with any ClickHouse-only repos
+  // (repos that report data but aren't yet in the allowlist)
+  const reposByLevel = useMemo(() => {
+    const result: Record<Level, AllowlistEntry[]> = {
+      L1: [],
+      L2: [],
+      L3: [],
+      L4: [],
+    };
+    if (!allowlist) return result;
+
+    const seen = new Set<string>();
+    for (const level of LEVELS_ORDERED) {
+      for (const entry of allowlist[level]) {
+        result[level].push(entry);
+        seen.add(entry.repo);
+      }
+    }
+
+    // Add ClickHouse-only repos (not in allowlist) under their reported level
+    if (ciData) {
+      for (const row of ciData) {
+        if (seen.has(row.repo)) continue;
+        const level = (row.downstream_repo_level || "L2") as Level;
+        if (level in result) {
+          result[level].push({
+            repo: row.repo,
+            oncalls: [],
+            events: [...DEFAULT_CRCR_EVENTS],
+          });
+          seen.add(row.repo);
+        }
+      }
+    }
+
+    // Sort each level by pass rate (worst first); repos with no metrics sort last
+    for (const level of LEVELS_ORDERED) {
+      result[level].sort(
+        (a, b) =>
+          (metricsMap.get(a.repo)?.pass_rate ?? 1) -
+          (metricsMap.get(b.repo)?.pass_rate ?? 1)
+      );
+    }
+
+    return result;
+  }, [allowlist, ciData, metricsMap]);
+
+  const pullRequestReposByLevel = useMemo(() => {
+    const result: Record<Level, AllowlistEntry[]> = {
+      L1: [],
+      L2: [],
+      L3: [],
+      L4: [],
+    };
+    for (const level of LEVELS_ORDERED) {
+      result[level] = filterCrcrEntriesByEvent(
+        reposByLevel[level],
+        "pull_request"
+      );
+    }
+    return result;
+  }, [reposByLevel]);
+
+  const pullRequestRepoCount = LEVELS_ORDERED.reduce(
+    (count, level) => count + pullRequestReposByLevel[level].length,
+    0
+  );
+  // L3 repos failing at least one demotion criterion, or reporting no jobs at
+  // all over the window (see lib/crcr/demotionStatus.ts).
+  // A repo on temporary demotion is shown once, in that section — not also
+  // in the regular L3 table below it.
+  const { activeL3Repos, pendingDemotionRepos } = useMemo(() => {
+    // Only a successful summary can say a repo had no jobs; before the first
+    // one arrives (loading, or the very first request failed), a missing row
+    // is unknown, not silence. A later failed refresh keeps the last good
+    // result rather than emptying the section.
+    const demotionMetrics = l3SummaryDemotionHasResult
+      ? l3SummaryMapDemotion
+      : null;
+    const onTemporaryDemotion = new Set(
+      buildDemotionStatuses(
+        pullRequestReposByLevel.L3.map((entry) => entry.repo),
+        demotionMetrics
+      )
+        .filter((s) => s.onTemporaryDemotion)
+        .map((s) => s.repo)
+    );
+    return {
+      activeL3Repos: pullRequestReposByLevel.L3.filter(
+        (entry) => !onTemporaryDemotion.has(entry.repo)
+      ),
+      pendingDemotionRepos: pullRequestReposByLevel.L3.filter((entry) =>
+        onTemporaryDemotion.has(entry.repo)
+      ),
+    };
+  }, [
+    pullRequestReposByLevel,
+    l3SummaryMapDemotion,
+    l3SummaryDemotionHasResult,
+  ]);
+
+  const stats = useMemo(() => {
+    if (!ciData || ciData.length === 0) return null;
+    const ct = metricsMap.get(CRCR_HEALTH_REPO);
+
+    const totalRepos = allowlist
+      ? Object.values(allowlist).reduce(
+          (s, arr) =>
+            s +
+            arr.filter((e: AllowlistEntry) => e.repo !== CRCR_HEALTH_REPO)
+              .length,
+          0
+        )
+      : ciData.filter((r) => r.repo !== CRCR_HEALTH_REPO).length;
+    const levelBreakdown = (["L4", "L3", "L2", "L1"] as Level[])
+      .map((l) => {
+        const count =
+          allowlist?.[l]?.filter(
+            (e: AllowlistEntry) => e.repo !== CRCR_HEALTH_REPO
+          ).length ?? 0;
+        return count > 0 ? `${count} ${l}` : null;
+      })
+      .filter(Boolean)
+      .join(" \u00b7 ");
+
+    return {
+      totalRuns: ct?.total ?? 0,
+      runsSub: `last ${days} days \u00b7 pytorch/crcr-test`,
+      failures: ct?.failures ?? 0,
+      timedOut: ct?.timed_out ?? 0,
+      totalRepos,
+      reposSub: levelBreakdown || undefined,
+    };
+  }, [ciData, metricsMap, allowlist, days]);
+
+  const isLoading = !overview && !overviewError && !allowlist && !alError;
+  const nightlyIsLoading =
+    activeTab === "nightly" && !nightlyOverview && !nightlyOverviewError;
+  const nightlyHasError =
+    activeTab === "nightly" &&
+    (!!nightlyOverviewError || !!nightlyErrorMessage);
+  const hasError =
+    !!overviewError || !!alError || !!overviewErrorMessage || nightlyHasError;
+
+  return (
+    <>
+      <Head>
+        <title>Cross-Repository CI Summary | PyTorch HUD</title>
+      </Head>
+      <Stack spacing={3} sx={{ p: 3, maxWidth: 1400, mx: "auto" }}>
+        <Box display="flex" justifyContent="space-between" alignItems="center">
+          <Typography variant="h4">Cross-Repository CI Summary</Typography>
+          <FormControl size="small" sx={{ minWidth: 140 }}>
+            <InputLabel>Time Range</InputLabel>
+            <Select
+              value={days}
+              label="Time Range"
+              onChange={(e: SelectChangeEvent<number>) =>
+                setDays(Number(e.target.value))
+              }
+            >
+              {CRCR_TIME_RANGES.map(({ days: rangeDays, label }) => (
+                <MenuItem key={rangeDays} value={rangeDays}>
+                  {label}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </Box>
+
+        <Typography variant="body2" color="text.secondary">
+          Relay health metrics from{" "}
+          <Link
+            href="https://github.com/pytorch/crcr-test"
+            target="_blank"
+            rel="noreferrer"
+          >
+            pytorch/crcr-test
+          </Link>{" "}
+          probes. To know more, check the HUD dashboard —{" "}
+          <NextLink href="/crcr/pytorch/crcr-test" passHref legacyBehavior>
+            <Link underline="hover">Pull Requests</Link>
+          </NextLink>{" "}
+          and{" "}
+          <NextLink
+            href="/crcr/pytorch/crcr-test?event=nightly"
+            passHref
+            legacyBehavior
+          >
+            <Link underline="hover">Nightly</Link>
+          </NextLink>{" "}
+          — or view{" "}
+          <NextLink href="/crcr/metrics" passHref legacyBehavior>
+            <Link underline="hover">success-rate trends</Link>
+          </NextLink>
+          .
+        </Typography>
+
+        {hasError && (
+          <Typography color="error">
+            {overviewError?.message ||
+              alError?.message ||
+              overviewErrorMessage ||
+              nightlyOverviewError?.message ||
+              nightlyErrorMessage ||
+              "Failed to load data"}
+          </Typography>
+        )}
+
+        {isLoading && <Skeleton variant="rectangular" height={120} />}
+
+        {stats && (
+          <Stack spacing={2}>
+            <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+              <CrcrTestHealthCard healthPrs={healthPrs ?? undefined} />
+              <CrcrNightlyHealthCard
+                nightlyJobs={nightlyHealthJobs ?? undefined}
+              />
+              <StatCard
+                label="Total Probe Runs"
+                value={stats.totalRuns}
+                sub={stats.runsSub}
+              />
+            </Box>
+            <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+              <StatCard
+                label="Probe Failures"
+                value={stats.failures}
+                sub="pytorch/crcr-test failures"
+              />
+              <StatCard
+                label="Registered Backends"
+                value={stats.totalRepos}
+                sub={stats.reposSub}
+              />
+              <StatCard
+                label="Timed Out"
+                value={stats.timedOut}
+                sub="probes that failed to report completion"
+              />
+            </Box>
+          </Stack>
+        )}
+
+        <Tabs
+          value={activeTab}
+          onChange={(_, v: EventTab) => setActiveTab(v)}
+          sx={{ borderBottom: 1, borderColor: "divider" }}
+        >
+          <Tab
+            label={
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                Pull Requests
+                <Chip
+                  label={pullRequestRepoCount || "–"}
+                  size="small"
+                  variant="outlined"
+                  sx={{ height: 20, fontSize: "0.75rem" }}
+                />
+              </Box>
+            }
+            value="pr"
+          />
+          <Tab
+            label={
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                Nightly
+                <Chip
+                  label={nightlyRepoCount ?? "–"}
+                  size="small"
+                  variant="outlined"
+                  sx={{ height: 20, fontSize: "0.75rem" }}
+                />
+              </Box>
+            }
+            value="nightly"
+          />
+        </Tabs>
+
+        {activeTab === "pr" && (
+          <>
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+              Registered downstream repos sorted by pass rate (worst first).
+              Click a row to see the per-downstream repo dashboard.
+            </Typography>
+
+            {LEVELS_ORDERED.map((level) => {
+              // Repos on temporary demotion are pulled out of the regular L3
+              // table below — shown once, in the demotion section only.
+              const repos =
+                level === "L3" ? activeL3Repos : pullRequestReposByLevel[level];
+              const showDemotionSection =
+                level === "L3" && pendingDemotionRepos.length > 0;
+              if (repos.length === 0 && !showDemotionSection) return null;
+              const meta = LEVEL_META[level];
+
+              return (
+                <Fragment key={level}>
+                  {/* The level heading renders even when every L3 repo is on
+                      temporary demotion. */}
+                  <Box>
+                    <Divider sx={{ mb: 2 }}>
+                      <Typography variant="h6">{meta.label}</Typography>
+                    </Divider>
+                    {repos.length > 0 &&
+                      (level === "L1" ? (
+                        <L1Section repos={repos} />
+                      ) : (
+                        <CiHealthTable
+                          level={level}
+                          repos={repos}
+                          metricsMap={metricsMap}
+                          tenureMap={tenureMap}
+                          l3SummaryMap={l3SummaryMap}
+                          l3SummaryMapDemotion={l3SummaryMapDemotion}
+                        />
+                      ))}
+                  </Box>
+                  {showDemotionSection && (
+                    <Box>
+                      <Typography
+                        variant="body2"
+                        color="text.secondary"
+                        sx={{ mb: 1 }}
+                      >
+                        L3 backends meeting any of the demotion criteria, or
+                        reporting no jobs at all, over the last{" "}
+                        {L3_DEMOTION_WINDOW_DAYS} days.
+                      </Typography>
+                      <CiHealthTable
+                        level="L3"
+                        repos={pendingDemotionRepos}
+                        metricsMap={metricsMap}
+                        tenureMap={tenureMap}
+                        l3SummaryMap={l3SummaryMap}
+                        l3SummaryMapDemotion={l3SummaryMapDemotion}
+                        activeDotColor="error.main"
+                        activeDotLabel="On temporary demotion"
+                      />
+                    </Box>
+                  )}
+                </Fragment>
+              );
+            })}
+
+            {!isLoading &&
+              LEVELS_ORDERED.every(
+                (level) => pullRequestReposByLevel[level].length === 0
+              ) && (
+                <Typography
+                  color="text.secondary"
+                  sx={{ py: 4, textAlign: "center" }}
+                >
+                  No CRCR backends registered. Add repos to{" "}
+                  <Link
+                    href="https://github.com/pytorch/pytorch/blob/main/.github/allowlist.yml"
+                    target="_blank"
+                  >
+                    pytorch/pytorch/.github/allowlist.yml
+                  </Link>{" "}
+                  to get started.
+                </Typography>
+              )}
+          </>
+        )}
+
+        {activeTab === "nightly" && (
+          <>
+            <Paper
+              elevation={0}
+              sx={{
+                mt: 1,
+                p: 2,
+                bgcolor: "action.hover",
+                borderLeft: "3px solid",
+                borderColor: "info.main",
+              }}
+            >
+              <Typography variant="body2">
+                Nightly CI runs triggered daily from the{" "}
+                <code>pytorch/pytorch</code> nightly branch HEAD. Results are
+                reported via the CRCR callback pipeline.
+              </Typography>
+            </Paper>
+
+            {nightlyIsLoading ? (
+              <Skeleton variant="rectangular" height={240} sx={{ mt: 2 }} />
+            ) : visibleNightlyData.length > 0 ? (
+              <>
+                <Typography variant="h6" sx={{ mt: 2 }}>
+                  Nightly CI Runs — Last {days} Days
+                </Typography>
+                <NightlyTable nightlyData={visibleNightlyData} days={days} />
+              </>
+            ) : !nightlyHasError ? (
+              <Paper
+                elevation={0}
+                sx={{
+                  mt: 2,
+                  p: 3,
+                  textAlign: "center",
+                  border: "1px dashed",
+                  borderColor: "divider",
+                }}
+              >
+                <Typography variant="body2" color="text.secondary">
+                  No nightly CI results reported yet. Repos will appear here
+                  once their nightly workflows are set up and report back via
+                  the callback action.
+                </Typography>
+              </Paper>
+            ) : null}
+          </>
+        )}
+      </Stack>
+    </>
+  );
+}

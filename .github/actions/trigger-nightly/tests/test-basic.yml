@@ -1,0 +1,49 @@
+name: Test basic nightly trigger
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          repository: actions/checkout
+          ref: main
+          path: nightly-target
+      - name: Assert checkout happened and nightly step ran
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ ! -f "$GITHUB_WORKSPACE/nightly-target/action.yml" ]; then
+            echo "FAIL: repository was not checked out into nightly-target"
+            exit 1
+          fi
+          REMOTE="$(git -C "$GITHUB_WORKSPACE/nightly-target" config --get remote.origin.url)"
+          echo "remote: $REMOTE"
+          case "$REMOTE" in
+            *actions/checkout*) ;;
+            *) echo "FAIL: unexpected remote '$REMOTE'"; exit 1 ;;
+          esac
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: action succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            # Checkout succeeded; the nightly fetch/push cannot succeed against a repo
+            # without a nightly branch / without push permission. Verify the commit
+            # step started by checking the git identity it configures.
+            EMAIL="$(git config --global user.email || true)"
+            NAME="$(git config --global user.name || true)"
+            echo "email: $EMAIL name: $NAME"
+            if [ "$EMAIL" != "pytorchbot@pytorch.com" ] || [ "$NAME" != "pytorchbot" ]; then
+              echo "FAIL: nightly commit step did not configure git identity"
+              exit 1
+            fi
+            echo "PASS: action checked out and failed gracefully at fetch/push"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

@@ -1,0 +1,56 @@
+name: Test pip requirements file installed (simulated macOS)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up macOS simulation (fake brew + python)
+        run: |
+          set -e
+          SIM="$RUNNER_TEMP/macsim"
+          rm -rf "$SIM"
+          mkdir -p "$SIM/fakebin" "$SIM/prefix/bin"
+          LOG="$SIM/calls.log"
+          : > "$LOG"
+          cat > "$SIM/fakebin/brew" <<EOF
+          #!/bin/sh
+          echo "brew \$*" >> "$LOG"
+          if [ "\$1" = "--prefix" ]; then echo "$SIM/prefix"; fi
+          exit 0
+          EOF
+          cat > "$SIM/venv-python" <<EOF
+          #!/bin/sh
+          echo "venvpython \$*" >> "$LOG"
+          exit 0
+          EOF
+          cat > "$SIM/prefix/bin/python3.12" <<EOF
+          #!/bin/sh
+          echo "python3.12 \$*" >> "$LOG"
+          if [ "\$1" = "-m" ] && [ "\$2" = "venv" ]; then
+            mkdir -p "\$3/bin"
+            cp "$SIM/venv-python" "\$3/bin/python"
+            chmod +x "\$3/bin/python"
+          fi
+          exit 0
+          EOF
+          chmod +x "$SIM/fakebin/brew" "$SIM/venv-python" "$SIM/prefix/bin/python3.12"
+          printf 'requests==2.31.0\n' > "$SIM/requirements.txt"
+          echo "$SIM/fakebin" >> "$GITHUB_PATH"
+          echo "SIM=$SIM" >> "$GITHUB_ENV"
+          echo "REQ_FILE=$SIM/requirements.txt" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/tests/fixtures/darwin-preload.js
+        with:
+          python-version: "3.12"
+          pip-requirements-file: ${{ env.REQ_FILE }}
+      - name: Assert requirements installed via venv python
+        run: |
+          echo "VENV_PATH: ${VENV_PATH:-<unset>}"
+          echo "--- calls ---"; cat "$SIM/calls.log"
+          [ -n "${VENV_PATH:-}" ] || { echo "FAIL: VENV_PATH not set"; exit 1; }
+          grep -qx "venvpython -m pip install -r $REQ_FILE" "$SIM/calls.log" || { echo "FAIL: pip install -r not run with venv python"; exit 1; }
+          echo "PASS"

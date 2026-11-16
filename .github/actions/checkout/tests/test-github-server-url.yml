@@ -1,0 +1,41 @@
+name: Test explicit github-server-url
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          path: server-url-target
+          github-server-url: https://github.com
+      - name: Assert files checked out
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/server-url-target/action.yml" ]; then
+            echo "FAIL: action.yml not found"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert origin uses the given server url
+        run: |
+          URL="$(git -C "$GITHUB_WORKSPACE/server-url-target" remote get-url origin)"
+          echo "origin: $URL"
+          case "$URL" in
+            https://github.com/actions/checkout*) echo "PASS" ;;
+            *) echo "FAIL: unexpected origin url"; exit 1 ;;
+          esac
+      - name: Assert commit output
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          echo "commit: $COMMIT"
+          HEAD_SHA="$(git -C "$GITHUB_WORKSPACE/server-url-target" rev-parse HEAD)"
+          if [ "$COMMIT" != "$HEAD_SHA" ]; then
+            echo "FAIL: commit output does not match HEAD ($HEAD_SHA)"
+            exit 1
+          fi
+          echo "PASS"

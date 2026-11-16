@@ -1,0 +1,31 @@
+name: Test repository input sets working directory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare build env file
+        run: |
+          printf 'export CONDA_RUN=""\n' > "$RUNNER_TEMP/build_env.sh"
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/build_env.sh" >> "$GITHUB_ENV"
+          echo "MARKER_FILE=$RUNNER_TEMP/marker-repo.txt" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/marker-repo.txt"
+      - id: action
+        uses: .
+        with:
+          repository: tests/fixtures
+          script: write-marker.sh
+      - name: Assert script ran inside the repository directory
+        run: |
+          cat "$MARKER_FILE" || true
+          if ! grep -q "script ran" "$MARKER_FILE"; then
+            echo "FAIL: script did not run"
+            exit 1
+          fi
+          if ! grep -qE "^PWD=.*/tests/fixtures$" "$MARKER_FILE"; then
+            echo "FAIL: script did not run in tests/fixtures"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,57 @@
+name: Test S3 upload failure is best-effort
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install failing fake aws CLI and minimal metrics
+        run: |
+          mkdir -p /tmp/fake-aws-bin /tmp/aws-capture
+          rm -f /tmp/aws-capture/*
+          cat > /tmp/fake-aws-bin/aws <<'EOF'
+          #!/bin/bash
+          echo "$*" > /tmp/aws-capture/args
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-capture/payload.json
+          fi
+          echo "upload failed: access denied" >&2
+          exit 1
+          EOF
+          chmod +x /tmp/fake-aws-bin/aws
+          echo "/tmp/fake-aws-bin" >> "$GITHUB_PATH"
+          echo '[{"type": "result", "duration_ms": "oops"}]' > "$RUNNER_TEMP/minimal.json"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/minimal.json
+      - name: Assert step succeeded, default bucket used, missing fields zeroed
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success despite upload failure"
+            exit 1
+          fi
+          ARGS="$(cat /tmp/aws-capture/args 2>/dev/null)"
+          echo "args: $ARGS"
+          if ! echo "$ARGS" | grep -q 's3://ossci-raw-job-status/claude_code_usage/'; then
+            echo "FAIL: default bucket/prefix not used"
+            exit 1
+          fi
+          P=/tmp/aws-capture/payload.json
+          cat "$P"
+          for f in duration_ms num_turns total_cost_usd input_tokens output_tokens cache_read_input_tokens cache_creation_input_tokens; do
+            v="$(jq -r ".$f" "$P")"
+            if [ "$v" != "0" ]; then
+              echo "FAIL: expected $f = 0, got $v"
+              exit 1
+            fi
+          done
+          if [ "$(jq -r '.model' "$P")" != "" ]; then
+            echo "FAIL: expected empty model"
+            exit 1
+          fi
+          echo "PASS"

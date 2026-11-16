@@ -1,0 +1,53 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert conda env exported
+        shell: bash
+        run: |
+          echo "CONDA_ENV=$CONDA_ENV"
+          echo "CONDA_PREFIX=$CONDA_PREFIX"
+          echo "CONDA_RUN=$CONDA_RUN"
+          echo "CONDA_INSTALL=$CONDA_INSTALL"
+          echo "CONDA_EXE=$CONDA_EXE"
+          for v in CONDA_ENV CONDA_PREFIX CONDA_RUN CONDA_INSTALL CONDA_EXE; do
+            if [ -z "${!v}" ]; then echo "FAIL: $v not set"; exit 1; fi
+          done
+          if [ "$CONDA_PREFIX" != "${RUNNER_TEMP}/conda_environment_${GITHUB_RUN_ID}" ]; then
+            echo "FAIL: unexpected CONDA_PREFIX"; exit 1
+          fi
+          if [ ! -d "$CONDA_PREFIX" ]; then echo "FAIL: prefix dir missing"; exit 1; fi
+          if [ ! -x "$CONDA_EXE" ]; then echo "FAIL: conda exe missing"; exit 1; fi
+          echo "PASS"
+      - name: Assert python version and default packages
+        shell: bash
+        run: |
+          OUT="$($CONDA_RUN python --version 2>&1)"
+          echo "python: $OUT"
+          case "$OUT" in
+            *"Python 3.9"*) ;;
+            *) echo "FAIL: expected Python 3.9"; exit 1 ;;
+          esac
+          CM="$($CONDA_RUN cmake --version 2>&1 | head -1)"
+          echo "cmake: $CM"
+          case "$CM" in
+            *"3.22"*) ;;
+            *) echo "FAIL: expected cmake 3.22"; exit 1 ;;
+          esac
+          $CONDA_RUN ninja --version || { echo "FAIL: ninja missing"; exit 1; }
+          echo "PASS"
+      - name: Assert channel priority reset
+        shell: bash
+        run: |
+          OUT="$(conda config --show channel_priority)"
+          echo "$OUT"
+          if ! echo "$OUT" | grep -q "disabled\|false"; then
+            echo "FAIL: channel_priority not disabled"; exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,35 @@
+name: Test linux target (no quotes)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # The action calls test-infra/.github/scripts/export_matrix_variables.py
+      # relative to the workspace, as callers check out pytorch/test-infra there.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          path: test-infra
+          fetch-depth: 1
+      - name: Clean previous output
+        run: rm -f "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}" "${RUNNER_TEMP}/matrix_to_export.json"
+      - id: action
+        uses: .
+        with:
+          binary-matrix: '{"python_version": "3.10", "gpu_arch_type": "cpu"}'
+          target-os: linux
+      - name: Assert exported variables
+        run: |
+          F="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          if [ ! -f "$F" ]; then echo "FAIL: $F not created"; exit 1; fi
+          echo "--- contents ---"; cat "$F"
+          if [ ! -f "${RUNNER_TEMP}/matrix_to_export.json" ]; then echo "FAIL: matrix json not written"; exit 1; fi
+          grep -q '3.10' "${RUNNER_TEMP}/matrix_to_export.json" || { echo "FAIL: matrix json content wrong"; exit 1; }
+          grep -qi 'python_version' "$F" || { echo "FAIL: python_version not exported"; exit 1; }
+          grep -qi 'gpu_arch_type' "$F" || { echo "FAIL: gpu_arch_type not exported"; exit 1; }
+          grep -q '3\.10' "$F" || { echo "FAIL: value 3.10 missing"; exit 1; }
+          grep -q 'cpu' "$F" || { echo "FAIL: value cpu missing"; exit 1; }
+          if grep -q '"3\.10"' "$F"; then echo "FAIL: linux values should not be quoted"; exit 1; fi
+          echo "PASS"

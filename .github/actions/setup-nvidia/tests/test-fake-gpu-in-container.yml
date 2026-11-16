@@ -1,0 +1,53 @@
+name: Test GPU detected via nvidia-smi inside container runner
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake nvidia-smi and container marker
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/nvidia-smi" <<'EOF'
+          #!/bin/sh
+          if [ "$1" = "-L" ]; then
+            echo "GPU 0: NVIDIA A10G (UUID: GPU-00000000-1111-2222-3333-444444444444)"
+            exit 0
+          fi
+          echo "fake nvidia-smi $*"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/nvidia-smi"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          if [ "$(id -u)" = "0" ]; then touch /.incontainer; else sudo touch /.incontainer; fi
+      - id: action
+        uses: .
+        with:
+          driver-version: '570.133.20'
+      - name: Assert GPU detected and flags exported
+        env:
+          HAS_NVIDIA: ${{ steps.action.outputs.has-nvidia }}
+          IN_CONTAINER: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "has-nvidia: $HAS_NVIDIA"
+          echo "in-container-runner: $IN_CONTAINER"
+          echo "HAS_NVIDIA_GPU: ${HAS_NVIDIA_GPU:-<unset>}"
+          echo "GPU_FLAG: ${GPU_FLAG:-<unset>}"
+          if [ "$HAS_NVIDIA" != "true" ]; then
+            echo "FAIL: expected has-nvidia=true"
+            exit 1
+          fi
+          if [ "$IN_CONTAINER" != "true" ]; then
+            echo "FAIL: expected in-container-runner=true"
+            exit 1
+          fi
+          if [ "${HAS_NVIDIA_GPU:-}" != "true" ]; then
+            echo "FAIL: expected HAS_NVIDIA_GPU=true"
+            exit 1
+          fi
+          if [ "${GPU_FLAG:-}" != "--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all" ]; then
+            echo "FAIL: unexpected GPU_FLAG"
+            exit 1
+          fi
+          echo "PASS"

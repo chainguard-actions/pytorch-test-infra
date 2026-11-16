@@ -1,0 +1,133 @@
+import { createAppAuth } from "@octokit/auth-app";
+import { App, Octokit } from "octokit";
+import { CommitData } from "./types";
+
+// Retrieve an Octokit instance authenticated as PyTorchBot's installation on
+// the given repo.
+export async function getOctokit(
+  owner: string,
+  repo: string
+): Promise<Octokit> {
+  return getAppOctokit(
+    owner,
+    repo,
+    process.env.APP_ID!,
+    process.env.PRIVATE_KEY!
+  );
+}
+
+// Authenticated as the OSDC Migration Tracker app: read-only, and installed
+// only on the repos that page tracks. No PyTorchBot fallback - that key is
+// write-scoped and shares Dr. CI's rate limit.
+export async function getOsdcMigrationOctokit(
+  owner: string,
+  repo: string
+): Promise<Octokit> {
+  const appId = process.env.OSDC_MIGRATION_TRACKER_APP_ID;
+  const privateKey = process.env.OSDC_MIGRATION_TRACKER_PRIVATE_KEY;
+  if (!appId || !privateKey) {
+    throw new Error("OSDC Migration Tracker credentials are not configured");
+  }
+  return getAppOctokit(owner, repo, appId, privateKey);
+}
+
+// Read-only app with its own rate limit, shared with the pre-review app rollout
+// in #9272. Low-volume webhook callers may fall back while it is unconfigured;
+// the periodic sweep must not fall back to PyTorchBot.
+export async function getPreReviewOctokit(
+  owner: string,
+  repo: string
+): Promise<Octokit | null> {
+  const appId = process.env.PRE_REVIEW_APP_ID;
+  const privateKey = process.env.PRE_REVIEW_PRIVATE_KEY;
+  if (!appId || !privateKey) {
+    return null;
+  }
+  return getAppOctokit(owner, repo, appId, privateKey);
+}
+
+async function getAppOctokit(
+  owner: string,
+  repo: string,
+  appId: string,
+  base64PrivateKey: string
+): Promise<Octokit> {
+  const privateKey = Buffer.from(base64PrivateKey, "base64").toString();
+
+  const app = new App({ appId, privateKey });
+
+  let installation;
+  try {
+    installation = await app.octokit.request(
+      "GET /repos/{owner}/{repo}/installation",
+      { owner, repo }
+    );
+  } catch (e) {
+    console.error(e);
+    throw new Error(
+      `Failed to get installation for repo ${owner}/${repo}. Is app ${appId} installed on this repo?`
+    );
+  }
+
+  return new Octokit({
+    authStrategy: createAppAuth,
+    auth: {
+      appId,
+      privateKey,
+      installationId: installation.data.id,
+    },
+  });
+}
+
+export async function getOctokitWithUserToken(token: string): Promise<Octokit> {
+  return new Octokit({
+    auth: token,
+  });
+}
+
+const PR_REGEX = /Pull Request resolved: .*?(\d+)/;
+// The trailer above is a ghstack artifact. A squash merge leaves nothing behind
+// but the number GitHub appends to the subject line, so both have to be read or
+// every squash-merged commit arrives with no PR attached at all.
+const PR_TITLE_SUFFIX_REGEX = /\(#(\d+)\)$/;
+const PHAB_REGEX = /Differential Revision: (D.*)/;
+const EXPORTED_PHAB_REGEX = /Differential Revision: \[(.*)\]/;
+
+// Turns a JSON response from octokit into our CommitData type.
+export function commitDataFromResponse(data: any): CommitData {
+  const message = data.commit.message;
+  const title = message.split("\n")[0];
+  // The trailer wins: mergebot writes it deliberately, where the suffix is
+  // whatever happens to be left in the subject line.
+  const prMatch =
+    message.match(PR_REGEX) ?? title.trim().match(PR_TITLE_SUFFIX_REGEX);
+  let prNum = null;
+  if (prMatch) {
+    prNum = parseInt(prMatch[1]);
+  }
+
+  const phabMatch = message.match(PHAB_REGEX);
+  let diffNum = null;
+  if (phabMatch) {
+    diffNum = phabMatch[1];
+  }
+
+  if (diffNum === null) {
+    const exportedPhabMatch = message.match(EXPORTED_PHAB_REGEX);
+    if (exportedPhabMatch) {
+      diffNum = exportedPhabMatch[1];
+    }
+  }
+
+  return {
+    author: data.author?.login ?? data.commit.author.name,
+    authorUrl: data.author?.html_url ?? null,
+    time: data.commit.committer!.date as string,
+    sha: data.sha,
+    commitUrl: data.html_url,
+    commitTitle: title,
+    commitMessageBody: data.commit.message,
+    prNum,
+    diffNum,
+  };
+}

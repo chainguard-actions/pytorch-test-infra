@@ -1,0 +1,25 @@
+name: Test always-rebuild with custom registry disabled
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          docker-image-name: pytorch-linux-focal-linter
+          use-custom-docker-registry: "false"
+          always-rebuild: "true"
+          docker-build-dir: does-not-exist
+      - name: Assert docker-image passes through unchanged (no build attempted)
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "pytorch-linux-focal-linter" ]; then
+            echo "FAIL: expected 'pytorch-linux-focal-linter'"
+            exit 1
+          fi
+          echo "PASS"

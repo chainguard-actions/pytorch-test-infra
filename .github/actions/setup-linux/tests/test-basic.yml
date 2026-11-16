@@ -1,0 +1,94 @@
+name: Test basic (non-container runner)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock tools (curl, aws, docker, sudo, systemctl, lspci)
+        run: |
+          set -eu
+          rm -f /.inarc /.incontainer 2>/dev/null || true
+          M=/tmp/mockbin
+          rm -rf "$M"; mkdir -p "$M"
+          rm -f /tmp/mock-docker.log /tmp/mock-aws.log
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          cat > "$M/curl" <<EOF
+          #!/bin/bash
+          case "\$*" in
+            *169.254.169.254/latest/api/token*) echo "fake-token"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/*)
+              for a in "\$@"; do last="\$a"; done
+              echo "fake-\${last##*/}"; exit 0 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+          cat > "$M/aws" <<'EOF'
+          #!/bin/bash
+          echo "aws $*" >> /tmp/mock-aws.log
+          case "$*" in
+            "sts get-caller-identity"*)
+              printf '{\n    "UserId": "AIDFAKE",\n    "Account": "123456789012",\n    "Arn": "arn:aws:iam::123456789012:user/fake"\n}\n' ;;
+            "ecr get-login-password"*) echo "fake-ecr-password" ;;
+          esac
+          exit 0
+          EOF
+          cat > "$M/docker" <<'EOF'
+          #!/bin/bash
+          if [[ "$*" == *"--password-stdin"* ]]; then
+            pw="$(cat)"
+            echo "docker $* PASSWORD=$pw" >> /tmp/mock-docker.log
+            echo "Login Succeeded"
+            exit 0
+          fi
+          echo "docker $*" >> /tmp/mock-docker.log
+          exit 0
+          EOF
+          printf '#!/bin/bash\nexec "$@"\n' > "$M/sudo"
+          printf '#!/bin/bash\necho "systemctl $*" >> /tmp/mock-systemctl.log\nexit 0\n' > "$M/systemctl"
+          printf '#!/bin/bash\necho "00:00.0 Host bridge: Fake Corp"\nexit 0\n' > "$M/lspci"
+          chmod +x "$M"/*
+          echo "$M" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert runner directories exported and created
+        run: |
+          for v in RUNNER_ARTIFACT_DIR RUNNER_TEST_RESULTS_DIR RUNNER_DOCS_DIR; do
+            val="${!v:-}"
+            echo "$v=$val"
+            if [ -z "$val" ]; then echo "FAIL: $v not exported"; exit 1; fi
+            if [ ! -d "$val" ]; then echo "FAIL: $val does not exist"; exit 1; fi
+          done
+          [ "$RUNNER_ARTIFACT_DIR" = "${RUNNER_TEMP}/artifacts" ] || { echo "FAIL: artifact dir"; exit 1; }
+          [ "$RUNNER_TEST_RESULTS_DIR" = "${RUNNER_TEMP}/test-results" ] || { echo "FAIL: test-results dir"; exit 1; }
+          [ "$RUNNER_DOCS_DIR" = "${RUNNER_TEMP}/docs" ] || { echo "FAIL: docs dir"; exit 1; }
+          echo "PASS"
+      - name: Assert github env file preserved
+        run: |
+          f="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          echo "file: $f"
+          [ -f "$f" ] || { echo "FAIL: $f missing"; exit 1; }
+          cat "$f" | cut -d= -f1
+          grep -q '^GITHUB_' "$f" || { echo "FAIL: no GITHUB_ vars"; exit 1; }
+          grep -q '^CI' "$f" || { echo "FAIL: no CI vars"; exit 1; }
+          grep -q '^RUNNER' "$f" || { echo "FAIL: no RUNNER vars"; exit 1; }
+          echo "PASS"
+      - name: Assert ECR login and docker cleanup
+        run: |
+          echo "--- docker calls ---"; cat /tmp/mock-docker.log || true
+          echo "--- aws calls ---"; cat /tmp/mock-aws.log || true
+          grep -q 'login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com PASSWORD=fake-ecr-password' /tmp/mock-docker.log \
+            || { echo "FAIL: ECR docker login not performed correctly"; exit 1; }
+          grep -q 'ecr get-login-password --region us-east-1' /tmp/mock-aws.log \
+            || { echo "FAIL: aws ecr get-login-password not called"; exit 1; }
+          grep -q 'docker system prune -af' /tmp/mock-docker.log \
+            || { echo "FAIL: docker system prune not run on non-container runner"; exit 1; }
+          echo "PASS"
+      - name: Assert GPU_FLAG not set (no NVIDIA GPU)
+        run: |
+          echo "GPU_FLAG='${GPU_FLAG:-}'"
+          if [ -n "${GPU_FLAG:-}" ]; then echo "FAIL: GPU_FLAG unexpectedly set"; exit 1; fi
+          echo "PASS"

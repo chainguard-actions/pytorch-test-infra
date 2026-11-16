@@ -1,0 +1,43 @@
+name: Test basic teardown (wait for ssh, then docker cleanup)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake who and docker (avoid stopping real containers)
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/docker.log /tmp/who.log
+          cat > /tmp/fakebin/who <<'EOF'
+          #!/bin/bash
+          echo "called" >> /tmp/who.log
+          exit 0
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/docker.log
+          if [ "$1" = "ps" ]; then echo "abc123"; echo "def456"; fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/who /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert who checked and docker cleanup performed
+        run: |
+          echo "--- who.log ---"; cat /tmp/who.log || true
+          echo "--- docker.log ---"; cat /tmp/docker.log || true
+          if [ ! -s /tmp/who.log ]; then
+            echo "FAIL: who was not called (ssh wait step skipped)"
+            exit 1
+          fi
+          if [ "$(wc -l < /tmp/who.log)" -ne 1 ]; then
+            echo "FAIL: expected who to be called exactly once"
+            exit 1
+          fi
+          grep -qx "ps -q" /tmp/docker.log || { echo "FAIL: docker ps -q not called"; exit 1; }
+          grep -qx "stop abc123 def456" /tmp/docker.log || { echo "FAIL: docker stop not called with container ids"; exit 1; }
+          grep -qx "system prune -af" /tmp/docker.log || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          echo "PASS"

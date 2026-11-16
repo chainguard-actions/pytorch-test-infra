@@ -1,0 +1,27 @@
+name: Test image already present locally (skip pull)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      MOCK_LOG: /tmp/mock-calls.log
+      MOCK_INSPECT_EXIT: "0"
+      MOCK_PULL_EXIT: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: bash tests/fixtures/setup-mocks.sh
+      - id: action
+        uses: .
+        with:
+          docker-image: pytorch/local-image:latest
+      - name: Assert no pull happened
+        run: |
+          echo "---- calls ----"; cat "$MOCK_LOG"; echo "---------------"
+          grep -qx "docker inspect --type=image pytorch/local-image:latest" "$MOCK_LOG" || { echo "FAIL: local inspect not called"; exit 1; }
+          if grep -q "^docker pull" "$MOCK_LOG"; then
+            echo "FAIL: docker pull should not run when image exists locally"
+            exit 1
+          fi
+          echo "PASS"

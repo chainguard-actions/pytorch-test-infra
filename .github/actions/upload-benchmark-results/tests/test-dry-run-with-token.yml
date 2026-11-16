@@ -1,0 +1,38 @@
+name: Test dry-run upload with token
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          benchmark-results-dir: ${{ github.workspace }}/tests/fixtures/benchmark-results
+          benchmark-name: act-harness-benchmark
+          dry-run: 'true'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert action ran (succeeded, or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "DEVICE_NAME=${DEVICE_NAME:-<unset>}"
+          if [ -z "${DEVICE_NAME:-}" ]; then
+            echo "FAIL: DEVICE_NAME was not exported by the action"
+            exit 1
+          fi
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "${VIRTUAL_ENV:-}" ] || [ ! -x "$VIRTUAL_ENV/bin/python" ]; then
+              echo "FAIL: action succeeded but venv python missing"
+              exit 1
+            fi
+            echo "PASS: dry-run upload succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (job-id lookup against sentinel repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

@@ -1,0 +1,29 @@
+name: Test basic usage (non-Windows no-op)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          CONCLUSION: ${{ steps.action.conclusion }}
+        run: |
+          echo "outcome: $OUTCOME conclusion: $CONCLUSION"
+          if [ "$OUTCOME" != "success" ] || [ "$CONCLUSION" != "success" ]; then
+            echo "FAIL: expected action to succeed"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert workspace still intact
+        run: |
+          if [ ! -d "$GITHUB_WORKSPACE/.git" ]; then
+            echo "FAIL: workspace git directory missing"
+            exit 1
+          fi
+          git -C "$GITHUB_WORKSPACE" rev-parse HEAD || { echo "FAIL: git broken"; exit 1; }
+          echo "PASS"

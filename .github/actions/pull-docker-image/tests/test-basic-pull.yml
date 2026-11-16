@@ -1,0 +1,29 @@
+name: Test basic pull (image not present locally)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      MOCK_LOG: /tmp/mock-calls.log
+      MOCK_INSPECT_EXIT: "1"
+      MOCK_PULL_EXIT: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: bash tests/fixtures/setup-mocks.sh
+      - id: action
+        uses: .
+        with:
+          docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/pytorch/test-image:abc123
+      - name: Assert login and pull happened
+        run: |
+          echo "---- calls ----"; cat "$MOCK_LOG"; echo "---------------"
+          grep -q "^aws ecr get-login-password --region us-east-1" "$MOCK_LOG" || { echo "FAIL: aws ecr login not called"; exit 1; }
+          grep -qx "docker login -u AWS --password-stdin 308535385114.dkr.ecr.us-east-1.amazonaws.com" "$MOCK_LOG" || { echo "FAIL: docker login to default registry not called"; exit 1; }
+          grep -qx "docker manifest inspect 308535385114.dkr.ecr.us-east-1.amazonaws.com/pytorch/test-image:abc123" "$MOCK_LOG" || { echo "FAIL: manifest inspect not called"; exit 1; }
+          grep -qx "docker inspect --type=image 308535385114.dkr.ecr.us-east-1.amazonaws.com/pytorch/test-image:abc123" "$MOCK_LOG" || { echo "FAIL: local inspect not called"; exit 1; }
+          N=$(grep -cx "docker pull 308535385114.dkr.ecr.us-east-1.amazonaws.com/pytorch/test-image:abc123" "$MOCK_LOG" || true)
+          echo "pull count: $N"
+          if [ "$N" != "1" ]; then echo "FAIL: expected exactly 1 pull"; exit 1; fi
+          echo "PASS"

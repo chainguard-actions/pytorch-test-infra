@@ -1,0 +1,52 @@
+name: Test computed tag with prefix and matching hash
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Stub docker and aws so the image is reported as already existing
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/sh
+          echo "fake docker $*" >&2
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) exit 0 ;;
+          esac
+          exit 0
+          EOF
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "fake-password"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker" "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - name: Compute expected hash
+        id: hash
+        run: echo "hash=$(git rev-parse HEAD:tests/fixtures/docker)" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: my-image
+          docker-build-dir: tests/fixtures/docker
+          custom-tag-prefix: myprefix
+          repo-name: myrepo
+          docker-registry: registry.example.com
+          ci-docker-hash: ${{ steps.hash.outputs.hash }}
+      - name: Assert computed image
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          EXPECTED="registry.example.com/myrepo/my-image:myprefix-${HASH}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ -z "$HASH" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"

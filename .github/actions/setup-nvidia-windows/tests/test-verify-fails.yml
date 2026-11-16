@@ -1,0 +1,85 @@
+name: Test action fails when nvidia-smi verification fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake Windows cmd shell and failing nvidia-smi
+        run: |
+          set -e
+          SHIM_DIR="$RUNNER_TEMP/winshim"
+          mkdir -p "$SHIM_DIR"
+          rm -f /tmp/setup-nvidia-windows.log
+          cat > "$SHIM_DIR/cmd" <<'EOF'
+          #!/bin/bash
+          LOG=/tmp/setup-nvidia-windows.log
+          script=""
+          for arg in "$@"; do
+            a="${arg#CALL }"
+            a="${a//\"/}"
+            if [ -f "$a" ]; then script="$a"; fi
+          done
+          if [ -z "$script" ]; then
+            echo "fake cmd: could not find script in args: $*" >&2
+            exit 1
+          fi
+          echo "CMD-SCRIPT $script" >> "$LOG"
+          rc=0
+          while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%$'\r'}"
+            line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            [ -z "$line" ] && continue
+            case "$line" in
+              @*|rem\ *|REM\ *|::*) continue ;;
+            esac
+            line="${line//\\//}"
+            echo "CMD-LINE $line" >> "$LOG"
+            case "$line" in
+              *.bat|*.BAT)
+                if [ ! -f "$line" ]; then
+                  echo "'$line' is not recognized as an internal or external command" >&2
+                  exit 1
+                fi
+                echo "DRIVER-UPDATE-RAN $line" >> "$LOG"
+                ;;
+              *)
+                bash -c "$line" || rc=$?
+                ;;
+            esac
+          done < "$script"
+          exit $rc
+          EOF
+          cat > "$SHIM_DIR/nvidia-smi" <<'EOF'
+          #!/bin/bash
+          echo "NVIDIA-SMI-RAN" >> /tmp/setup-nvidia-windows.log
+          echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver." >&2
+          exit 9
+          EOF
+          sed -i 's/^          //' "$SHIM_DIR/cmd" "$SHIM_DIR/nvidia-smi"
+          chmod +x "$SHIM_DIR/cmd" "$SHIM_DIR/nvidia-smi"
+          echo "$SHIM_DIR" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        continue-on-error: true
+      - name: Assert action failed after running verification
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "--- log ---"
+          cat /tmp/setup-nvidia-windows.log || true
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected action to fail when nvidia-smi fails"
+            exit 1
+          fi
+          if ! grep -q "DRIVER-UPDATE-RAN" /tmp/setup-nvidia-windows.log; then
+            echo "FAIL: driver_update.bat was not invoked before verification"
+            exit 1
+          fi
+          if ! grep -q "NVIDIA-SMI-RAN" /tmp/setup-nvidia-windows.log; then
+            echo "FAIL: nvidia-smi verification was not attempted"
+            exit 1
+          fi
+          echo "PASS"

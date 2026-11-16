@@ -1,0 +1,20 @@
+name: Test preset CHANNEL via job env is preserved
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CHANNEL: release
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert CHANNEL remains release
+        run: |
+          echo "CHANNEL: ${CHANNEL:-<unset>}"
+          if [ "${CHANNEL:-}" != "release" ]; then
+            echo "FAIL: expected CHANNEL=release"
+            exit 1
+          fi
+          echo "PASS"

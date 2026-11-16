@@ -1,0 +1,48 @@
+name: Test basic usage (no s3 upload)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CHECK_S3_LOG: ${{ github.workspace }}/check_s3_calls.log
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare binaries and check_s3 stub
+        run: |
+          mkdir -p tools/clang-tidy-checks
+          cp tests/fixtures/check_s3_stub.py tools/clang-tidy-checks/check_s3.py
+          printf 'fake clang-tidy\n' > clang-tidy
+          printf 'fake clang-format\n' > clang-format
+          chmod +x clang-tidy clang-format
+          rm -f "$CHECK_S3_LOG"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          platform: linux64
+          version: "17.0.6"
+          upload-to-s3: false
+      - name: Assert check_s3 was called for both binaries with correct keys
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "--- log ---"
+          cat "$CHECK_S3_LOG" || { echo "FAIL: check_s3 never invoked"; exit 1; }
+          expected="linux64/17.0.6/clang-tidy clang-tidy
+          linux64/17.0.6/clang-format clang-format"
+          expected="$(echo "$expected" | sed 's/^ *//')"
+          actual="$(cat "$CHECK_S3_LOG")"
+          if [ "$actual" != "$expected" ]; then
+            echo "FAIL: expected:"
+            echo "$expected"
+            exit 1
+          fi
+          # The artifact upload steps may fail under act if no artifact server
+          # is configured; the sanity-check step itself was verified above.
+          if [ "$OUTCOME" != "success" ] && [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+          echo "PASS"

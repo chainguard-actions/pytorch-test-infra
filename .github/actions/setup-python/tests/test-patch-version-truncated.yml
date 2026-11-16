@@ -1,0 +1,60 @@
+name: Test patch version truncated to major.minor (simulated macOS)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up macOS simulation (fake brew + python)
+        run: |
+          set -e
+          SIM="$RUNNER_TEMP/macsim"
+          rm -rf "$SIM"
+          mkdir -p "$SIM/fakebin" "$SIM/prefix/bin"
+          LOG="$SIM/calls.log"
+          : > "$LOG"
+          cat > "$SIM/fakebin/brew" <<EOF
+          #!/bin/sh
+          echo "brew \$*" >> "$LOG"
+          if [ "\$1" = "--prefix" ]; then echo "$SIM/prefix"; fi
+          exit 0
+          EOF
+          cat > "$SIM/venv-python" <<EOF
+          #!/bin/sh
+          echo "venvpython \$*" >> "$LOG"
+          exit 0
+          EOF
+          cat > "$SIM/prefix/bin/python3.11" <<EOF
+          #!/bin/sh
+          echo "python3.11 \$*" >> "$LOG"
+          if [ "\$1" = "-m" ] && [ "\$2" = "venv" ]; then
+            mkdir -p "\$3/bin"
+            cp "$SIM/venv-python" "\$3/bin/python"
+            chmod +x "\$3/bin/python"
+          fi
+          exit 0
+          EOF
+          chmod +x "$SIM/fakebin/brew" "$SIM/venv-python" "$SIM/prefix/bin/python3.11"
+          echo "$SIM/fakebin" >> "$GITHUB_PATH"
+          echo "SIM=$SIM" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/tests/fixtures/darwin-preload.js
+        with:
+          python-version: "3.11.7"
+      - name: Assert formula and venv use major.minor only
+        run: |
+          echo "VENV_PATH: ${VENV_PATH:-<unset>}"
+          echo "--- calls ---"; cat "$SIM/calls.log"
+          grep -qx "brew install python@3.11" "$SIM/calls.log" || { echo "FAIL: expected brew install python@3.11"; exit 1; }
+          if grep -q "python@3.11.7" "$SIM/calls.log"; then
+            echo "FAIL: patch version leaked into formula"; exit 1
+          fi
+          case "$(basename "${VENV_PATH:-}")" in
+            venv-3.11-*) ;;
+            *) echo "FAIL: unexpected venv dir name"; exit 1 ;;
+          esac
+          [ -x "$VENV_PATH/bin/python" ] || { echo "FAIL: venv python missing"; exit 1; }
+          echo "PASS"

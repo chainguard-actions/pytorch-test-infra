@@ -1,0 +1,26 @@
+name: Test with venv input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create a dummy venv directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/venv/bin"
+          echo '# dummy' > "$RUNNER_TEMP/venv/bin/activate"
+      - id: action
+        uses: .
+        with:
+          venv: ${{ runner.temp }}/venv
+      - name: Assert dependencies output
+        env:
+          ACTUAL: ${{ steps.action.outputs.dependencies }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "{}" ]; then
+            echo "FAIL: expected '{}'"
+            exit 1
+          fi
+          echo "PASS"

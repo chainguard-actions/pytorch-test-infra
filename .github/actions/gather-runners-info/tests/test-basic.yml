@@ -1,0 +1,49 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+      - name: Assert device detection and runners info
+        env:
+          RESULT: ${{ steps.action.outputs.runners-info }}
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "DEVICE_NAME: ${DEVICE_NAME:-}"
+          echo "DEVICE_TYPE: ${DEVICE_TYPE:-}"
+          echo "result: $RESULT"
+          case "${DEVICE_NAME:-}" in
+            cpu|arm64-cpu|cuda|rocm|hpu) echo "PASS: DEVICE_NAME detected" ;;
+            *) echo "FAIL: DEVICE_NAME not set or unexpected"; exit 1 ;;
+          esac
+          ARCH=$(uname -m)
+          if ! command -v nvidia-smi >/dev/null && ! command -v rocm-smi >/dev/null && ! command -v hl-smi >/dev/null; then
+            case "$ARCH" in
+              aarch64|arm64) EXPECTED=arm64-cpu ;;
+              *) EXPECTED=cpu ;;
+            esac
+            if [ "$DEVICE_NAME" != "$EXPECTED" ]; then
+              echo "FAIL: expected DEVICE_NAME=$EXPECTED"
+              exit 1
+            fi
+            echo "PASS: DEVICE_NAME matches arch"
+          fi
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$RESULT" ]; then
+              echo "FAIL: action succeeded but runners-info is empty"
+              exit 1
+            fi
+            echo "$RESULT" | python3 -c 'import json,sys; json.load(sys.stdin)' || { echo "FAIL: runners-info is not valid JSON"; exit 1; }
+            echo "PASS: runners-info is valid JSON"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: device detection ran; gather step failed (script/pip unavailable in harness)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

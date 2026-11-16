@@ -1,0 +1,60 @@
+name: Test late report from file
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:18080/token?api-version=2.0
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: fake-request-token
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock relay/OIDC server and write verdict list
+        run: |
+          mkdir -p /tmp/crcr
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay_server.py" 18080 /tmp/crcr > /tmp/crcr/server.log 2>&1 &
+          cat > /tmp/verdicts.json <<'EOF'
+          [
+            {"delivery_id": "d1", "workflow_name": "wf", "job_name": "build-npu", "check_run_id": 123,
+             "triage_verdict": {"schema_version": 1, "category": "upstream", "confidence": "high", "summary": "s1"}},
+            {"delivery_id": "d2", "workflow_name": "wf", "job_name": "build-cpu",
+             "triage_verdict": {"schema_version": 1, "category": "infra", "confidence": "medium", "summary": "s2"}}
+          ]
+          EOF
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18080/health >/dev/null; then echo "mock ready"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/crcr/server.log
+          exit 1
+      - id: action
+        uses: .
+        with:
+          event-type: late-report
+          triage-verdict-list: '@/tmp/verdicts.json'
+          callback-url: http://127.0.0.1:18080/callback
+      - name: Assert late report payload
+        run: |
+          python3 - <<'EOF'
+          import json, sys, glob
+          reqs = sorted(glob.glob("/tmp/crcr/req-*.json"))
+          if len(reqs) != 1:
+              sys.exit("FAIL: expected 1 request, got %d" % len(reqs))
+          rec = json.load(open(reqs[0]))
+          print(json.dumps(rec, indent=2))
+          if rec["auth"] != "Bearer fake-oidc-token-for-test":
+              sys.exit("FAIL: auth %r" % rec["auth"])
+          p = json.loads(rec["body"])
+          if p.get("event_type") != "late-report":
+              sys.exit("FAIL: event_type %r" % p.get("event_type"))
+          if "workflow" in p:
+              sys.exit("FAIL: late report must not include a workflow block")
+          reports = p.get("reports") or []
+          if [r.get("job_name") for r in reports] != ["build-npu", "build-cpu"]:
+              sys.exit("FAIL: reports %r" % reports)
+          if reports[0]["triage_verdict"]["category"] != "upstream":
+              sys.exit("FAIL: verdict not forwarded")
+          print("PASS")
+          EOF

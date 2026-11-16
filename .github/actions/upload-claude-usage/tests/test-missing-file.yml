@@ -1,0 +1,37 @@
+name: Test missing metrics file
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          mkdir -p /tmp/fake-aws-bin /tmp/aws-capture
+          rm -f /tmp/aws-capture/*
+          cat > /tmp/fake-aws-bin/aws <<'EOF'
+          #!/bin/bash
+          echo "$*" > /tmp/aws-capture/args
+          exit 0
+          EOF
+          chmod +x /tmp/fake-aws-bin/aws
+          echo "/tmp/fake-aws-bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          metrics-file: /tmp/does-not-exist/claude-output.json
+      - name: Assert action succeeded and did not upload
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ -f /tmp/aws-capture/args ]; then
+            echo "FAIL: aws was called: $(cat /tmp/aws-capture/args)"
+            exit 1
+          fi
+          echo "PASS"

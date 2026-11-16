@@ -1,0 +1,49 @@
+name: Test delivery-id without event-type fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:18080/token?api-version=2.0
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: fake-request-token
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock relay/OIDC server
+        run: |
+          mkdir -p /tmp/crcr
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay_server.py" 18080 /tmp/crcr > /tmp/crcr/server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18080/health >/dev/null; then echo "mock ready"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/crcr/server.log
+          exit 1
+      - id: action
+        continue-on-error: true
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: abcdef0123456789abcdef0123456789abcdef01
+          callback-url: http://127.0.0.1:18080/callback
+      - name: Assert action failed and sent no callback
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected failure"
+            exit 1
+          fi
+          if ! grep -q "audience=pytorch-cross-repo-ci-relay" /tmp/crcr/token-requests.log; then
+            echo "FAIL: OIDC step did not run, so the failure is not from validation"
+            exit 1
+          fi
+          if ls /tmp/crcr/req-*.json >/dev/null 2>&1; then
+            echo "FAIL: a callback was sent despite invalid input"
+            exit 1
+          fi
+          echo "PASS"

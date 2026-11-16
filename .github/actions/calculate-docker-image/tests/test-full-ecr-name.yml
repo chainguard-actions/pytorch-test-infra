@@ -1,0 +1,44 @@
+name: Test full ECR image name passthrough
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Stub docker and aws so the image is reported as already existing
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/sh
+          echo "fake docker $*" >&2
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) exit 0 ;;
+          esac
+          exit 0
+          EOF
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "fake-password"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker" "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: registry.example.com/myrepo/my-image:abc123
+          docker-registry: registry.example.com
+          docker-build-dir: tests/fixtures/docker
+          repo-name: myrepo
+      - name: Assert full name used as-is
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "registry.example.com/myrepo/my-image:abc123" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"

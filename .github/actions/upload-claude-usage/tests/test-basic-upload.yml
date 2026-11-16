@@ -1,0 +1,77 @@
+name: Test basic upload with valid metrics
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI and metrics file
+        run: |
+          mkdir -p /tmp/fake-aws-bin /tmp/aws-capture
+          rm -f /tmp/aws-capture/*
+          cat > /tmp/fake-aws-bin/aws <<'EOF'
+          #!/bin/bash
+          echo "$*" > /tmp/aws-capture/args
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-capture/payload.json
+            echo "$4" > /tmp/aws-capture/dest
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fake-aws-bin/aws
+          echo "/tmp/fake-aws-bin" >> "$GITHUB_PATH"
+          cat > "$RUNNER_TEMP/claude-output.json" <<'EOF'
+          [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"content": "hi"}},
+            {"type": "result", "duration_ms": 12345, "num_turns": 7, "total_cost_usd": 0.42,
+             "usage": {"input_tokens": 100, "output_tokens": 200, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 400},
+             "modelUsage": {"claude-sonnet-4": {"inputTokens": 100}},
+             "result": "some long text"}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/claude-output.json
+          s3-bucket: my-test-bucket
+          s3-prefix: my-prefix
+      - name: Assert payload uploaded with correct fields
+        run: |
+          echo "args: $(cat /tmp/aws-capture/args 2>/dev/null)"
+          if [ ! -f /tmp/aws-capture/payload.json ]; then
+            echo "FAIL: aws s3 cp was not called with a payload"
+            exit 1
+          fi
+          P=/tmp/aws-capture/payload.json
+          cat "$P"
+          DEST="$(cat /tmp/aws-capture/dest)"
+          echo "dest: $DEST"
+          case "$DEST" in
+            s3://my-test-bucket/my-prefix/*.json) ;;
+            *) echo "FAIL: unexpected destination $DEST"; exit 1 ;;
+          esac
+          check() {
+            local actual
+            actual="$(jq -r "$1" "$P")"
+            echo "$1 = $actual"
+            if [ "$actual" != "$2" ]; then
+              echo "FAIL: expected $1 == $2"
+              exit 1
+            fi
+          }
+          check '.duration_ms' 12345
+          check '.num_turns' 7
+          check '.total_cost_usd' 0.42
+          check '.input_tokens' 100
+          check '.output_tokens' 200
+          check '.cache_read_input_tokens' 300
+          check '.cache_creation_input_tokens' 400
+          check '.model' 'claude-sonnet-4'
+          check '.pr_number' 0
+          check '.event_name' 'workflow_dispatch'
+          check 'has("result")' false
+          check '.run_id | type' number
+          check '.timestamp | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.000$")' true
+          echo "PASS"

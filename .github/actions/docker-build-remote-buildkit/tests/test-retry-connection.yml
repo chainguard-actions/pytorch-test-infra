@@ -1,0 +1,43 @@
+name: Test retry on connection-phase failure
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock docker (fails to connect twice, then succeeds)
+        run: |
+          mkdir -p /tmp/mock-docker/bin
+          rm -f /tmp/mock-docker/*.log /tmp/mock-docker/*.txt
+          cat > /tmp/mock-docker/bin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/mock-docker/calls.log
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            n=$(cat /tmp/mock-docker/count.txt 2>/dev/null || echo 0)
+            n=$((n+1)); echo "$n" > /tmp/mock-docker/count.txt
+            if [ "$n" -lt 3 ]; then
+              echo "ERROR: failed to dial: connection refused" >&2
+              exit 1
+            fi
+            echo "#1 [internal] load build definition from Dockerfile"
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/mock-docker/bin/docker
+          echo "/tmp/mock-docker/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: ghcr.io/example/retry:1
+          connect-attempts: '5'
+          connect-delay: '0'
+      - name: Assert retried until success
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          COUNT="$(cat /tmp/mock-docker/count.txt)"
+          echo "attempts: $COUNT image: $IMAGE"
+          [ "$COUNT" = "3" ] || { echo "FAIL: expected 3 build attempts"; exit 1; }
+          [ "$IMAGE" = "ghcr.io/example/retry:1" ] || { echo "FAIL: image output"; exit 1; }
+          echo "PASS"

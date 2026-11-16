@@ -1,0 +1,48 @@
+name: Test comma-separated tags with push disabled
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock docker
+        run: |
+          mkdir -p /tmp/mock-docker/bin
+          rm -f /tmp/mock-docker/*.log /tmp/mock-docker/*.txt
+          cat > /tmp/mock-docker/bin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/mock-docker/calls.log
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            shift 2
+            printf '%s\n' "$@" > /tmp/mock-docker/build-args.txt
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/mock-docker/bin/docker
+          echo "/tmp/mock-docker/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: " ghcr.io/example/one:1 , ghcr.io/example/two:2 "
+          context: subdir
+          push: 'false'
+          connect-attempts: '1'
+          connect-delay: '0'
+      - name: Assert
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: $IMAGE"
+          cat /tmp/mock-docker/build-args.txt
+          fail=0
+          [ "$IMAGE" = "ghcr.io/example/one:1" ] || { echo "FAIL: image output"; fail=1; }
+          ARGS="$(tr '\n' ' ' < /tmp/mock-docker/build-args.txt)"
+          case "$ARGS" in *"--tag ghcr.io/example/one:1 --tag ghcr.io/example/two:2"*) ;; *) echo "FAIL: tags"; fail=1 ;; esac
+          if grep -Fxq -- '--push' /tmp/mock-docker/build-args.txt; then echo "FAIL: --push present"; fail=1; fi
+          for f in --file --target --build-arg --label --cache-from --cache-to; do
+            if grep -Fxq -- "$f" /tmp/mock-docker/build-args.txt; then echo "FAIL: unexpected $f"; fail=1; fi
+          done
+          [ "$(tail -n1 /tmp/mock-docker/build-args.txt)" = "subdir" ] || { echo "FAIL: context"; fail=1; }
+          [ "$fail" = 0 ] || exit 1
+          echo "PASS"

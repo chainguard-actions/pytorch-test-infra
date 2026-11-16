@@ -1,0 +1,26 @@
+name: Test checkout with default recursive submodules
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: octocat/Hello-World
+          ref: master
+      - name: Assert checkout succeeded
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/octocat/Hello-World/README" ]; then
+            echo "FAIL: README not found"
+            exit 1
+          fi
+          BRANCH="$(git -C "$GITHUB_WORKSPACE/octocat/Hello-World" rev-parse --abbrev-ref HEAD)"
+          echo "branch: $BRANCH"
+          if [ "$BRANCH" != "master" ]; then
+            echo "FAIL: expected branch master"
+            exit 1
+          fi
+          echo "PASS"

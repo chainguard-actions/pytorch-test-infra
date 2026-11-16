@@ -1,0 +1,23 @@
+name: Test checkout of a specific commit SHA
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: octocat/Hello-World
+          ref: 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
+          submodules: "false"
+      - name: Assert HEAD is the requested SHA
+        run: |
+          HEAD_SHA="$(git -C "$GITHUB_WORKSPACE/octocat/Hello-World" rev-parse HEAD)"
+          echo "HEAD: $HEAD_SHA"
+          if [ "$HEAD_SHA" != "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d" ]; then
+            echo "FAIL: unexpected HEAD"
+            exit 1
+          fi
+          echo "PASS"

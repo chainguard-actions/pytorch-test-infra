@@ -1,0 +1,41 @@
+name: Test docker prune failure fails the action
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake who and failing docker prune
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/docker.log
+          cat > /tmp/fakebin/who <<'EOF'
+          #!/bin/bash
+          exit 0
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/docker.log
+          if [ "$1" = "system" ]; then echo "prune error" >&2; exit 1; fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/who /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          skip-wait-ssh: "1"
+      - name: Assert action failed
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "--- docker.log ---"; cat /tmp/docker.log || true
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected failure when docker system prune fails"
+            exit 1
+          fi
+          grep -qx "system prune -af" /tmp/docker.log || { echo "FAIL: prune not attempted"; exit 1; }
+          echo "PASS"

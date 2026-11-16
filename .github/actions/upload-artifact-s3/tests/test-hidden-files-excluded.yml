@@ -1,0 +1,31 @@
+name: Test hidden files are excluded by default
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create directory with only hidden files
+        run: |
+          mkdir -p "$RUNNER_TEMP/hidden-only/.secret-dir"
+          echo "hidden" > "$RUNNER_TEMP/hidden-only/.hidden-file"
+          echo "hidden2" > "$RUNNER_TEMP/hidden-only/.secret-dir/data.txt"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/hidden-only
+          if-no-files-found: error
+      - name: Assert no files found (hidden excluded) so the action failed
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          ACTUAL: ${{ steps.action.outputs.uploaded-objects }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "uploaded-objects: '$ACTUAL'"
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected failure since only hidden files exist and they are excluded"
+            exit 1
+          fi
+          echo "PASS"

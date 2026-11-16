@@ -1,0 +1,39 @@
+name: Test command mode
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock docker
+        run: |
+          mkdir -p /tmp/mock-docker/bin
+          rm -f /tmp/mock-docker/*.log /tmp/mock-docker/*.txt
+          cat > /tmp/mock-docker/bin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/mock-docker/calls.log
+          exit 0
+          EOF
+          chmod +x /tmp/mock-docker/bin/docker
+          echo "/tmp/mock-docker/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          command: echo "custom build ran" > /tmp/mock-docker/command.txt
+          tags: ghcr.io/example/ignored:tag
+          connect-attempts: '1'
+          connect-delay: '0'
+      - name: Assert
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: '$IMAGE'"
+          cat /tmp/mock-docker/calls.log
+          fail=0
+          [ -z "$IMAGE" ] || { echo "FAIL: image should be empty in command mode"; fail=1; }
+          grep -q "custom build ran" /tmp/mock-docker/command.txt || { echo "FAIL: command not run"; fail=1; }
+          grep -q "buildx create --name remote-buildkit" /tmp/mock-docker/calls.log || { echo "FAIL: builder not registered"; fail=1; }
+          if grep -q "buildx build" /tmp/mock-docker/calls.log; then echo "FAIL: buildx build should not run"; fail=1; fi
+          [ "$fail" = 0 ] || exit 1
+          echo "PASS"

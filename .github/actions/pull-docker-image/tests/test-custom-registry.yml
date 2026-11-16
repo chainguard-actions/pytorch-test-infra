@@ -1,0 +1,29 @@
+name: Test custom docker-registry input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      MOCK_LOG: /tmp/mock-calls.log
+      MOCK_INSPECT_EXIT: "1"
+      MOCK_PULL_EXIT: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: bash tests/fixtures/setup-mocks.sh
+      - id: action
+        uses: .
+        with:
+          docker-image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/custom/image:v1
+          docker-registry: 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      - name: Assert custom registry used
+        run: |
+          echo "---- calls ----"; cat "$MOCK_LOG"; echo "---------------"
+          grep -qx "docker login -u AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com" "$MOCK_LOG" || { echo "FAIL: login to custom registry not called"; exit 1; }
+          if grep -q "308535385114" "$MOCK_LOG"; then
+            echo "FAIL: default registry should not be used"
+            exit 1
+          fi
+          grep -qx "docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/custom/image:v1" "$MOCK_LOG" || { echo "FAIL: pull not called"; exit 1; }
+          echo "PASS"

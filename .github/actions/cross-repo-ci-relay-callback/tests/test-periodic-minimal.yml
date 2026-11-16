@@ -1,0 +1,58 @@
+name: Test periodic minimal callback
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:18080/token?api-version=2.0
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: fake-request-token
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock relay/OIDC server
+        run: |
+          mkdir -p /tmp/crcr
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay_server.py" 18080 /tmp/crcr > /tmp/crcr/server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18080/health >/dev/null; then echo "mock ready"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/crcr/server.log
+          exit 1
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: failure
+          delivery-id: abcdef0123456789abcdef0123456789abcdef01
+          event-type: periodic
+          callback-url: http://127.0.0.1:18080/callback
+      - name: Assert minimal periodic payload
+        run: |
+          python3 - <<'EOF'
+          import json, sys, glob
+          reqs = sorted(glob.glob("/tmp/crcr/req-*.json"))
+          if len(reqs) != 1:
+              sys.exit("FAIL: expected 1 request, got %d" % len(reqs))
+          rec = json.load(open(reqs[0]))
+          print(json.dumps(rec, indent=2))
+          p = json.loads(rec["body"])
+          w = p.get("workflow", {})
+          bad = False
+          if p.get("event_type") != "periodic":
+              print("FAIL: event_type %r" % p.get("event_type")); bad = True
+          if w.get("conclusion") != "failure":
+              print("FAIL: conclusion %r" % w.get("conclusion")); bad = True
+          if w.get("job_name") != "test":
+              print("FAIL: job_name should default to github.job 'test', got %r" % w.get("job_name")); bad = True
+          for k in ("test_results", "failed_tests_detail", "triage_verdict", "artifact_url"):
+              if k in w:
+                  print("FAIL: unexpected optional key %s" % k); bad = True
+          if not w.get("started_at") or not w.get("completed_at"):
+              print("FAIL: self-report should set started_at and completed_at"); bad = True
+          if bad:
+              sys.exit(1)
+          print("PASS")
+          EOF

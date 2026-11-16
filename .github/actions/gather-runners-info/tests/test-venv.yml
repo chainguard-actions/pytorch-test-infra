@@ -1,0 +1,47 @@
+name: Test with venv input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create virtual environment
+        run: |
+          python3 -m venv /tmp/test-venv || { sudo apt-get update && sudo apt-get install -y python3-venv && python3 -m venv /tmp/test-venv; }
+          test -f /tmp/test-venv/bin/activate
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          venv: /tmp/test-venv/bin/activate
+      - name: Assert venv was used
+        env:
+          RESULT: ${{ steps.action.outputs.runners-info }}
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "DEVICE_NAME: ${DEVICE_NAME:-}"
+          echo "result: $RESULT"
+          if [ -z "${DEVICE_NAME:-}" ]; then
+            echo "FAIL: DEVICE_NAME not exported"
+            exit 1
+          fi
+          if [ "$OUTCOME" = "success" ]; then
+            if ! /tmp/test-venv/bin/python -c 'import psutil; assert psutil.__version__ == "7.0.0"'; then
+              echo "FAIL: psutil 7.0.0 not installed into the venv"
+              exit 1
+            fi
+            echo "PASS: psutil installed into venv"
+            if [ -z "$RESULT" ]; then
+              echo "FAIL: runners-info empty"
+              exit 1
+            fi
+            echo "$RESULT" | python3 -c 'import json,sys; json.load(sys.stdin)' || { echo "FAIL: invalid JSON"; exit 1; }
+            echo "PASS: runners-info valid JSON"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: device detection ran; gather step failed (script unavailable in harness)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

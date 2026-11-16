@@ -1,0 +1,37 @@
+name: Test basic usage (default minimum)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Compute expected outcome from df
+        id: expected
+        shell: bash
+        run: |
+          MIN_KB=$((6 * 1024 * 1024))
+          EXPECT=success
+          while read -r LINE; do
+            AVAIL=$(echo $LINE | cut -f1 -d' ')
+            MOUNT=$(echo $LINE | cut -f2 -d' ')
+            if [ "$MOUNT" = "/" ] && [ "$AVAIL" -lt "$MIN_KB" ] 2>/dev/null; then
+              EXPECT=failure
+            fi
+          done < <(df -k | tr -s ' ' | cut -d' ' -f 4,9)
+          echo "expected=$EXPECT"
+          echo "expected=$EXPECT" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        continue-on-error: true
+      - name: Assert outcome matches expectation
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          EXPECTED: ${{ steps.expected.outputs.expected }}
+        run: |
+          echo "outcome: $OUTCOME expected: $EXPECTED"
+          if [ "$OUTCOME" != "$EXPECTED" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"

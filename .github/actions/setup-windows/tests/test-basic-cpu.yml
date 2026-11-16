@@ -1,0 +1,67 @@
+name: Test setup-windows with cpu
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install shims for Windows-only tools and EC2 metadata
+        run: |
+          SHIMS="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIMS"
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          cat > "$SHIMS/curl" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *169.254.169.254/latest/api/token*) echo "fake-imds-token"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/ami-id*) echo "ami-fake123"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/instance-id*) echo "i-fake123"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/instance-type*) echo "c5.fake"; exit 0 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+          cat > "$SHIMS/powershell" <<'EOF'
+          #!/bin/sh
+          echo "fake powershell invoked: $*"
+          exit 0
+          EOF
+          cat > "$SHIMS/cygpath" <<'EOF'
+          #!/bin/sh
+          echo "$1"
+          EOF
+          chmod +x "$SHIMS/curl" "$SHIMS/powershell" "$SHIMS/cygpath"
+          echo "$SHIMS" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: cpu
+      - name: Assert git global config set
+        run: |
+          for kv in "core.longpaths=true" "core.symlinks=true" "core.fsmonitor=false"; do
+            key="${kv%%=*}"; want="${kv#*=}"
+            got="$(git config --global --get "$key" || true)"
+            echo "$key: $got"
+            if [ "$got" != "$want" ]; then
+              echo "FAIL: expected $key=$want"
+              exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert environment variables and directories
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "$RUNNER_TEMP/artifacts" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR should be $RUNNER_TEMP/artifacts"
+            exit 1
+          fi
+          if [ "$RUNNER_TEST_RESULTS_DIR" != "$RUNNER_TEMP/test-results" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR should be $RUNNER_TEMP/test-results"
+            exit 1
+          fi
+          if [ ! -d "$RUNNER_ARTIFACT_DIR" ] || [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+            echo "FAIL: directories were not created"
+            exit 1
+          fi
+          echo "PASS"

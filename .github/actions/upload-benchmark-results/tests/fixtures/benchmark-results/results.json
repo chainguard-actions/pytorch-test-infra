@@ -1,0 +1,20 @@
+[
+  {
+    "benchmark": {
+      "name": "act-harness-benchmark",
+      "mode": "inference",
+      "dtype": "float32",
+      "extra_info": {}
+    },
+    "model": {
+      "name": "dummy-model",
+      "type": "test",
+      "origins": ["act"]
+    },
+    "metric": {
+      "name": "latency_ms",
+      "benchmark_values": [1.0, 2.0, 3.0],
+      "target_value": 0
+    }
+  }
+]

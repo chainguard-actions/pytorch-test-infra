@@ -1,0 +1,71 @@
+name: Test basic usage (simulated macOS)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up macOS simulation (fake brew + python)
+        run: |
+          set -e
+          SIM="$RUNNER_TEMP/macsim"
+          rm -rf "$SIM"
+          mkdir -p "$SIM/fakebin" "$SIM/prefix/bin"
+          LOG="$SIM/calls.log"
+          : > "$LOG"
+          cat > "$SIM/fakebin/brew" <<EOF
+          #!/bin/sh
+          echo "brew \$*" >> "$LOG"
+          if [ "\$1" = "--prefix" ]; then echo "$SIM/prefix"; fi
+          exit 0
+          EOF
+          cat > "$SIM/venv-python" <<EOF
+          #!/bin/sh
+          echo "venvpython \$*" >> "$LOG"
+          exit 0
+          EOF
+          cat > "$SIM/prefix/bin/python3.12" <<EOF
+          #!/bin/sh
+          echo "python3.12 \$*" >> "$LOG"
+          if [ "\$1" = "-m" ] && [ "\$2" = "venv" ]; then
+            mkdir -p "\$3/bin"
+            cp "$SIM/venv-python" "\$3/bin/python"
+            chmod +x "\$3/bin/python"
+          fi
+          exit 0
+          EOF
+          chmod +x "$SIM/fakebin/brew" "$SIM/venv-python" "$SIM/prefix/bin/python3.12"
+          echo "$SIM/fakebin" >> "$GITHUB_PATH"
+          echo "SIM=$SIM" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/tests/fixtures/darwin-preload.js
+        with:
+          python-version: "3.12"
+      - name: Assert venv created and exported
+        run: |
+          echo "VENV_PATH: ${VENV_PATH:-<unset>}"
+          echo "--- calls ---"; cat "$SIM/calls.log"
+          if [ -z "${VENV_PATH:-}" ]; then
+            echo "FAIL: VENV_PATH not set"; exit 1
+          fi
+          case "$(basename "$VENV_PATH")" in
+            venv-3.12-*) ;;
+            *) echo "FAIL: unexpected venv dir name"; exit 1 ;;
+          esac
+          if [ ! -x "$VENV_PATH/bin/python" ]; then
+            echo "FAIL: venv python not created"; exit 1
+          fi
+          case ":$PATH:" in
+            *":$VENV_PATH/bin:"*) ;;
+            *) echo "FAIL: venv bin not on PATH: $PATH"; exit 1 ;;
+          esac
+          grep -qx "brew update" "$SIM/calls.log" || { echo "FAIL: brew update not called"; exit 1; }
+          grep -qx "brew install python@3.12" "$SIM/calls.log" || { echo "FAIL: brew install python@3.12 not called"; exit 1; }
+          grep -q "^python3.12 -m venv $VENV_PATH\$" "$SIM/calls.log" || { echo "FAIL: venv not created with python3.12"; exit 1; }
+          if grep -q "pip install" "$SIM/calls.log"; then
+            echo "FAIL: pip install should not run without requirements file"; exit 1
+          fi
+          echo "PASS"

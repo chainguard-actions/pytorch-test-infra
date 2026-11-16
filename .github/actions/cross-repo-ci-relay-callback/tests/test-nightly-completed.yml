@@ -1,0 +1,95 @@
+name: Test nightly completed callback
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:18080/token?api-version=2.0
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: fake-request-token
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock relay/OIDC server
+        run: |
+          mkdir -p /tmp/crcr
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay_server.py" 18080 /tmp/crcr > /tmp/crcr/server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18080/health >/dev/null; then echo "mock ready"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/crcr/server.log
+          exit 1
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0e797b5a6acf1234567890abcdef1234567890ab
+          event-type: nightly
+          job-name: build-cpu
+          callback-url: http://127.0.0.1:18080/callback/
+          artifact-url: https://example.com/artifacts/123
+          test-results: '{"passed": 10, "failed": 1, "skipped": 2}'
+          failed-tests-detail: '[{"name":"test_foo","classname":"TestBar","message":"AssertionError"}]'
+          triage-verdict: '{"schema_version":1,"category":"flake","confidence":"low","summary":"timeout"}'
+      - name: Assert callback payload
+        run: |
+          cat /tmp/crcr/server.log || true
+          ls -la /tmp/crcr
+          python3 - <<'EOF'
+          import json, sys, glob
+          reqs = sorted(glob.glob("/tmp/crcr/req-*.json"))
+          print("requests:", reqs)
+          if len(reqs) != 1:
+              sys.exit("FAIL: expected exactly 1 callback request, got %d" % len(reqs))
+          rec = json.load(open(reqs[0]))
+          print(json.dumps(rec, indent=2))
+          if rec["path"] != "/callback":
+              sys.exit("FAIL: path %r (trailing slash should be stripped)" % rec["path"])
+          if rec["auth"] != "Bearer fake-oidc-token-for-test":
+              sys.exit("FAIL: auth header %r" % rec["auth"])
+          if rec["content_type"] != "application/json":
+              sys.exit("FAIL: content type %r" % rec["content_type"])
+          p = json.loads(rec["body"])
+          sha = "0e797b5a6acf1234567890abcdef1234567890ab"
+          checks = {
+              "event_type": (p.get("event_type"), "nightly"),
+              "delivery_id": (p.get("delivery_id"), sha),
+              "head_sha": (p.get("payload", {}).get("head_sha"), sha),
+              "repo": (p.get("payload", {}).get("repository", {}).get("full_name"), "pytorch/pytorch"),
+          }
+          w = p.get("workflow", {})
+          checks.update({
+              "schema_version": (w.get("schema_version"), "1"),
+              "status": (w.get("status"), "completed"),
+              "conclusion": (w.get("conclusion"), "success"),
+              "name": (w.get("name"), "Test nightly completed callback"),
+              "job_name": (w.get("job_name"), "build-cpu"),
+              "artifact_url": (w.get("artifact_url"), "https://example.com/artifacts/123"),
+              "test_results": (w.get("test_results"), {"passed": 10, "failed": 1, "skipped": 2}),
+              "failed_tests_detail": (w.get("failed_tests_detail"), [{"name": "test_foo", "classname": "TestBar", "message": "AssertionError"}]),
+              "triage_category": ((w.get("triage_verdict") or {}).get("category"), "flake"),
+          })
+          bad = False
+          for k, (actual, expected) in checks.items():
+              if actual != expected:
+                  print("FAIL: %s = %r, expected %r" % (k, actual, expected)); bad = True
+          for k in ("started_at", "completed_at", "run_id", "run_attempt", "check_run_id", "url"):
+              if not w.get(k):
+                  print("FAIL: workflow.%s missing/empty" % k); bad = True
+          if "/actions/runs/" not in (w.get("url") or ""):
+              print("FAIL: url %r" % w.get("url")); bad = True
+          if bad:
+              sys.exit(1)
+          print("PASS")
+          EOF
+      - name: Assert OIDC token requested with relay audience
+        run: |
+          cat /tmp/crcr/token-requests.log
+          if ! grep -q "audience=pytorch-cross-repo-ci-relay" /tmp/crcr/token-requests.log; then
+            echo "FAIL: OIDC token not requested with expected audience"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,65 @@
+name: Test teardown with extra-delete-dir input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide a 'powershell' executable (pwsh shim with Windows CIM stubs)
+        run: |
+          set -e
+          if ! command -v pwsh >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64) ARCH=arm64 ;;
+              *) ARCH=x64 ;;
+            esac
+            VER=7.4.6
+            mkdir -p /tmp/pwsh
+            curl -sSfL -o /tmp/pwsh.tar.gz \
+              "https://github.com/PowerShell/PowerShell/releases/download/v${VER}/powershell-${VER}-linux-${ARCH}.tar.gz"
+            tar -xzf /tmp/pwsh.tar.gz -C /tmp/pwsh
+            chmod +x /tmp/pwsh/pwsh
+            PWSH=/tmp/pwsh/pwsh
+          else
+            PWSH="$(command -v pwsh)"
+          fi
+          cat > /tmp/cim-stubs.ps1 <<'EOF'
+          function Get-CimInstance { param([Parameter(ValueFromRemainingArguments=$true)]$Rest) }
+          function Get-CimAssociatedInstance { param([Parameter(ValueFromPipeline=$true)]$InputObject, [Parameter(ValueFromRemainingArguments=$true)]$Rest) process { } }
+          EOF
+          mkdir -p /tmp/shimbin
+          cat > /tmp/shimbin/powershell <<EOF
+          #!/bin/sh
+          export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+          export POWERSHELL_TELEMETRY_OPTOUT=1
+          case "\$1" in
+            -command|-Command) shift ;;
+          esac
+          echo "ran" > /tmp/powershell-invoked-\$\$
+          exec "$PWSH" -NoProfile -NonInteractive -Command ". '/tmp/cim-stubs.ps1'; \$*"
+          EOF
+          chmod +x /tmp/shimbin/powershell
+          echo "/tmp/shimbin" >> "$GITHUB_PATH"
+          rm -f /tmp/powershell-invoked-*
+          mkdir -p "$RUNNER_TEMP/extra-dir"
+      - id: action
+        uses: .
+        with:
+          extra-delete-dir: ${{ runner.temp }}/extra-dir
+      - name: Assert action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          COUNT=$(ls /tmp/powershell-invoked-* 2>/dev/null | wc -l)
+          echo "powershell invocations: $COUNT"
+          if [ "$COUNT" -lt 2 ]; then
+            echo "FAIL: expected both powershell steps to run"
+            exit 1
+          fi
+          echo "PASS"

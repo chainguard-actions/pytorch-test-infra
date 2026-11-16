@@ -1,0 +1,41 @@
+name: Test default (empty) ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Make pkg-helpers available at $GITHUB_WORKSPACE/test-infra
+        run: |
+          set -ex
+          if [ -e "$GITHUB_WORKSPACE/test-infra/tools/pkg-helpers" ]; then
+            exit 0
+          fi
+          if [ -d "$GITHUB_WORKSPACE/tools/pkg-helpers" ]; then
+            ln -s . "$GITHUB_WORKSPACE/test-infra"
+          else
+            git clone --depth 1 https://github.com/pytorch/test-infra.git "$GITHUB_WORKSPACE/test-infra"
+          fi
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/test-infra
+          python-version: 3.11.9
+          cuda-version: cu124
+          arch: x86_64
+      - name: Assert ARTIFACT_NAME
+        run: |
+          echo "actual: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_test-infra__3.11_cu124_x86_64" ]; then
+            echo "FAIL: expected 'pytorch_test-infra__3.11_cu124_x86_64'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert target repository checked out on default branch
+        run: |
+          if [ ! -d "$GITHUB_WORKSPACE/pytorch/test-infra/.git" ]; then
+            echo "FAIL: target repository not checked out"
+            exit 1
+          fi
+          echo "PASS"

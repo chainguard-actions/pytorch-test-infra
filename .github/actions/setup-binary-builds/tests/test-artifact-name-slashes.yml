@@ -1,0 +1,54 @@
+name: Test artifact name with slashes in ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: pytorch/test-infra
+      REF: release/2.5
+      PACKAGE_NAME: torchvision
+      GPU_ARCH_VERSION: cpu
+      GPU_ARCH: cpu
+      CHANNEL: nightly
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Stage pkg-helpers where the action expects them
+        run: |
+          set -euxo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/test-infra/tools"
+          rm -rf "$GITHUB_WORKSPACE/test-infra/tools/pkg-helpers"
+          cp -r "$GITHUB_WORKSPACE/tools/pkg-helpers" "$GITHUB_WORKSPACE/test-infra/tools/pkg-helpers"
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          submodules: "false"
+          setup-miniconda: "true"
+          python-version: "3.12"
+          cuda-version: cu124
+          arch: aarch64
+      - name: Assert ARTIFACT_NAME
+        run: |
+          echo "actual: ${ARTIFACT_NAME:-}"
+          if [ "${ARTIFACT_NAME:-}" != "pytorch_test-infra_release_2.5_3.12_cu124_aarch64" ]; then
+            echo "FAIL: expected 'pytorch_test-infra_release_2.5_3.12_cu124_aarch64'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda build env uses python 3.12
+        shell: bash -l {0}
+        run: |
+          echo "CONDA_ENV: ${CONDA_ENV:-}"
+          if [ -z "${CONDA_ENV:-}" ] || [ ! -d "$CONDA_ENV" ]; then
+            echo "FAIL: CONDA_ENV missing"
+            exit 1
+          fi
+          VER=$(${CONDA_RUN} python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          echo "python in env: $VER"
+          if [ "$VER" != "3.12" ]; then
+            echo "FAIL: expected python 3.12"
+            exit 1
+          fi
+          echo "PASS"

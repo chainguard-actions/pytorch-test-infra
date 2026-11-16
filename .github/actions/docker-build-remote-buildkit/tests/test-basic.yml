@@ -1,0 +1,76 @@
+name: Test basic buildx build
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock docker
+        run: |
+          mkdir -p /tmp/mock-docker/bin
+          rm -f /tmp/mock-docker/*.log /tmp/mock-docker/*.txt
+          cat > /tmp/mock-docker/bin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/mock-docker/calls.log
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            shift 2
+            printf '%s\n' "$@" > /tmp/mock-docker/build-args.txt
+            echo "#1 [internal] load build definition from Dockerfile"
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/mock-docker/bin/docker
+          echo "/tmp/mock-docker/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: |
+            ghcr.io/example/image:abc123
+            ghcr.io/example/image:latest
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.source=example
+          target: final
+          file: docker/Dockerfile
+          cache-from: type=registry,ref=ghcr.io/example/cache
+          cache-to: type=inline
+          connect-attempts: '2'
+          connect-delay: '0'
+      - name: Assert outputs and buildx args
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: $IMAGE"
+          echo "--- calls ---"; cat /tmp/mock-docker/calls.log
+          echo "--- build args ---"; cat /tmp/mock-docker/build-args.txt
+          fail=0
+          [ "$IMAGE" = "ghcr.io/example/image:abc123" ] || { echo "FAIL: image output"; fail=1; }
+          grep -q "buildx create --name remote-buildkit --driver remote --use tcp://buildkitd-" /tmp/mock-docker/calls.log || { echo "FAIL: builder not created"; fail=1; }
+          ARGS="$(tr '\n' ' ' < /tmp/mock-docker/build-args.txt)"
+          for want in \
+            "--tag ghcr.io/example/image:abc123" \
+            "--tag ghcr.io/example/image:latest" \
+            "--file docker/Dockerfile" \
+            "--target final" \
+            "--build-arg FOO=bar" \
+            "--build-arg BAZ=qux" \
+            "--label org.opencontainers.image.source=example" \
+            "--cache-from type=registry,ref=ghcr.io/example/cache" \
+            "--cache-to type=inline" \
+            "--push"; do
+            case "$ARGS" in
+              *"$want"*) echo "ok: $want" ;;
+              *) echo "FAIL: missing '$want'"; fail=1 ;;
+            esac
+          done
+          case "$ARGS" in
+            *"--platform linux/amd64"*|*"--platform linux/arm64"*) echo "ok: platform" ;;
+            *) echo "FAIL: missing platform"; fail=1 ;;
+          esac
+          LAST="$(tail -n1 /tmp/mock-docker/build-args.txt)"
+          [ "$LAST" = "." ] || { echo "FAIL: context should be '.', got '$LAST'"; fail=1; }
+          [ "$fail" = 0 ] || exit 1
+          echo "PASS"

@@ -1,0 +1,43 @@
+name: Test activate-with-label without label applied
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create sentinel authorized_keys
+        run: |
+          mkdir -p ~/.ssh
+          if [ -f ~/.ssh/authorized_keys ]; then cp ~/.ssh/authorized_keys /tmp/authorized_keys.bak; fi
+          echo "ssh-ed25519 AAAAsentinel sentinel@test" >> ~/.ssh/authorized_keys
+      - id: action
+        uses: .
+        with:
+          github-secret: ${{ secrets.GITHUB_TOKEN }}
+          activate-with-label: 'true'
+          label: with-ssh
+          fail-silently: 'false'
+      - name: Assert action succeeded and keys were not touched
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          cat ~/.ssh/authorized_keys || true
+          if ! grep -q "AAAAsentinel" ~/.ssh/authorized_keys; then
+            echo "FAIL: authorized_keys was modified although the label was not applied"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Restore authorized_keys
+        if: always()
+        run: |
+          if [ -f /tmp/authorized_keys.bak ]; then
+            cp /tmp/authorized_keys.bak ~/.ssh/authorized_keys
+          else
+            sed -i '/AAAAsentinel/d' ~/.ssh/authorized_keys || true
+          fi

@@ -1,0 +1,35 @@
+name: Test basic chown
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/chown-target/sub"
+          echo hello > "$GITHUB_WORKSPACE/chown-target/file.txt"
+          echo world > "$GITHUB_WORKSPACE/chown-target/sub/nested.txt"
+      - id: action
+        uses: .
+        with:
+          directory: ${{ github.workspace }}/chown-target
+          ALPINE_IMAGE: alpine:3.20
+      - name: Assert ownership matches current user
+        run: |
+          UIDG="$(id -u):$(id -g)"
+          echo "expected owner: $UIDG"
+          for f in chown-target chown-target/file.txt chown-target/sub chown-target/sub/nested.txt; do
+            OWNER="$(stat -c '%u:%g' "$GITHUB_WORKSPACE/$f")"
+            echo "$f -> $OWNER"
+            if [ "$OWNER" != "$UIDG" ]; then
+              echo "FAIL: $f owned by $OWNER"
+              exit 1
+            fi
+          done
+          if [ "$(cat "$GITHUB_WORKSPACE/chown-target/file.txt")" != "hello" ]; then
+            echo "FAIL: file content changed"
+            exit 1
+          fi
+          echo "PASS"

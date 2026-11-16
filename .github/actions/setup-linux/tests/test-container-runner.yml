@@ -1,0 +1,85 @@
+name: Test container runner
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock tools and mark as container runner
+        run: |
+          set -eu
+          if ! touch /.incontainer 2>/dev/null; then sudo touch /.incontainer; fi
+          M=/tmp/mockbin
+          rm -rf "$M"; mkdir -p "$M"
+          rm -f /tmp/mock-docker.log /tmp/mock-aws.log
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          cat > "$M/curl" <<EOF
+          #!/bin/bash
+          case "\$*" in
+            *169.254.169.254/latest/api/token*) echo "fake-token"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/*)
+              for a in "\$@"; do last="\$a"; done
+              echo "fake-\${last##*/}"; exit 0 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+          cat > "$M/aws" <<'EOF'
+          #!/bin/bash
+          echo "aws $*" >> /tmp/mock-aws.log
+          case "$*" in
+            "sts get-caller-identity"*)
+              printf '{\n    "UserId": "AIDFAKE",\n    "Account": "123456789012",\n    "Arn": "arn:aws:iam::123456789012:user/fake"\n}\n' ;;
+            "ecr get-login-password"*) echo "fake-ecr-password" ;;
+          esac
+          exit 0
+          EOF
+          cat > "$M/docker" <<'EOF'
+          #!/bin/bash
+          if [[ "$*" == *"--password-stdin"* ]]; then
+            pw="$(cat)"
+            echo "docker $* PASSWORD=$pw" >> /tmp/mock-docker.log
+            echo "Login Succeeded"
+            exit 0
+          fi
+          echo "docker $*" >> /tmp/mock-docker.log
+          exit 0
+          EOF
+          printf '#!/bin/bash\nexec "$@"\n' > "$M/sudo"
+          printf '#!/bin/bash\necho "systemctl $*" >> /tmp/mock-systemctl.log\nexit 0\n' > "$M/systemctl"
+          printf '#!/bin/bash\necho "00:00.0 Host bridge: Fake Corp"\nexit 0\n' > "$M/lspci"
+          chmod +x "$M"/*
+          echo "$M" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert runner directories exported
+        run: |
+          for v in RUNNER_ARTIFACT_DIR RUNNER_TEST_RESULTS_DIR RUNNER_DOCS_DIR; do
+            val="${!v:-}"
+            echo "$v=$val"
+            [ -n "$val" ] && [ -d "$val" ] || { echo "FAIL: $v missing"; exit 1; }
+          done
+          echo "PASS"
+      - name: Assert ECR login done but docker cleanup skipped
+        run: |
+          echo "--- docker calls ---"; cat /tmp/mock-docker.log || true
+          grep -q 'login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com' /tmp/mock-docker.log \
+            || { echo "FAIL: ECR login not performed"; exit 1; }
+          if grep -q 'system prune' /tmp/mock-docker.log; then
+            echo "FAIL: docker prune should be skipped in container runner"; exit 1
+          fi
+          if grep -q 'docker version' /tmp/mock-docker.log; then
+            echo "FAIL: docker start check should be skipped in container runner"; exit 1
+          fi
+          echo "PASS"
+      - name: Assert GPU_FLAG not set (no /dev/nvidiaX)
+        run: |
+          echo "GPU_FLAG='${GPU_FLAG:-}'"
+          if compgen -G "/dev/nvidia[0-9]" >/dev/null; then echo "SKIP: host has NVIDIA devices"; exit 0; fi
+          [ -z "${GPU_FLAG:-}" ] || { echo "FAIL: GPU_FLAG unexpectedly set"; exit 1; }
+          echo "PASS"
+      - name: Cleanup marker
+        if: always()
+        run: rm -f /.incontainer 2>/dev/null || sudo rm -f /.incontainer || true

@@ -1,0 +1,32 @@
+name: Test missing environment and pip files
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          default-packages: "wheel"
+          environment-file: tests/fixtures/does-not-exist.yml
+          pip-requirements-file: tests/fixtures/does-not-exist.txt
+      - name: Assert environment still created
+        shell: bash
+        run: |
+          echo "outcome: ${{ steps.action.outcome }}"
+          if [ "${{ steps.action.outcome }}" != "success" ]; then
+            echo "FAIL: action should succeed with missing files"; exit 1
+          fi
+          if [ -z "$CONDA_PREFIX" ] || [ ! -d "$CONDA_PREFIX" ]; then
+            echo "FAIL: CONDA_PREFIX missing"; exit 1
+          fi
+          OUT="$($CONDA_RUN python --version 2>&1)"
+          echo "python: $OUT"
+          case "$OUT" in
+            *"Python 3.9"*) ;;
+            *) echo "FAIL: expected Python 3.9"; exit 1 ;;
+          esac
+          $CONDA_RUN python -c 'import wheel' || { echo "FAIL: wheel missing"; exit 1; }
+          echo "PASS"

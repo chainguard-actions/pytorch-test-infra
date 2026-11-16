@@ -1,0 +1,33 @@
+name: Test sparse checkout
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          sparse-checkout: |
+            src
+          path: sparse-target
+      - name: Assert only sparse paths checked out
+        run: |
+          T="$GITHUB_WORKSPACE/sparse-target"
+          ls -la "$T"
+          if [ ! -d "$T/src" ]; then
+            echo "FAIL: src directory missing"
+            exit 1
+          fi
+          if [ -d "$T/__test__" ]; then
+            echo "FAIL: __test__ should not be checked out"
+            exit 1
+          fi
+          if [ -d "$T/dist" ]; then
+            echo "FAIL: dist should not be checked out"
+            exit 1
+          fi
+          echo "PASS"

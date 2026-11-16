@@ -1,0 +1,1781 @@
+import {
+  Box,
+  FormControl,
+  InputLabel,
+  Link,
+  MenuItem,
+  Paper,
+  Select,
+  SelectChangeEvent,
+  Skeleton,
+  Stack,
+  Tooltip,
+  Typography,
+  useTheme,
+} from "@mui/material";
+import { durationDisplay, LocalTimeHuman } from "components/common/TimeUtils";
+import TooltipTarget from "components/common/tooltipTarget/TooltipTarget";
+import CrcrL3Readiness from "components/crcr/CrcrL3Readiness";
+import CrcrLevelAudit from "components/crcr/CrcrLevelAudit";
+import TriageVerdictSection, {
+  CollapsibleTriageVerdict,
+} from "components/crcr/TriageVerdictSection";
+import hudStyles from "components/hud.module.css";
+import { getConclusionChar } from "lib/JobClassifierUtil";
+import {
+  CRCR_HEALTH_STALE_AFTER_MINUTES,
+  CRCR_HEALTH_WINDOW_LABEL,
+  CRCR_HEALTH_WINDOW_MINUTES,
+  summarizeCrcrHealth,
+} from "lib/crcr/healthProbe";
+import { L3_PROMOTION_WINDOW_DAYS } from "lib/crcr/l3Thresholds";
+import {
+  isRealCommitSha,
+  NightlyRow,
+  paginateNightlyMatrix,
+} from "lib/crcr/nightlyMatrix";
+import { CRCR_TIME_RANGES } from "lib/crcr/timeRanges";
+import { parseTriageVerdict } from "lib/crcr/triageVerdict";
+import { Highlight } from "lib/types";
+import Head from "next/head";
+import NextLink from "next/link";
+import { useRouter } from "next/router";
+import {
+  createContext,
+  ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import useSWR from "swr";
+
+import { fetcherHandleError } from "lib/GeneralUtils";
+
+const CrcrPinnedContext = createContext<[Highlight, any]>([
+  { sha: undefined, name: undefined },
+  null,
+]);
+
+const NIGHTLY_ROWS_PER_PAGE = 100;
+const NIGHTLY_QUERY_ROW_LIMIT = NIGHTLY_ROWS_PER_PAGE + 1;
+
+// ---- Types ----
+
+interface HealthPrRow {
+  pr_number: number;
+  last_run: string;
+  successes: number;
+  total: number;
+  pending: number;
+  overdue_in_progress: number;
+  pass_rate: number | null;
+}
+
+interface CrcrJobRow {
+  upstream_repo: string;
+  pr_number?: number;
+  pytorch_head_sha: string;
+  workflow_name: string;
+  job_name: string;
+  check_run_id: string;
+  run_id: string;
+  run_attempt: number;
+  status: string;
+  conclusion: string;
+  started_at: string;
+  completed_at: string;
+  duration_seconds: number;
+  total_tests: number;
+  passed_tests: number;
+  failed_tests: number;
+  skipped_tests: number;
+  workflow_run_url: string;
+  artifact_url: string;
+  queue_time: number | null;
+  execution_time: number | null;
+  failed_tests_json: string;
+  triage_verdict_json: string;
+}
+
+interface SummaryStats {
+  successes: number;
+  failures: number;
+  timed_out: number;
+  total_jobs: number;
+  pass_rate: number;
+  total_prs: number;
+  avg_queue_time_s: number | null;
+  avg_exec_time_s: number | null;
+  max_exec_time_s: number | null;
+  overrun_rate: number;
+  median_e2e_time_s: number | null;
+  p95_exec_time_s: number | null;
+  p95_e2e_time_s: number | null;
+  timeout_rate: number;
+}
+
+interface NightlySummaryStats {
+  successes: number;
+  failures: number;
+  timed_out: number;
+  total: number;
+  nightly_runs: number;
+  pass_rate: number;
+}
+
+interface RepoTenure {
+  current_level: string;
+  level_since: string;
+  first_seen: string;
+  last_seen: string;
+}
+
+// "2 months ago" / "5 days ago"; caps at "100+ days ago" since level_since
+// itself floors there (see query.sql).
+function tenureDisplay(sinceIso: string): string {
+  const days = Math.floor(
+    (Date.now() - new Date(sinceIso).getTime()) / (1000 * 60 * 60 * 24)
+  );
+  if (days >= 100) return "100+ days ago";
+  if (days < 60) return `${days} day${days === 1 ? "" : "s"} ago`;
+  const months = Math.floor(days / 30);
+  return `${months} month${months === 1 ? "" : "s"} ago`;
+}
+
+// "47 days of data" — spans first_seen -> last_seen across all levels, not
+// just the current one. Covers the L3 promotion prerequisite's second half
+// ("the HUD must have at least 2 weeks of recent data").
+function dataCoverageDisplay(
+  firstSeenIso: string,
+  lastSeenIso: string
+): string {
+  const days = Math.floor(
+    (new Date(lastSeenIso).getTime() - new Date(firstSeenIso).getTime()) /
+      (1000 * 60 * 60 * 24)
+  );
+  return `${days} day${days === 1 ? "" : "s"} of data`;
+}
+
+// ---- Summary Stat Cards ----
+
+// RFC-0050 L3 promotion/demotion infrastructure gates (rfcs#102, ratified).
+const L3_AVG_QUEUE_TIME_S = 30 * 60; // < 30 min
+const L3_OVERRUN_RATE = 0.01; // < 1% of jobs over 3h
+const L3_E2E_TIME_S = 3 * 3600; // < 3 h (P50 time-to-signal)
+const L3_TIMEOUT_RATE = 0.01; // < 1%
+
+function StatCard({
+  label,
+  value,
+  sub,
+  color,
+  tooltip,
+}: {
+  label: string;
+  value: string | number;
+  sub?: string;
+  color?: string;
+  tooltip?: string;
+}) {
+  return (
+    <Paper
+      elevation={1}
+      sx={{
+        p: 2,
+        minWidth: 140,
+        flex: 1,
+        textAlign: "center",
+        borderTop: color ? `3px solid ${color}` : undefined,
+      }}
+    >
+      <Typography variant="caption" color="text.secondary">
+        {label}
+        {tooltip && (
+          <Tooltip title={tooltip}>
+            <Box
+              component="span"
+              tabIndex={0}
+              sx={{ cursor: "help", ml: 0.5 }}
+              aria-label={`About ${label}`}
+            >
+              ⓘ
+            </Box>
+          </Tooltip>
+        )}
+      </Typography>
+      <Typography variant="h5" sx={{ fontWeight: 600, color: color }}>
+        {value}
+      </Typography>
+      {sub && (
+        <Typography variant="caption" color="text.secondary">
+          {sub}
+        </Typography>
+      )}
+    </Paper>
+  );
+}
+
+function SummaryCards({
+  stats,
+  healthCard,
+}: {
+  stats: SummaryStats;
+  healthCard?: ReactNode;
+}) {
+  const theme = useTheme();
+  const passColor =
+    stats.pass_rate >= 1.0
+      ? "#2e7d32"
+      : stats.pass_rate >= 0.9
+      ? "#ed6c02"
+      : "#d32f2f";
+  const overrunColor =
+    stats.overrun_rate >= L3_OVERRUN_RATE
+      ? theme.palette.error.main
+      : stats.overrun_rate > 0
+      ? theme.palette.warning.main
+      : theme.palette.success.main;
+
+  return (
+    <Stack spacing={2}>
+      <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+        {healthCard}
+        {!healthCard && (
+          <StatCard
+            label="Pass Rate"
+            value={`${(stats.pass_rate * 100).toFixed(1)}%`}
+            sub={`${stats.successes}/${stats.total_jobs} jobs`}
+            color={passColor}
+          />
+        )}
+        <StatCard
+          label="Total PRs"
+          value={stats.total_prs}
+          sub="unique PRs tested"
+        />
+        <StatCard
+          label="Failures"
+          value={stats.failures}
+          sub={stats.timed_out > 0 ? `+ ${stats.timed_out} timed out` : ""}
+          color={stats.failures > 0 ? "#d32f2f" : undefined}
+        />
+      </Box>
+      <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+        <StatCard
+          label="Avg Queue Time"
+          value={
+            stats.avg_queue_time_s != null
+              ? durationDisplay(Math.round(stats.avg_queue_time_s))
+              : "–"
+          }
+          sub="dispatch to start"
+          color={
+            stats.avg_queue_time_s != null &&
+            stats.avg_queue_time_s > L3_AVG_QUEUE_TIME_S
+              ? "#d32f2f"
+              : undefined
+          }
+        />
+        <StatCard
+          label="Avg Execution Time"
+          value={
+            stats.avg_exec_time_s != null
+              ? durationDisplay(Math.round(stats.avg_exec_time_s))
+              : "–"
+          }
+          sub="start to completion"
+        />
+        <StatCard
+          label="Overrun Rate"
+          value={
+            // A tiny nonzero rate (e.g. 0.03%) would otherwise round to
+            // "0.0%" at 1 decimal while still rendering warning-yellow
+            // below — showing "<0.1%" instead avoids that mismatch.
+            stats.overrun_rate > 0 && stats.overrun_rate < 0.001
+              ? "<0.1%"
+              : `${(stats.overrun_rate * 100).toFixed(1)}%`
+          }
+          sub={
+            stats.max_exec_time_s != null
+              ? `max: ${durationDisplay(Math.round(stats.max_exec_time_s))}` +
+                (stats.p95_exec_time_s != null
+                  ? ` · p95: ${durationDisplay(
+                      Math.round(stats.p95_exec_time_s)
+                    )}`
+                  : "")
+              : "share of jobs over 3h"
+          }
+          color={overrunColor}
+          tooltip="Share of jobs that individually overran 3h. max = the single longest job run; p95 = the run time 95% of jobs finish within."
+        />
+        <StatCard
+          label="End-to-End Time (P50)"
+          value={
+            stats.median_e2e_time_s != null
+              ? durationDisplay(Math.round(stats.median_e2e_time_s))
+              : "–"
+          }
+          sub={
+            stats.p95_e2e_time_s != null
+              ? `p95: ${durationDisplay(Math.round(stats.p95_e2e_time_s))}`
+              : "dispatch to CI status"
+          }
+          color={
+            stats.median_e2e_time_s != null &&
+            stats.median_e2e_time_s > L3_E2E_TIME_S
+              ? "#d32f2f"
+              : undefined
+          }
+          tooltip="P50 (median) time from dispatch to CI status: half of jobs are faster than this, half slower. p95 = the time 95% of jobs finish within."
+        />
+        <StatCard
+          label="Timeout Rate"
+          value={`${(stats.timeout_rate * 100).toFixed(1)}%`}
+          sub={`${stats.timed_out} timed out / ${stats.total_jobs} jobs`}
+          color={
+            stats.timeout_rate >= L3_TIMEOUT_RATE
+              ? "#d32f2f"
+              : stats.timeout_rate > 0
+              ? "#ed6c02"
+              : undefined
+          }
+        />
+      </Box>
+    </Stack>
+  );
+}
+
+function isExpectedNightlyOutcome(job: CrcrJobRow): boolean {
+  const name = job.job_name ?? "";
+  return (
+    (name.includes("xfail") && job.conclusion === "failure") ||
+    (name.includes("xcancel") && job.conclusion === "cancelled") ||
+    (name.includes("xtimeout") && job.conclusion === "timed_out")
+  );
+}
+
+function isNightlyJobPassing(job: CrcrJobRow): boolean {
+  if (
+    job.status === "in_progress" &&
+    (job.job_name.includes("xfail") || job.job_name.includes("xtimeout"))
+  ) {
+    return true;
+  }
+  if (job.status !== "completed") return false;
+  return job.conclusion === "success" || isExpectedNightlyOutcome(job);
+}
+
+const NIGHTLY_HEALTH_COUNT = 5;
+
+function NightlyHealthCard({ repoFullName }: { repoFullName: string }) {
+  // Window matches L3_PROMOTION_WINDOW_DAYS (the 2-week promotion window)
+  // rather than an independent magic number, so this isn't a third,
+  // inconsistent window alongside the Time Range selector.
+  const url =
+    `/api/clickhouse/crcr_nightly_dashboard?parameters=` +
+    encodeURIComponent(
+      JSON.stringify({
+        repo: repoFullName,
+        days: String(L3_PROMOTION_WINDOW_DAYS),
+        limit: String(NIGHTLY_QUERY_ROW_LIMIT),
+        offset: "0",
+      })
+    );
+  const { data } = useSWR<CrcrJobRow[]>(url, fetcherHandleError, {
+    refreshInterval: 60_000,
+  });
+
+  if (!data || data.length === 0) return null;
+
+  const shaMap = new Map<string, CrcrJobRow[]>();
+  for (const job of data) {
+    if (!job.pytorch_head_sha) continue;
+    const jobs = shaMap.get(job.pytorch_head_sha) ?? [];
+    jobs.push(job);
+    shaMap.set(job.pytorch_head_sha, jobs);
+  }
+
+  const shasByTime = Array.from(shaMap.entries())
+    .map(([sha, jobs]) => ({
+      sha,
+      jobs,
+      latestTime: Math.max(
+        ...jobs.map((j) => new Date(j.started_at).getTime())
+      ),
+    }))
+    .sort((a, b) => b.latestTime - a.latestTime)
+    .slice(0, NIGHTLY_HEALTH_COUNT);
+
+  if (shasByTime.length === 0) return null;
+
+  const allPassed = shasByTime.every((entry) =>
+    entry.jobs.every(isNightlyJobPassing)
+  );
+  const passedCount = shasByTime.filter((entry) =>
+    entry.jobs.every(isNightlyJobPassing)
+  ).length;
+  const borderColor = allPassed ? "#2e7d32" : "#ed6c02";
+  const label = allPassed ? "Healthy" : "Degraded";
+
+  return (
+    <Paper
+      elevation={1}
+      sx={{
+        p: 2,
+        borderTop: `3px solid ${borderColor}`,
+        textAlign: "center",
+        minWidth: 200,
+        flex: 1,
+      }}
+    >
+      <Typography variant="caption" color="text.secondary">
+        CRCR Relay Health - Nightly
+      </Typography>
+      <Typography variant="h5" sx={{ fontWeight: 600, color: borderColor }}>
+        {label}
+      </Typography>
+      <Typography variant="caption" color="text.secondary">
+        {passedCount}/{shasByTime.length} of last {NIGHTLY_HEALTH_COUNT}{" "}
+        nightlies passed
+      </Typography>
+    </Paper>
+  );
+}
+
+function NightlySummaryCards({
+  rows,
+  repoFullName,
+  stats,
+}: {
+  rows: NightlyRow<CrcrJobRow>[];
+  repoFullName: string;
+  stats: NightlySummaryStats | null;
+}) {
+  const isCrcrTest = repoFullName === "pytorch/crcr-test";
+
+  const passColor =
+    (stats?.pass_rate ?? 0) >= 1.0
+      ? "#2e7d32"
+      : (stats?.pass_rate ?? 0) >= 0.9
+      ? "#ed6c02"
+      : "#d32f2f";
+
+  return (
+    <Box sx={{ display: "flex", gap: 2, flexWrap: "wrap" }}>
+      {isCrcrTest ? (
+        <NightlyHealthCard repoFullName={repoFullName} />
+      ) : (
+        <StatCard
+          label="Pass Rate"
+          value={stats ? `${(stats.pass_rate * 100).toFixed(1)}%` : "–"}
+          sub={stats ? `${stats.successes}/${stats.total} jobs` : ""}
+          color={stats ? passColor : undefined}
+        />
+      )}
+      <StatCard
+        label="Nightly Runs"
+        value={stats?.nightly_runs ?? "–"}
+        sub="completed runs in range"
+      />
+      <StatCard
+        label="Failures"
+        value={stats?.failures ?? "–"}
+        sub={stats?.timed_out ? `+ ${stats.timed_out} timed out` : ""}
+        color={stats && stats.failures > 0 ? "#d32f2f" : undefined}
+      />
+    </Box>
+  );
+}
+
+// ---- Relay Health Card (for pytorch/crcr-test) ----
+
+function RelayHealthCard({
+  healthPrs,
+}: {
+  healthPrs: HealthPrRow[] | undefined;
+}) {
+  if (!healthPrs || healthPrs.length === 0) return null;
+  const { pending, overdue, passedCount, state } =
+    summarizeCrcrHealth(healthPrs);
+  const borderColor = state === "degraded" ? "#ed6c02" : "#2e7d32";
+  const label = state === "degraded" ? "Degraded" : "Healthy";
+  const detail =
+    state === "degraded" && overdue > 0
+      ? `${overdue} job${overdue === 1 ? "" : "s"} overdue`
+      : pending > 0
+      ? `${pending} job${pending === 1 ? "" : "s"} pending`
+      : `${passedCount}/${healthPrs.length} probe PRs passed in the last ${CRCR_HEALTH_WINDOW_LABEL}`;
+  return (
+    <Paper
+      elevation={1}
+      sx={{
+        p: 2,
+        borderTop: `3px solid ${borderColor}`,
+        textAlign: "center",
+        minWidth: 200,
+        flex: 1,
+      }}
+    >
+      <Typography variant="caption" color="text.secondary">
+        CRCR Relay Health
+      </Typography>
+      <Typography variant="h5" sx={{ fontWeight: 600, color: borderColor }}>
+        {label}
+      </Typography>
+      <Typography variant="caption" color="text.secondary">
+        {detail}
+      </Typography>
+    </Paper>
+  );
+}
+
+// ---- Job Cell (colored character, matching main HUD style) ----
+
+const conclusionCssColor: Record<string, string> = {
+  success: "var(--color-success, #3fb950)",
+  failure: "var(--color-failure, #f85149)",
+  cancelled: "var(--color-failure, #f85149)",
+  timed_out: "var(--color-failure, #f85149)",
+  pending: "var(--color-pending, #d29922)",
+  skipped: "var(--color-grey, #8b949e)",
+  neutral: "var(--color-grey, #8b949e)",
+};
+
+function jobUrl(job: CrcrJobRow): string {
+  if (job.workflow_run_url && job.check_run_id) {
+    return `${job.workflow_run_url}/job/${job.check_run_id}`;
+  }
+  return job.workflow_run_url || "";
+}
+
+function JobCellTooltipContent({ job }: { job: CrcrJobRow }) {
+  const conclusion = job.status === "completed" ? job.conclusion : job.status;
+  const url = jobUrl(job);
+  const lines = [
+    `Job: ${job.job_name}`,
+    `Status: ${conclusion}`,
+    job.run_attempt > 1 ? `Attempt: ${job.run_attempt}` : null,
+    `Duration: ${
+      job.duration_seconds
+        ? durationDisplay(Math.round(job.duration_seconds))
+        : "–"
+    }`,
+    job.total_tests
+      ? `Tests: ${job.passed_tests}/${job.total_tests} passed`
+      : null,
+    job.queue_time != null ? `Queue: ${job.queue_time.toFixed(1)}s` : null,
+  ].filter(Boolean);
+
+  const verdict = parseTriageVerdict(job.triage_verdict_json);
+
+  let failedTests: Array<{
+    name: string;
+    classname?: string;
+    message?: string;
+    stacktrace?: string;
+  }> = [];
+  if (job.failed_tests_json) {
+    try {
+      failedTests = JSON.parse(job.failed_tests_json);
+    } catch {
+      // ignore malformed JSON
+    }
+  }
+
+  return (
+    <div
+      style={{ whiteSpace: "pre-line", fontSize: "0.8rem", textAlign: "left" }}
+    >
+      {lines.join("\n")}
+      {verdict && (
+        <TriageVerdictSection
+          verdict={verdict}
+          prNumber={job.pr_number}
+          upstreamRepo={job.upstream_repo}
+        />
+      )}
+      {failedTests.length > 0 && (
+        <div
+          style={{
+            marginTop: 8,
+            borderTop: "1px solid rgba(255,255,255,0.2)",
+            paddingTop: 6,
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>
+            Failed tests ({failedTests.length}):
+          </div>
+          {failedTests.slice(0, 10).map((t, i) => (
+            <div key={i} style={{ marginBottom: 3 }}>
+              <span style={{ color: "#f85149" }}>✗</span>{" "}
+              {t.classname ? `${t.classname}::${t.name}` : t.name}
+              {t.message && (
+                <div
+                  style={{
+                    fontSize: "0.7rem",
+                    color: "rgba(255,255,255,0.6)",
+                    marginLeft: 12,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    maxWidth: 300,
+                  }}
+                >
+                  {t.message}
+                </div>
+              )}
+              {t.stacktrace && (
+                <details style={{ marginLeft: 12, fontSize: "0.65rem" }}>
+                  <summary
+                    style={{
+                      color: "rgba(255,255,255,0.5)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    stacktrace
+                  </summary>
+                  <pre
+                    style={{
+                      whiteSpace: "pre-wrap",
+                      color: "rgba(255,255,255,0.5)",
+                      maxHeight: 120,
+                      overflow: "auto",
+                      margin: "2px 0",
+                    }}
+                  >
+                    {t.stacktrace}
+                  </pre>
+                </details>
+              )}
+            </div>
+          ))}
+          {failedTests.length > 10 && (
+            <div style={{ color: "rgba(255,255,255,0.5)", fontSize: "0.7rem" }}>
+              … and {failedTests.length - 10} more
+            </div>
+          )}
+        </div>
+      )}
+      {url && (
+        <div style={{ marginTop: 4 }}>
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--link-color, #58a6ff)" }}
+          >
+            Show log ›
+          </a>
+        </div>
+      )}
+      {job.artifact_url && (
+        <div style={{ marginTop: 2 }}>
+          <a
+            href={job.artifact_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: "var(--link-color, #58a6ff)" }}
+          >
+            View artifacts ›
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function JobCell({ job, sha }: { job: CrcrJobRow; sha: string }) {
+  const conclusion =
+    job.status === "completed"
+      ? job.conclusion
+      : job.status === "in_progress"
+      ? "pending"
+      : job.status;
+  const char = getConclusionChar(conclusion);
+  const color = conclusionCssColor[conclusion] ?? "var(--color-grey, #8b949e)";
+  const [pinnedId, setPinnedId] = useContext(CrcrPinnedContext);
+
+  return (
+    <TooltipTarget
+      sha={sha}
+      name={job.job_name}
+      pinnedId={pinnedId}
+      setPinnedId={setPinnedId}
+      tooltipContent={<JobCellTooltipContent job={job} />}
+    >
+      <span
+        style={{
+          fontFamily: "monospace",
+          fontWeight: "bold",
+          fontSize: "1rem",
+          display: "inline-block",
+          width: "14px",
+          textAlign: "center",
+          color,
+          cursor: "pointer",
+        }}
+      >
+        {char}
+      </span>
+    </TooltipTarget>
+  );
+}
+
+// ---- Matrix Builder ----
+
+interface MatrixRow {
+  prNumber: number;
+  sha: string;
+  upstreamRepo: string;
+  latestTime: string;
+  jobs: Map<string, CrcrJobRow>;
+}
+
+interface ColumnDef {
+  type: "single" | "group";
+  name: string;
+  members?: string[];
+}
+
+function detectGroups(jobNames: string[]): ColumnDef[] {
+  const prefixMap = new Map<string, string[]>();
+  for (const name of jobNames) {
+    const match = name.match(/^(.+[-_])(\d+)$/);
+    if (match) {
+      const prefix = match[1];
+      const group = prefixMap.get(prefix) ?? [];
+      group.push(name);
+      prefixMap.set(prefix, group);
+    }
+  }
+
+  const grouped = new Set<string>();
+  const columns: ColumnDef[] = [];
+
+  for (const name of jobNames) {
+    if (grouped.has(name)) continue;
+    const match = name.match(/^(.+[-_])(\d+)$/);
+    if (match) {
+      const prefix = match[1];
+      const members = prefixMap.get(prefix);
+      if (members && members.length >= 3) {
+        columns.push({
+          type: "group",
+          name: prefix.replace(/[-_]$/, ""),
+          members: members.sort(),
+        });
+        for (const m of members) grouped.add(m);
+        continue;
+      }
+    }
+    columns.push({ type: "single", name });
+  }
+  return columns;
+}
+
+function GroupedJobCell({
+  jobs,
+  groupName,
+  sha,
+}: {
+  jobs: CrcrJobRow[];
+  groupName: string;
+  sha: string;
+}) {
+  const [pinnedId, setPinnedId] = useContext(CrcrPinnedContext);
+
+  const worst = jobs.reduce(
+    (w, j) => {
+      const c = j.status === "completed" ? j.conclusion : j.status;
+      const severity =
+        c === "failure" || c === "timed_out"
+          ? 3
+          : c === "cancelled"
+          ? 2
+          : c === "pending" || c === "in_progress"
+          ? 1
+          : 0;
+      return severity > w.severity ? { severity, conclusion: c } : w;
+    },
+    { severity: -1, conclusion: "success" }
+  );
+
+  const char = getConclusionChar(
+    worst.conclusion === "in_progress" ? "pending" : worst.conclusion
+  );
+  const color =
+    conclusionCssColor[worst.conclusion] ?? "var(--color-grey, #8b949e)";
+
+  const tooltipContent = (
+    <div
+      style={{ whiteSpace: "pre-line", fontSize: "0.8rem", textAlign: "left" }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>
+        {groupName} ({jobs.length} jobs)
+      </div>
+      {jobs.map((j) => {
+        const c = j.status === "completed" ? j.conclusion : j.status;
+        const url = jobUrl(j);
+        return (
+          <div key={j.job_name}>
+            {url ? (
+              <a
+                href={url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "var(--link-color, #58a6ff)" }}
+              >
+                {j.job_name}
+              </a>
+            ) : (
+              j.job_name
+            )}
+            : {c}
+            <CollapsibleTriageVerdict
+              verdictJson={j.triage_verdict_json}
+              prNumber={j.pr_number}
+              upstreamRepo={j.upstream_repo}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  return (
+    <TooltipTarget
+      sha={sha}
+      name={groupName}
+      pinnedId={pinnedId}
+      setPinnedId={setPinnedId}
+      tooltipContent={tooltipContent}
+    >
+      <span
+        style={{
+          fontFamily: "monospace",
+          fontWeight: "bold",
+          fontSize: "1rem",
+          display: "inline-block",
+          width: "14px",
+          textAlign: "center",
+          color,
+          cursor: "pointer",
+        }}
+      >
+        {char}
+      </span>
+    </TooltipTarget>
+  );
+}
+
+function buildMatrix(data: CrcrJobRow[]): {
+  jobNames: string[];
+  rows: MatrixRow[];
+} {
+  const jobNamesSet = new Set<string>();
+  const prMap = new Map<number, MatrixRow>();
+
+  for (const job of data) {
+    const prNum = job.pr_number ?? 0;
+    if (prNum <= 0) continue;
+    jobNamesSet.add(job.job_name);
+    let row = prMap.get(prNum);
+    if (!row) {
+      row = {
+        prNumber: prNum,
+        sha: job.pytorch_head_sha,
+        upstreamRepo: job.upstream_repo ?? "pytorch/pytorch",
+        latestTime: job.started_at,
+        jobs: new Map(),
+      };
+      prMap.set(prNum, row);
+    }
+    // Track latest started_at for this PR. A newer commit supersedes the
+    // row entirely -- different dispatches (a mid-PR push vs. the eventual
+    // post-merge pull_request run, say) share the same pr_number but aren't
+    // the same commit, so cells from the old commit must not linger once a
+    // newer one starts reporting.
+    if (job.started_at > row.latestTime) {
+      row.latestTime = job.started_at;
+      if (job.pytorch_head_sha !== row.sha) {
+        row.sha = job.pytorch_head_sha;
+        row.jobs.clear();
+      }
+    }
+    // Ignore jobs for any commit other than the row's current one.
+    if (job.pytorch_head_sha !== row.sha) continue;
+    // Keep the latest attempt per job_name
+    const existing = row.jobs.get(job.job_name);
+    if (!existing || job.run_attempt > existing.run_attempt) {
+      row.jobs.set(job.job_name, job);
+    }
+  }
+
+  const jobNames = Array.from(jobNamesSet).sort();
+  const rows = Array.from(prMap.values()).sort(
+    (a, b) =>
+      new Date(b.latestTime).getTime() - new Date(a.latestTime).getTime()
+  );
+  return { jobNames, rows };
+}
+
+// ---- Pagination ----
+
+const PER_PAGE = 50;
+
+function CrcrPagination({
+  page,
+  hasNextPage,
+  onPageChange,
+}: {
+  page: number;
+  hasNextPage: boolean;
+  onPageChange: (page: number) => void;
+}) {
+  return (
+    <div>
+      Page {page}:{" "}
+      {page > 1 ? (
+        <Link
+          component="button"
+          underline="hover"
+          onClick={() => onPageChange(page - 1)}
+        >
+          Prev
+        </Link>
+      ) : (
+        <span>Prev</span>
+      )}{" "}
+      |{" "}
+      {hasNextPage ? (
+        <Link
+          component="button"
+          underline="hover"
+          onClick={() => onPageChange(page + 1)}
+        >
+          Next
+        </Link>
+      ) : (
+        <span>Next</span>
+      )}
+    </div>
+  );
+}
+
+// ---- PR Info Hook ----
+
+interface PrInfo {
+  prNumber: number;
+  title: string;
+  author: string;
+}
+
+function usePrInfo(
+  upstreamRepo: string,
+  prNumbers: number[]
+): Map<number, PrInfo> {
+  const dedupedPrs = useMemo(
+    () => Array.from(new Set(prNumbers.filter((n) => n > 0))).slice(0, 50),
+    [prNumbers]
+  );
+  const url =
+    upstreamRepo && dedupedPrs.length > 0
+      ? `/api/crcr/pr-info?repo=${encodeURIComponent(
+          upstreamRepo
+        )}&prs=${encodeURIComponent(dedupedPrs.join(","))}`
+      : null;
+  const { data } = useSWR<PrInfo[]>(url, fetcherHandleError, {
+    revalidateOnFocus: false,
+  });
+
+  return useMemo(() => {
+    const map = new Map<number, PrInfo>();
+    if (data) {
+      for (const pr of data) {
+        map.set(pr.prNumber, pr);
+      }
+    }
+    return map;
+  }, [data]);
+}
+
+// ---- Commit Info Hook (for nightly view) ----
+
+interface CommitInfo {
+  sha: string;
+  title: string;
+  author: string;
+}
+
+function useCommitInfo(
+  upstreamRepo: string,
+  shas: string[]
+): Map<string, CommitInfo> {
+  const dedupedShas = useMemo(
+    () => Array.from(new Set(shas.filter(Boolean))).slice(0, 50),
+    [shas]
+  );
+  const url =
+    upstreamRepo && dedupedShas.length > 0
+      ? `/api/crcr/commit-info?repo=${encodeURIComponent(
+          upstreamRepo
+        )}&shas=${encodeURIComponent(dedupedShas.join(","))}`
+      : null;
+  const { data } = useSWR<CommitInfo[]>(url, fetcherHandleError, {
+    revalidateOnFocus: false,
+  });
+
+  return useMemo(() => {
+    const map = new Map<string, CommitInfo>();
+    if (data) {
+      for (const c of data) {
+        map.set(c.sha, c);
+      }
+    }
+    return map;
+  }, [data]);
+}
+
+// ---- PR Matrix Table ----
+
+function CrcrMatrix({
+  repoFullName,
+  days,
+  page,
+  onPageChange,
+}: {
+  repoFullName: string;
+  days: number;
+  page: number;
+  onPageChange: (page: number) => void;
+}) {
+  const offset = (page - 1) * PER_PAGE;
+  const url = `/api/clickhouse/crcr_backend_dashboard?parameters=${encodeURIComponent(
+    JSON.stringify({
+      repo: repoFullName,
+      days: String(days),
+      per_page: String(PER_PAGE + 1),
+      offset: String(offset),
+    })
+  )}`;
+  const { data, error } = useSWR<CrcrJobRow[]>(url, fetcherHandleError, {
+    refreshInterval: 60_000,
+  });
+
+  const { matrix, hasNextPage, columns } = useMemo(() => {
+    if (!data) return { matrix: null, hasNextPage: false, columns: [] };
+    const full = buildMatrix(data);
+    const hasMore = full.rows.length > PER_PAGE;
+    return {
+      matrix: {
+        jobNames: full.jobNames,
+        rows: full.rows.slice(0, PER_PAGE),
+      },
+      hasNextPage: hasMore,
+      columns: detectGroups(full.jobNames),
+    };
+  }, [data]);
+
+  const upstreamRepo = matrix?.rows[0]?.upstreamRepo ?? "pytorch/pytorch";
+  const prNumbers = useMemo(
+    () => (matrix?.rows ?? []).map((r) => r.prNumber),
+    [matrix]
+  );
+  const prInfoMap = usePrInfo(upstreamRepo, prNumbers);
+  const [pinnedId, setPinnedId] = useContext(CrcrPinnedContext);
+
+  if (error) {
+    return (
+      <Typography color="error">
+        Failed to load dashboard: {error.message}
+      </Typography>
+    );
+  }
+  if (!data || !matrix) {
+    return <Skeleton variant="rectangular" height={400} />;
+  }
+  if (data.length === 0) {
+    return (
+      <>
+        <Typography color="text.secondary" sx={{ py: 4, textAlign: "center" }}>
+          No results for {repoFullName} in the last {days} days.
+        </Typography>
+        {page > 1 && (
+          <CrcrPagination
+            page={page}
+            hasNextPage={false}
+            onPageChange={onPageChange}
+          />
+        )}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div style={{ overflowX: "auto", overflowY: "visible" }}>
+        <table className={hudStyles.hudTable}>
+          <colgroup>
+            <col className={hudStyles.colTime} />
+            <col className={hudStyles.colSha} />
+            <col className={hudStyles.colCommit} />
+            <col className={hudStyles.colPr} />
+            <col className={hudStyles.colAuthor} />
+            {columns.map((col) => (
+              <col key={col.name} className={hudStyles.colJob} />
+            ))}
+          </colgroup>
+          <thead>
+            <tr>
+              <th className={hudStyles.regularHeader}>Time</th>
+              <th className={hudStyles.regularHeader}>SHA</th>
+              <th className={hudStyles.regularHeader}>Commit</th>
+              <th className={hudStyles.regularHeader}>PR</th>
+              <th className={hudStyles.regularHeader}>Author</th>
+              {columns.map((col) => (
+                <th
+                  key={col.name}
+                  className={hudStyles.jobHeader}
+                  style={{ cursor: "pointer" }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPinnedId({
+                      sha: undefined,
+                      name: pinnedId.name === col.name ? undefined : col.name,
+                    });
+                  }}
+                >
+                  <div
+                    className={hudStyles.jobHeaderName}
+                    style={{
+                      fontWeight: col.type === "group" ? 700 : 400,
+                    }}
+                  >
+                    <span
+                      className={
+                        pinnedId.name === col.name ? hudStyles.highlight : ""
+                      }
+                    >
+                      {col.name}
+                    </span>
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.rows.map((row) => {
+              const pr = prInfoMap.get(row.prNumber);
+              const commitTitle = pr?.title ?? `PR #${row.prNumber}`;
+
+              const isRowHighlighted = pinnedId.sha === row.sha;
+              const rowClass = isRowHighlighted ? hudStyles.highlight : "";
+
+              return (
+                <tr
+                  key={row.prNumber}
+                  className={rowClass}
+                  onClick={(e) => {
+                    if (
+                      pinnedId.name !== undefined ||
+                      pinnedId.sha !== undefined
+                    ) {
+                      return;
+                    }
+                    e.stopPropagation();
+                    setPinnedId({ sha: row.sha, name: undefined });
+                  }}
+                  style={{ cursor: "pointer" }}
+                >
+                  <td className={hudStyles.jobMetadata}>
+                    <LocalTimeHuman timestamp={row.latestTime} />
+                  </td>
+                  <td className={hudStyles.jobMetadata}>
+                    <span className={hudStyles.mono}>
+                      <a
+                        href={`https://github.com/${row.upstreamRepo}/commit/${row.sha}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {row.sha ? row.sha.substring(0, 7) : "–"}
+                      </a>
+                    </span>
+                  </td>
+                  <td className={hudStyles.jobMetadata}>
+                    <div className={hudStyles.jobMetadataTruncated}>
+                      <a
+                        href={`https://github.com/${row.upstreamRepo}/pull/${row.prNumber}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title={commitTitle}
+                      >
+                        {commitTitle}
+                      </a>
+                    </div>
+                  </td>
+                  <td className={hudStyles.jobMetadata}>
+                    <a
+                      href={`https://github.com/${row.upstreamRepo}/pull/${row.prNumber}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      #{row.prNumber}
+                    </a>
+                  </td>
+                  <td className={hudStyles.jobMetadata}>
+                    <div className={hudStyles.jobMetadataTruncatedAuthor}>
+                      {pr?.author ? (
+                        <a
+                          href={`https://github.com/${pr.author}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {pr.author}
+                        </a>
+                      ) : (
+                        "–"
+                      )}
+                    </div>
+                  </td>
+                  {columns.map((col) => {
+                    const colHighlight =
+                      pinnedId.name === col.name ? hudStyles.highlight : "";
+                    if (col.type === "group" && col.members) {
+                      const groupJobs = col.members
+                        .map((m) => row.jobs.get(m))
+                        .filter((j): j is CrcrJobRow => j != null);
+                      return (
+                        <td
+                          key={col.name}
+                          className={`${hudStyles.jobMetadata} ${colHighlight}`}
+                          style={{ textAlign: "center" }}
+                        >
+                          {groupJobs.length > 0 ? (
+                            <GroupedJobCell
+                              jobs={groupJobs}
+                              groupName={col.name}
+                              sha={row.sha}
+                            />
+                          ) : (
+                            "–"
+                          )}
+                        </td>
+                      );
+                    }
+                    const job = row.jobs.get(col.name);
+                    return (
+                      <td
+                        key={col.name}
+                        className={`${hudStyles.jobMetadata} ${colHighlight}`}
+                        style={{ textAlign: "center" }}
+                      >
+                        {job ? <JobCell job={job} sha={row.sha} /> : "–"}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <Box sx={{ mt: 2 }}>
+        <CrcrPagination
+          page={page}
+          hasNextPage={hasNextPage}
+          onPageChange={onPageChange}
+        />
+      </Box>
+    </>
+  );
+}
+
+// ---- Nightly Matrix Table ----
+
+function CrcrNightlyMatrix({
+  repoFullName,
+  days,
+  summaryStats,
+}: {
+  repoFullName: string;
+  days: number;
+  summaryStats: NightlySummaryStats | null;
+}) {
+  const [page, setPage] = useState(1);
+  const offset = (page - 1) * NIGHTLY_ROWS_PER_PAGE;
+
+  useEffect(() => {
+    setPage(1);
+  }, [repoFullName, days]);
+
+  const url = `/api/clickhouse/crcr_nightly_dashboard?parameters=${encodeURIComponent(
+    JSON.stringify({
+      repo: repoFullName,
+      days: String(days),
+      limit: String(NIGHTLY_QUERY_ROW_LIMIT),
+      offset: String(offset),
+    })
+  )}`;
+  const { data, error } = useSWR<CrcrJobRow[]>(url, fetcherHandleError, {
+    refreshInterval: 60_000,
+  });
+
+  const { matrix, columns, hasNextPage } = useMemo(() => {
+    if (!data) return { matrix: null, columns: [], hasNextPage: false };
+    const matrix = paginateNightlyMatrix(data, NIGHTLY_ROWS_PER_PAGE);
+    return {
+      matrix,
+      columns: detectGroups(matrix.jobNames),
+      hasNextPage: matrix.hasNextPage,
+    };
+  }, [data]);
+
+  const upstreamRepo = matrix?.rows[0]?.upstreamRepo ?? "pytorch/pytorch";
+  // Only ask GitHub about values that are actually commits; a reporter that
+  // sends no upstream SHA leaves a delivery_id here, which would just 404.
+  const nightlyShas = useMemo(
+    () => (matrix?.rows ?? []).map((r) => r.sha).filter(isRealCommitSha),
+    [matrix]
+  );
+  const commitInfoMap = useCommitInfo(upstreamRepo, nightlyShas);
+  const [pinnedId, setPinnedId] = useContext(CrcrPinnedContext);
+
+  if (error) {
+    return (
+      <Typography color="error">
+        Failed to load nightly dashboard: {error.message}
+      </Typography>
+    );
+  }
+  if (!data || !matrix) {
+    return <Skeleton variant="rectangular" height={400} />;
+  }
+  if (data.length === 0) {
+    return (
+      <>
+        <Typography color="text.secondary" sx={{ py: 4, textAlign: "center" }}>
+          No nightly results for {repoFullName} in the last {days} days.
+        </Typography>
+        {page > 1 && (
+          <CrcrPagination
+            page={page}
+            hasNextPage={false}
+            onPageChange={setPage}
+          />
+        )}
+      </>
+    );
+  }
+
+  const firstRow = offset + 1;
+  const lastRow = offset + matrix.rows.length;
+
+  return (
+    <>
+      <NightlySummaryCards
+        rows={matrix.rows}
+        repoFullName={repoFullName}
+        stats={summaryStats}
+      />
+      <div style={{ overflowX: "auto", overflowY: "visible" }}>
+        <table className={hudStyles.hudTable}>
+          <colgroup>
+            <col className={hudStyles.colTime} />
+            <col className={hudStyles.colSha} />
+            <col className={hudStyles.colCommit} />
+            {columns.map((col) => (
+              <col key={col.name} className={hudStyles.colJob} />
+            ))}
+          </colgroup>
+          <thead>
+            <tr>
+              <th className={hudStyles.regularHeader}>Time</th>
+              <th className={hudStyles.regularHeader}>SHA</th>
+              <th className={hudStyles.regularHeader}>Commit</th>
+              {columns.map((col) => (
+                <th
+                  key={col.name}
+                  className={hudStyles.jobHeader}
+                  style={{ cursor: "pointer" }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPinnedId({
+                      sha: undefined,
+                      name: pinnedId.name === col.name ? undefined : col.name,
+                    });
+                  }}
+                >
+                  <div
+                    className={hudStyles.jobHeaderName}
+                    style={{
+                      fontWeight: col.type === "group" ? 700 : 400,
+                    }}
+                  >
+                    <span
+                      className={
+                        pinnedId.name === col.name ? hudStyles.highlight : ""
+                      }
+                    >
+                      {col.name}
+                    </span>
+                  </div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {matrix.rows.map((row) => {
+              const commit = commitInfoMap.get(row.sha);
+              // Without a real upstream commit there is nothing to name the
+              // run after and nothing to link to, so fall back to the run id
+              // rather than rendering a truncated delivery_id over a 404.
+              const hasCommit = isRealCommitSha(row.sha);
+              const commitTitle =
+                commit?.title ||
+                (hasCommit
+                  ? `nightly (${row.sha.substring(0, 12)})`
+                  : `nightly run ${row.runId}`);
+              const isRowHighlighted = pinnedId.sha === row.sha;
+              const rowClass = isRowHighlighted ? hudStyles.highlight : "";
+              return (
+                <tr
+                  key={row.key}
+                  className={rowClass}
+                  onClick={(e) => {
+                    if (
+                      pinnedId.name !== undefined ||
+                      pinnedId.sha !== undefined
+                    ) {
+                      return;
+                    }
+                    e.stopPropagation();
+                    setPinnedId({ sha: row.sha, name: undefined });
+                  }}
+                  style={{ cursor: "pointer" }}
+                >
+                  <td className={hudStyles.jobMetadata}>
+                    <LocalTimeHuman timestamp={row.latestTime} />
+                  </td>
+                  <td className={hudStyles.jobMetadata}>
+                    <span className={hudStyles.mono}>
+                      {hasCommit ? (
+                        <a
+                          href={`https://github.com/${row.upstreamRepo}/commit/${row.sha}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          {row.sha.substring(0, 7)}
+                        </a>
+                      ) : (
+                        <Tooltip title="This nightly reported no upstream commit">
+                          <span>–</span>
+                        </Tooltip>
+                      )}
+                    </span>
+                  </td>
+                  <td className={hudStyles.jobMetadata}>
+                    <div className={hudStyles.jobMetadataTruncated}>
+                      {hasCommit ? (
+                        <a
+                          href={`https://github.com/${row.upstreamRepo}/commit/${row.sha}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title={commitTitle}
+                        >
+                          {commitTitle}
+                        </a>
+                      ) : (
+                        <span title={commitTitle}>{commitTitle}</span>
+                      )}
+                    </div>
+                  </td>
+                  {columns.map((col) => {
+                    const colHighlight =
+                      pinnedId.name === col.name ? hudStyles.highlight : "";
+                    if (col.type === "group" && col.members) {
+                      const groupJobs = col.members
+                        .map((m) => row.jobs.get(m))
+                        .filter((j): j is CrcrJobRow => j != null);
+                      return (
+                        <td
+                          key={col.name}
+                          className={`${hudStyles.jobMetadata} ${colHighlight}`}
+                          style={{ textAlign: "center" }}
+                        >
+                          {groupJobs.length > 0 ? (
+                            <GroupedJobCell
+                              jobs={groupJobs}
+                              groupName={col.name}
+                              sha={row.sha}
+                            />
+                          ) : (
+                            "–"
+                          )}
+                        </td>
+                      );
+                    }
+                    const job = row.jobs.get(col.name);
+                    return (
+                      <td
+                        key={col.name}
+                        className={`${hudStyles.jobMetadata} ${colHighlight}`}
+                        style={{ textAlign: "center" }}
+                      >
+                        {job ? <JobCell job={job} sha={row.sha} /> : "–"}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {(page > 1 || hasNextPage) && (
+        <Typography color="text.secondary" sx={{ mt: 1 }} variant="body2">
+          Showing nightly matrix rows {firstRow}–{lastRow}. Summary cards cover
+          every completed run in the selected range.
+        </Typography>
+      )}
+      {(page > 1 || hasNextPage) && (
+        <Box sx={{ mt: 2 }}>
+          <CrcrPagination
+            page={page}
+            hasNextPage={hasNextPage}
+            onPageChange={setPage}
+          />
+        </Box>
+      )}
+    </>
+  );
+}
+
+// ---- Main Page ----
+
+export default function CrcrBackendPage() {
+  const router = useRouter();
+  const { org, repo } = router.query;
+
+  const page = parseInt(router.query.page as string) || 1;
+  const days = parseInt(router.query.days as string) || 7;
+  const eventType = (router.query.event as string) || "pr";
+  const isNightly = eventType === "nightly";
+
+  const repoFullName = org && repo ? `${org}/${repo}` : "";
+
+  const summaryUrl =
+    repoFullName && !isNightly
+      ? `/api/clickhouse/crcr_backend_summary?parameters=${encodeURIComponent(
+          JSON.stringify({ repo: repoFullName, days: String(days) })
+        )}`
+      : null;
+  const { data: summaryData } = useSWR<SummaryStats[]>(
+    summaryUrl,
+    fetcherHandleError,
+    { refreshInterval: 60_000 }
+  );
+  const stats = summaryData?.[0] ?? null;
+
+  const nightlySummaryUrl =
+    repoFullName && isNightly
+      ? `/api/clickhouse/crcr_nightly_backend_summary?parameters=${encodeURIComponent(
+          JSON.stringify({ repo: repoFullName, days: String(days) })
+        )}`
+      : null;
+  const { data: nightlySummaryData } = useSWR<NightlySummaryStats[]>(
+    nightlySummaryUrl,
+    fetcherHandleError,
+    { refreshInterval: 60_000 }
+  );
+  const nightlySummary = nightlySummaryData?.[0] ?? null;
+
+  // Not scoped by the days selector -- tenure at the current level is a
+  // full-history question (RFC-0050: "operating at L2 for at least 1 month").
+  const tenureUrl =
+    repoFullName && !isNightly
+      ? `/api/clickhouse/crcr_repo_tenure?parameters=${encodeURIComponent(
+          JSON.stringify({ repo: repoFullName })
+        )}`
+      : null;
+  const { data: tenureData } = useSWR<RepoTenure[]>(
+    tenureUrl,
+    fetcherHandleError,
+    { refreshInterval: 60_000 }
+  );
+  const tenure = tenureData?.[0] ?? null;
+
+  const isCrcrTest = repoFullName === "pytorch/crcr-test";
+  const healthUrl =
+    isCrcrTest && !isNightly
+      ? `/api/clickhouse/crcr_health_last_prs?parameters=${encodeURIComponent(
+          JSON.stringify({
+            window_minutes: String(CRCR_HEALTH_WINDOW_MINUTES),
+            stale_after_minutes: String(CRCR_HEALTH_STALE_AFTER_MINUTES),
+          })
+        )}`
+      : null;
+  const { data: healthPrs } = useSWR<HealthPrRow[]>(
+    healthUrl,
+    fetcherHandleError,
+    { refreshInterval: 60_000 }
+  );
+
+  const [pinnedTooltip, setPinnedTooltip] = useState<Highlight>({
+    sha: undefined,
+    name: undefined,
+  });
+
+  function handleGlobalClick() {
+    setPinnedTooltip({ sha: undefined, name: undefined });
+  }
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent) => {
+      if (e.code === "Escape") {
+        setPinnedTooltip({ sha: undefined, name: undefined });
+      }
+    },
+    [setPinnedTooltip]
+  );
+
+  useEffect(() => {
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [handleKeyDown]);
+
+  if (!org || !repo) return null;
+
+  function updateQuery(updates: Record<string, string | number>) {
+    router.push(
+      { pathname: router.pathname, query: { ...router.query, ...updates } },
+      undefined,
+      { shallow: true }
+    );
+  }
+
+  const pageTitle = isNightly ? `${repoFullName} : nightly` : repoFullName;
+
+  return (
+    <>
+      <Head>
+        <title>{pageTitle} — CRCR CI | PyTorch HUD</title>
+      </Head>
+      <CrcrPinnedContext.Provider value={[pinnedTooltip, setPinnedTooltip]}>
+        <div onClick={handleGlobalClick}>
+          <Stack spacing={3} sx={{ p: 3, maxWidth: 1600, mx: "auto" }}>
+            <Box
+              display="flex"
+              justifyContent="space-between"
+              alignItems="center"
+            >
+              <Stack spacing={0.5}>
+                <Typography variant="h4">
+                  {repoFullName}
+                  {isNightly && (
+                    <Typography
+                      component="span"
+                      variant="h4"
+                      sx={{
+                        color: "text.secondary",
+                        fontWeight: 300,
+                        mx: 1,
+                      }}
+                    >
+                      : nightly
+                    </Typography>
+                  )}
+                </Typography>
+                <Stack direction="row" spacing={2} alignItems="center">
+                  <NextLink href="/crcr" passHref legacyBehavior>
+                    <Link variant="body2" underline="hover">
+                      ← Back to CRCR Summary
+                    </Link>
+                  </NextLink>
+                  <Link
+                    href={`https://github.com/${repoFullName}`}
+                    target="_blank"
+                    rel="noopener"
+                    variant="body2"
+                    underline="hover"
+                  >
+                    GitHub ↗
+                  </Link>
+                  {!isNightly && tenure && tenure.current_level && (
+                    <Typography variant="body2" color="text.secondary">
+                      {tenure.current_level} since{" "}
+                      {tenureDisplay(tenure.level_since)} ·{" "}
+                      {dataCoverageDisplay(tenure.first_seen, tenure.last_seen)}
+                    </Typography>
+                  )}
+                </Stack>
+              </Stack>
+              <Stack direction="row" spacing={2} alignItems="center">
+                <FormControl size="small" sx={{ minWidth: 140 }}>
+                  <InputLabel>Time Range</InputLabel>
+                  <Select
+                    value={days}
+                    label="Time Range"
+                    onChange={(e: SelectChangeEvent<number>) =>
+                      updateQuery({ days: Number(e.target.value), page: 1 })
+                    }
+                  >
+                    {CRCR_TIME_RANGES.map(({ days: rangeDays, label }) => (
+                      <MenuItem key={rangeDays} value={rangeDays}>
+                        {label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Stack>
+            </Box>
+
+            {!isNightly && <CrcrL3Readiness repoFullName={repoFullName} />}
+
+            {!isNightly && <CrcrLevelAudit repoFullName={repoFullName} />}
+
+            {!isNightly && (
+              <>
+                {stats ? (
+                  <SummaryCards
+                    stats={stats}
+                    healthCard={
+                      isCrcrTest && healthPrs?.length ? (
+                        <RelayHealthCard healthPrs={healthPrs} />
+                      ) : undefined
+                    }
+                  />
+                ) : (
+                  <Skeleton variant="rectangular" height={140} />
+                )}
+              </>
+            )}
+
+            <Typography variant="body2" color="text.secondary">
+              {isNightly
+                ? "Rows = nightly CI runs (one per run), columns = build & test stages. Click a cell to pin its tooltip, click a column header to highlight the column, or click a row to highlight it. Press Escape to dismiss."
+                : "Rows = PyTorch PRs (50 per page), columns = downstream CI jobs. Click a cell to pin its tooltip, click a column header to highlight the column, or click a row to highlight it. Press Escape to dismiss."}
+            </Typography>
+
+            {isNightly ? (
+              <CrcrNightlyMatrix
+                repoFullName={repoFullName}
+                days={days}
+                summaryStats={nightlySummary}
+              />
+            ) : (
+              <CrcrMatrix
+                repoFullName={repoFullName}
+                days={days}
+                page={page}
+                onPageChange={(p) => updateQuery({ page: p })}
+              />
+            )}
+          </Stack>
+        </div>
+      </CrcrPinnedContext.Provider>
+    </>
+  );
+}
