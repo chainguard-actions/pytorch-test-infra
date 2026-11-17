@@ -14,22 +14,22 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ## Findings Fixed
 
-### unpinned-uses (severity: high)
-
-The composite step refers to an action by a branch name instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Whoever controls that branch can change the code this action runs.
-
-Locations:
-
-- `action.yml:38`
-
 ### script-injection (severity: high)
 
-Sub-rule (a): the 'Gather the metadata' step puts an input expression straight into the run script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is pasted into the script before bash parses it, so a crafted venv value can run commands. Fix: pass inputs.venv through an env var (e.g. VENV) and use it double-quoted as "$VENV".
+Rule (a): the 'Gather the metadata' step puts the expression ${{ inputs.venv }} straight into the run: script, in `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script before the shell runs it, so a crafted venv input can inject shell commands. Fix: pass it through an env var (VENV: ${{ inputs.venv }}) and reference it double-quoted as "$VENV".
 
 Locations:
 
 - `action.yml:57`
 - `action.yml:58`
+
+### unpinned-uses (severity: high)
+
+A composite step uses a mutable branch ref instead of a full commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
+
+Locations:
+
+- `action.yml:38`
 
 ### static-inline-injection (severity: high)
 
@@ -51,9 +51,9 @@ Locations:
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses, script-injection, static-inline-injection
+**Fixes applied:** script-injection, static-inline-injection, unpinned-uses
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/get-workflow-job-id to the upstream commit 4bb924e6cddf98370d0c754d6769b492fe457233, which is the same test-infra commit this action was built from. Moved inputs.venv into the env var VENV and used it double-quoted in the run script.
+Moved inputs.venv into an env var (VENV) and referenced it as "${VENV}". Pinned get-workflow-job-id to upstream commit 4bb924e6cddf98370d0c754d6769b492fe457233 (the upstream_ref this mirror was built from) with a '# main' comment.
 

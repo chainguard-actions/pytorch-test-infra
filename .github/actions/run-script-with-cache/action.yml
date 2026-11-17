@@ -71,9 +71,9 @@ runs:
         fi
         source "${BUILD_ENV_FILE}"
 
-        # CONDA_RUN is a command prefix (e.g. "conda run -p ..."); split it into
-        # words exactly as upstream's unquoted expansion did.
-        # shellcheck disable=SC2206
+        # CONDA_RUN is a command prefix (e.g. "conda run -p /path"); split it into
+        # words exactly as upstream's unquoted expansion did, without evaluating it.
+        # shellcheck disable=SC2086,SC2206
         conda_run=(${CONDA_RUN:-})
 
         if [[ ! -f "${SCRIPT}" ]]; then

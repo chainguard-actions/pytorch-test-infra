@@ -16,16 +16,16 @@ Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v202610
 
 ### unpinned-uses (severity: high)
 
-action.yml has composite steps whose `uses:` refs point at a mutable branch instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-uv@main` and `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
+action.yml has composite steps that reference actions by a branch name instead of a full 40-character commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main'.
 
 Locations:
 
 - `action.yml:31`
-- `action.yml:114`
+- `action.yml:115`
 
 ### github-env-injection (severity: high)
 
-The 'Install dependencies' step writes `echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV`. RUNNER_TEMP comes from the process environment this composite action inherits. The script reads it but never sets it, and newlines are not stripped with `printf '%s' ... | tr -d '\n\r'` before the write. Under this check's rules, inherited env vars count as workflow-controlled.
+The 'Install dependencies' step runs 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. RUNNER_TEMP is a process env var that this script reads but does not set, and a composite action inherits it from the calling workflow. The value goes into $GITHUB_ENV without first passing through printf '%s' ... | tr -d '\n\r', and $GITHUB_ENV is unquoted.
 
 Locations:
 
@@ -39,5 +39,12 @@ Locations:
 
 **Notes:**
 
-Pinned both pytorch/test-infra sub-actions (setup-uv and get-workflow-job-id) to 4bb924e6cddf98370d0c754d6769b492fe457233, the upstream commit this mirror was built from, with a '# main' comment. The VIRTUAL_ENV value written to $GITHUB_ENV now has newlines stripped first (printf '%s' ... | tr -d '\n\r'), and $GITHUB_ENV is quoted. I gave the DEVICE_TYPE write the same treatment as a precaution, since that value comes from command output. Nothing else changed, and set -u still behaves as before.
+I fixed both findings in action.yml.
+
+- unpinned-uses: The setup-uv and get-workflow-job-id steps referenced @main. Both are now pinned to pytorch/test-infra@4bb924e6cddf98370d0c754d6769b492fe457233 # main. That is the upstream commit this mirror version was built from, and I confirmed with lookup_action_sha that it resolves.
+- github-env-injection: The VIRTUAL_ENV value is now passed through printf '%s' | tr -d '\n\r' before it is written, and $GITHUB_ENV is quoted.
+
+I also made two changes the findings didn't ask for. The DEVICE_TYPE value, which comes from command output, now has newlines stripped the same way before it goes into $GITHUB_ENV. The DEVICE_NAME and DEVICE_TYPE writes also quote $GITHUB_ENV now.
+
+Nothing else changed, and I haven't run the action to test these edits.
 

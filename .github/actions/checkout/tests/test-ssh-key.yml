@@ -1,0 +1,61 @@
+name: Test ssh-key and ssh-known-hosts inputs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Generate a throwaway SSH key (not registered with GitHub)
+        id: gen
+        run: |
+          TMPK="$(mktemp -d)/id_ed25519"
+          ssh-keygen -t ed25519 -N "" -q -f "$TMPK"
+          {
+            echo "key<<EOF_SSH_KEY"
+            cat "$TMPK"
+            echo "EOF_SSH_KEY"
+          } >> "$GITHUB_OUTPUT"
+          rm -f "$TMPK" "$TMPK.pub"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          repository: actions/checkout
+          ref: main
+          path: ssh-target
+          ssh-key: ${{ steps.gen.outputs.key }}
+          ssh-known-hosts: |
+            example.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          ssh-strict: "true"
+          persist-credentials: "false"
+      - name: Assert SSH checkout outcome
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "commit: $COMMIT"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ ! -f "$GITHUB_WORKSPACE/ssh-target/action.yml" ]; then
+              echo "FAIL: succeeded but action.yml missing"
+              exit 1
+            fi
+            if ! echo "$COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
+              echo "FAIL: commit output is not a 40-char SHA"
+              exit 1
+            fi
+            echo "PASS: checkout over SSH succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: unregistered SSH key was rejected as expected"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+          if [ -d "$GITHUB_WORKSPACE/ssh-target/.git" ]; then
+            if git -C "$GITHUB_WORKSPACE/ssh-target" config --local --get core.sshCommand; then
+              echo "FAIL: persist-credentials=false but core.sshCommand remains configured"
+              exit 1
+            fi
+          fi
+          echo "PASS: no persisted ssh command"

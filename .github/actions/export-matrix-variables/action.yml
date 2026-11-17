@@ -58,9 +58,9 @@ runs:
           conda activate base
           python \
             test-infra/.github/scripts/export_matrix_variables.py ${ADD_QUOTES_AROUND_VAR}  \
-            --input-file "${RUNNER_TEMP}"/matrix_to_export.json  >> "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+            --input-file "${RUNNER_TEMP}"/matrix_to_export.json  >> ${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}
         else
           python3 \
             test-infra/.github/scripts/export_matrix_variables.py ${ADD_QUOTES_AROUND_VAR} \
-            --input-file "${RUNNER_TEMP}"/matrix_to_export.json >> "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+            --input-file "${RUNNER_TEMP}"/matrix_to_export.json >> ${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}
         fi

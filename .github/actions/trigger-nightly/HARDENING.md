@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--trigger-nightly/v20261021-234439
 
 ### unpinned-uses (severity: high)
 
-action.yml composite step uses a mutable tag reference: 'uses: actions/checkout@v4'. It should be pinned to a full 40-character commit SHA.
+The composite step references `uses: actions/checkout@v4`. That is a mutable tag, not a full 40-character commit SHA.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Create nightly commit' step puts an expression straight into the run: script: 'pushd ${{ inputs.path }}'. Fix: pass inputs.path in through an env: variable and use it double-quoted (pushd "$INPUT_PATH").
+Rule (a): the 'Create nightly commit' run block puts an expression directly into the shell script: `pushd ${{ inputs.path }}`. The value is substituted into the script text unquoted before bash runs, so a crafted path can inject commands. Pass it through env (e.g. INPUT_PATH: ${{ inputs.path }}) and use `pushd "$INPUT_PATH"`.
 
 Locations:
 
@@ -46,5 +46,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (# v4); moved inputs.path into env INPUT_PATH and used pushd "$INPUT_PATH".
+Pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4). Moved inputs.path into env INPUT_PATH and used pushd "$INPUT_PATH".
 

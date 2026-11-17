@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--update-viablestrict/v20261021-23
 
 ### unpinned-uses (severity: high)
 
-The composite action pins its actions to version tags instead of 40-character commit SHAs: 'uses: actions/setup-python@v5' (line 62) and 'uses: actions/checkout@v4' (line 66).
+The composite action uses tag refs instead of full 40-character commit SHAs: 'uses: actions/setup-python@v5' (line 62) and 'uses: actions/checkout@v4' (line 66).
 
 Locations:
 
@@ -25,17 +25,15 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Get latest viable commit' step puts an expression straight into the run script: '--required-checks "${{ inputs.requires }}" \'. The template value is substituted before the shell parses the script, so a '"' or '$(...)' in the input runs as a command. Move it into an env var (e.g. REQUIRES) and use "$REQUIRES". Rule (b): the same step also expands workflow-derived data without quotes: 'python ${TEST_INFRA_PATH}/tools/scripts/fetch_latest_green_commit.py' and 'echo $output', where $output is built from the inputs.
+Rule (a): the 'Get latest viable commit' step puts an expression directly into the run: script: '--required-checks "${{ inputs.requires }}"'. The input is substituted into the script text before bash parses it, so a crafted value can break out of the quotes and run commands. Move it into an env: variable (e.g. REQUIRES) and use "$REQUIRES".
 
 Locations:
 
 - `action.yml:94`
-- `action.yml:93`
-- `action.yml:98`
 
 ### script-injection (severity: high)
 
-Rule (b): the 'Push SHA to viable/strict branch' step runs 'echo $push_result' without quotes. $push_result holds git push output, which includes the input-controlled STABLE_BRANCH and LATEST_VIABLE_SHA values. Quote it: "$push_result".
+Rule (b): the 'Push SHA to viable/strict branch' step runs 'echo $push_result' unquoted. push_result holds git output that includes the workflow-controlled STABLE_BRANCH (inputs.stable-branch) and LATEST_VIABLE_SHA values. Use "$push_result".
 
 Locations:
 
@@ -43,7 +41,7 @@ Locations:
 
 ### github-env-injection (severity: high)
 
-The 'Get latest viable commit' step writes 'echo "latest_viable_sha=$output" >> "${GITHUB_OUTPUT}"'. $output comes from a script run with the untrusted inputs.requires value, and it is written without the printf '%s' ... | tr -d '\n\r' sanitization step.
+The 'Get latest viable commit' step writes 'echo "latest_viable_sha=$output" >> "${GITHUB_OUTPUT}"' without the printf '%s' | tr -d '\n\r' step first. $output comes from a script that is called with the untrusted inputs.requires value and with ClickHouse data, so a newline in it could inject extra outputs.
 
 Locations:
 
@@ -51,12 +49,11 @@ Locations:
 
 ### github-env-injection (severity: high)
 
-The 'Push SHA to viable/strict branch' step writes $push_result to $GITHUB_OUTPUT through a heredoc ('echo push_result<<EOF' / 'echo $push_result' / 'echo EOF' >> "${GITHUB_OUTPUT}"). push_result is git output that contains the input-derived STABLE_BRANCH and LATEST_VIABLE_SHA values. Nothing is sanitized, so a value containing 'EOF' plus a newline can inject extra outputs.
+The 'Push SHA to viable/strict branch' step writes push_result to $GITHUB_OUTPUT through a heredoc ('echo push_result<<EOF' / 'echo $push_result' / 'echo EOF'). push_result is git output that includes the workflow-controlled STABLE_BRANCH and LATEST_VIABLE_SHA values, and it is not sanitized before the write. A value containing the EOF delimiter on its own line could inject more outputs.
 
 Locations:
 
-- `action.yml:116`
-- `action.yml:121`
+- `action.yml:118`
 
 ### static-inline-injection (severity: high)
 
@@ -74,5 +71,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/setup-python and actions/checkout to their full commit SHAs, with the tag kept in a comment. Moved inputs.requires out of the run script and into an env var (REQUIRES), and quoted the script path and the echo of $output and $push_result. The latest_viable_sha value now has newlines stripped (printf | tr -d '\n\r') before it is written to GITHUB_OUTPUT. The push_result heredoc now uses a random delimiter from /dev/urandom instead of a fixed 'EOF', so a line in the value can no longer end the block early. One change you might notice: because $push_result is now quoted, the push_result output keeps git's line breaks, where upstream's unquoted echo joined everything onto one line.
+Pinned actions/setup-python and actions/checkout to full commit SHAs. Moved inputs.requires into env (REQUIRES) and pass it as "$REQUIRES". latest_viable_sha is now written to GITHUB_OUTPUT after newline stripping, and the command substitution stays a bare assignment so errexit still applies. push_result is now quoted and written with a random per-run heredoc delimiter from /dev/urandom.
 

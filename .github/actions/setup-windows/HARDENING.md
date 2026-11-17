@@ -14,30 +14,35 @@ Action **pytorch--test-infra--.github--actions--setup-windows/v20261021-234439**
 
 ## Findings Fixed
 
-### github-env-injection (severity: high)
-
-The 'Setup useful environment variables' step builds RUNNER_ARTIFACT_DIR and RUNNER_TEST_RESULTS_DIR from the inherited process env var RUNNER_TEMP. Neither the script nor anything before it sets RUNNER_TEMP. Both values are written to $GITHUB_ENV without the required sanitization step (printf '%s' ... | tr -d '\n\r'): `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"` and `echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR}" >> "${GITHUB_ENV}"`. This check counts any inherited env var in a composite run block as untrusted, so the writes should strip newlines first.
-
-Locations:
-
-- `action.yml:64`
-- `action.yml:68`
-
 ### script-injection (severity: high)
 
-Rule (b), unquoted shell variable expansion. In the 'Setup useful environment variables' step, the inherited env var RUNNER_TEMP is expanded without quotes inside a command substitution: `RUNNER_ARTIFACT_DIR="$(cygpath ${RUNNER_TEMP})/artifacts"`. It should be written as `cygpath "${RUNNER_TEMP}"`.
+Rule (b): in the 'Setup useful environment variables' step, an inherited env var is expanded without quotes inside a command substitution: `RUNNER_ARTIFACT_DIR="$(cygpath ${RUNNER_TEMP})/artifacts"`. A composite action inherits its env from the calling workflow, so treat RUNNER_TEMP as untrusted and quote it: `$(cygpath "${RUNNER_TEMP}")`.
 
 Locations:
 
-- `action.yml:62`
+- `action.yml:57`
+
+### github-env-injection (severity: high)
+
+The 'Setup useful environment variables' step writes values built from the inherited RUNNER_TEMP env var to $GITHUB_ENV without sanitizing them first: `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"` and `echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR}" >> "${GITHUB_ENV}"`. Apply `printf '%s' ... | tr -d '\n\r'` to each value right before it is written.
+
+Locations:
+
+- `action.yml:59`
+- `action.yml:63`
 
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** github-env-injection, script-injection
+**Fixes applied:** script-injection, github-env-injection
 
 **Notes:**
 
-In the 'Setup useful environment variables' step: RUNNER_TEMP is now quoted when passed to cygpath. Its result goes into its own variable first, so a cygpath failure still stops the step under errexit. Both values are passed through printf '%s' | tr -d '\n\r' before they are written to $GITHUB_ENV.
+I fixed both findings in the 'Setup useful environment variables' step of action.yml. Nothing has been run or tested.
+
+- script-injection: RUNNER_TEMP is now quoted when passed to cygpath. The cygpath result goes into its own variable first, so a cygpath failure still stops the step, as it did before.
+- github-env-injection: RUNNER_ARTIFACT_DIR and RUNNER_TEST_RESULTS_DIR now have newlines and carriage returns stripped (printf '%s' ... | tr -d '\n\r') just before each is written to $GITHUB_ENV.
+
+No other steps were changed.
 

@@ -59,4 +59,5 @@ runs:
       - name: Setup useful environment variables
         shell: bash -l {0}
         run: |
-          echo "RUNNER_ARTIFACT_DIR=${RUNNER_TEMP}/artifacts" >> "${GITHUB_ENV}"
+          safe=$(printf '%s' "${RUNNER_TEMP}/artifacts" | tr -d '\n\r')
+          echo "RUNNER_ARTIFACT_DIR=${safe}" >> "${GITHUB_ENV}"

@@ -16,11 +16,11 @@ Action **pytorch--test-infra--.github--actions--check-disk-space/v20261021-23443
 
 ### script-injection (severity: high)
 
-Rule (b) violation: an unquoted shell variable expands untrusted data. The env var MINIMUM_AVAILABLE_SPACE_IN_GB comes from inputs.minimum-available-space-in-gb and is expanded unquoted inside bash arithmetic: `MINIMUM_AVAILABLE_SPACE_IN_KB=$(($MINIMUM_AVAILABLE_SPACE_IN_GB * 1024 * 1024))`. Bash evaluates arithmetic recursively, so a value like `a[$(cmd)]` can run commands through the array subscript. Fix: check that the value is numeric before using it (e.g. `[[ "$MINIMUM_AVAILABLE_SPACE_IN_GB" =~ ^[0-9]+$ ]] || exit 1`) and quote the reference.
+Rule (b): the env var MINIMUM_AVAILABLE_SPACE_IN_GB holds the workflow-controlled input inputs.minimum-available-space-in-gb. It is expanded unquoted inside bash arithmetic: `MINIMUM_AVAILABLE_SPACE_IN_KB=$(($MINIMUM_AVAILABLE_SPACE_IN_GB * 1024 * 1024))`. Bash re-reads the expanded text as an arithmetic expression, so a value like `a[$(cmd)]` runs commands. Fix: check the value is numeric before using it, e.g. `[[ "$MINIMUM_AVAILABLE_SPACE_IN_GB" =~ ^[0-9]+$ ]] || { echo 'invalid input'; exit 1; }`. Then use `$(( MINIMUM_AVAILABLE_SPACE_IN_GB * 1024 * 1024 ))`, which reads the variable by name instead of expanding it with $.
 
 Locations:
 
-- `action.yml:28`
+- `action.yml:29`
 
 ## Iteration Notes
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-The step now checks minimum-available-space-in-gb before doing any arithmetic. If the value isn't a non-negative integer (^[0-9]+$), the step prints an error and exits with status 1. This check runs in the top-level shell rather than inside the check_disk_space function, which is called through $(...) and so runs in a subshell. Because the value is now known to contain only digits, the arithmetic can't run commands. The expansion now reads 10#${MINIMUM_AVAILABLE_SPACE_IN_GB} so a number with leading zeros is read as decimal rather than octal. Valid values give the same result as before, including the default of 6. One behaviour change: a non-integer value such as 6.5 now fails with a clear error, where before it hit an arithmetic error. Upstream's integer-only arithmetic couldn't handle decimals either. I haven't run the action to test this.
+In action.yml, the step now checks MINIMUM_AVAILABLE_SPACE_IN_GB against ^[0-9]+$ before anything else. The check sits at the top level of the script, not inside check_disk_space, because that function runs in a $(...) subshell and an exit there would not stop the step. A value that isn't a whole number now fails the step with an error message. The arithmetic now reads the variable by name, $(( MINIMUM_AVAILABLE_SPACE_IN_GB * 1024 * 1024 )), instead of expanding it with $, so bash no longer re-parses the input as code. Nothing else changed. The edit has not been run or tested. One behaviour is the same as upstream: a value with a leading zero such as 08 is still read as octal, which makes the arithmetic fail.
 

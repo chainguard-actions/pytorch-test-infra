@@ -20,15 +20,15 @@ action.yml composite step references a mutable tag instead of a full 40-char com
 
 Locations:
 
-- `action.yml:122`
+- `action.yml:136`
 
 ### script-injection (severity: high)
 
-Sub-rule (a): a GitHub Actions expression is interpolated directly into a run: script in the 'Send callback to relay server' step: `run: python3 "${{ github.action_path }}/report_callback.py"`. Use the $GITHUB_ACTION_PATH env var instead ("$GITHUB_ACTION_PATH/report_callback.py").
+Rule (a): a GitHub Actions expression is interpolated directly into a run: script in the 'Send callback to relay server' step: `run: python3 "${{ github.action_path }}/report_callback.py"`. Use the GITHUB_ACTION_PATH env var instead (e.g. `python3 "$GITHUB_ACTION_PATH/report_callback.py"`).
 
 Locations:
 
-- `action.yml:176`
+- `action.yml:190`
 
 ## Iteration Notes
 
@@ -38,5 +38,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/github-script@v9 to 3a2844b7e9c422d3c10d287c895573f7108da1b3 (# v9). Replaced the inline ${{ github.action_path }} expression in the bash run: step with "$GITHUB_ACTION_PATH/report_callback.py".
+Pinned actions/github-script@v9 to 3a2844b7e9c422d3c10d287c895573f7108da1b3 (# v9). Replaced ${{ github.action_path }} in the bash run: with the runner-provided $GITHUB_ACTION_PATH env var.
 
