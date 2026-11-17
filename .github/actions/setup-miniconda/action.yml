@@ -58,13 +58,13 @@ runs:
         env:
           DEFAULT_PACKAGES: ${{ inputs.default-packages }}
         run: |
-          echo "today=$(/bin/date -u '+%Y%m%d')d" >> "${GITHUB_OUTPUT}"
           pkgs=()
           if [ -n "$DEFAULT_PACKAGES" ]; then
             printf '%s' "$DEFAULT_PACKAGES" | xargs -r true >/dev/null   # fails on an unmatched quote
             while IFS= read -r -d '' t; do pkgs+=("$t"); done \
               < <(printf '%s' "$DEFAULT_PACKAGES" | xargs -r sh -c 'printf "%s\0" "$@"' sh)
           fi
+          echo "today=$(/bin/date -u '+%Y%m%d')d" >> "${GITHUB_OUTPUT}"
           echo "default_packages_checksum=$(echo -n "${pkgs[*]}" | md5sum | awk '{print $1}' )" >> "${GITHUB_OUTPUT}"
 
       - name: Setup miniconda cache
@@ -111,8 +111,9 @@ runs:
           echo "${MINICONDA_INSTALL_PATH}/bin" >> $GITHUB_PATH
           # NB: GITHUB_PATH has a lower priority than PATH, so also set the path
           # here to make sure that the correct conda is used
+          SAFE_PATH=$(printf '%s' "${MINICONDA_INSTALL_PATH}/bin:${PATH}" | tr -d '\n\r')
           {
-            printf 'PATH=%s\n' "$(printf '%s' "${MINICONDA_INSTALL_PATH}/bin:${PATH}" | tr -d '\n\r')"
+            echo "PATH=${SAFE_PATH}"
             echo "CONDA_EXE=${MINICONDA_INSTALL_PATH}/bin/conda";
           } >> "${GITHUB_ENV}"
 

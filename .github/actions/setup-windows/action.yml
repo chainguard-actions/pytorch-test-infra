@@ -71,8 +71,7 @@ runs:
       shell: bash
       working-directory: ${{ inputs.repository }}
       run: |
-        RUNNER_TEMP_CYG="$(cygpath "${RUNNER_TEMP}")"
-        RUNNER_ARTIFACT_DIR="${RUNNER_TEMP_CYG}/artifacts"
+        RUNNER_ARTIFACT_DIR="$(cygpath "${RUNNER_TEMP}")/artifacts"
         mkdir -p "${RUNNER_ARTIFACT_DIR}"
         safe_artifact_dir=$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')
         echo "RUNNER_ARTIFACT_DIR=${safe_artifact_dir}" >> "${GITHUB_ENV}"

@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--bc-lint/v20261103-202628** was h
 
 ### unpinned-uses (severity: high)
 
-action.yml references actions by mutable tag rather than a full 40-char commit SHA: line 30 'uses: actions/checkout@v4' and line 36 'uses: actions/checkout@v4'.
+Composite action steps pin actions to a mutable tag instead of a full 40-character commit SHA: line 30 'uses: actions/checkout@v4' and line 36 'uses: actions/checkout@v4'.
 
 Locations:
 
@@ -25,7 +25,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): step 'Merge PR changes onto base' puts expressions straight into the run: script, e.g. 'git fetch origin "${{ inputs.head_sha }}"', 'git reset --hard "${{ inputs.base_sha }}"' and 'git merge "${{ inputs.head_sha }}"'. Move them into env: vars and reference them as "$VAR".
+Rule (a): the 'Merge PR changes onto base' step puts input expressions straight into the run: script. Offending lines: 'git fetch origin "${{ inputs.head_sha }}"', 'git fetch origin "${{ inputs.base_sha }}"', 'git reset --hard "${{ inputs.base_sha }}"' and 'git merge "${{ inputs.head_sha }}"'. Move these values into env: variables and reference them as double-quoted shell variables.
 
 Locations:
 
@@ -33,7 +33,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): step 'Build and run BC-linter' puts expressions straight into the run: script with no quoting: '--base-commit=${{ inputs.base_sha }}', '--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}', '${{ inputs.suppression == 'true' && '--suppressed' || '' }}' and '${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}'. The config_dir input is free text, so a caller can inject arbitrary shell commands through it.
+Rule (a): the 'Build and run BC-linter' step puts expressions straight into the run: script, and they are unquoted. Offending lines: '--base-commit=${{ inputs.base_sha }}', '--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}', '${{ inputs.suppression == 'true' && '--suppressed' || '' }}' and '${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}'. Because inputs.config_dir is spliced into the script unquoted, it allows arbitrary command execution.
 
 Locations:
 
@@ -41,7 +41,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): step 'Display documentation link if failed' puts an expression straight into the run: script: 'echo "${{ inputs.docs_link }}"'. A double quote or $(...) in the value would run as a shell command.
+Rule (a): the 'Display documentation link if failed' step puts an input expression straight into the run: script. Offending line: 'echo "${{ inputs.docs_link }}"'.
 
 Locations:
 
@@ -111,5 +111,5 @@ Locations:
 
 **Notes:**
 
-Pinned both actions/checkout@v4 uses to 11d5960a326750d5838078e36cf38b85af677262 (# v4). Moved inputs.head_sha/base_sha, the new_head_sha step output, suppression, config_dir and docs_link into step env: vars, each referenced double-quoted. The optional --suppressed and --config-dir flags are now built in a bash array, so an empty value adds no argument, the same as upstream (the array expansion is written safely for set -u). The config_dir value is now passed as a single quoted argument, '--config-dir=<value>'.
+Pinned both actions/checkout@v4 uses to 11d5960a326750d5838078e36cf38b85af677262 (# v4). Moved inputs.head_sha/base_sha, the new_head_sha step output, suppression, config_dir and docs_link out of run: scripts into step env: vars, referenced as double-quoted shell variables. Optional --suppressed / --config-dir flags are now built in a bash array (each flag stays a separate argument, config dir value stays quoted), expanded with ${arr[@]+...} so it is safe under set -u even when empty.
 

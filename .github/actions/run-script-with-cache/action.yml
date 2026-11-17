@@ -66,23 +66,22 @@ runs:
       if: ${{ inputs.cache-path == '' || steps.run-cache-action.outputs.cache-hit != 'true' }}
       run: |
         # Windows scripts needs cleanup on audio and vision, todo remove this once resolved
-        if [[ "$IS_WINDOWS" == 'disabled' ]]; then
+        if [[ "${IS_WINDOWS}" == 'disabled' ]]; then
           set -euxo pipefail
         fi
         source "${BUILD_ENV_FILE}"
 
-        # CONDA_RUN is a command prefix (e.g. "conda run -p ..."); split it on
-        # whitespace exactly like upstream's unquoted ${CONDA_RUN}.
-        # shellcheck disable=SC2206
-        conda_cmd=(${CONDA_RUN})
+        # CONDA_RUN is a command prefix (e.g. "conda run -p ..."); split it like upstream did
+        # shellcheck disable=SC2086
+        conda_run=(${CONDA_RUN:-})
 
         if [[ ! -f "${SCRIPT}" ]]; then
           echo "::error::Specified script file (${SCRIPT}) not found, not going execute it"
           exit 1
         else
           if [[ "${SCRIPT}" == *.bat ]]; then
-            ${conda_cmd[@]+"${conda_cmd[@]}"} "${SCRIPT}"
+            ${conda_run[@]+"${conda_run[@]}"} "${SCRIPT}"
           else
-            ${conda_cmd[@]+"${conda_cmd[@]}"} bash "${SCRIPT}"
+            ${conda_run[@]+"${conda_run[@]}"} bash "${SCRIPT}"
           fi
         fi

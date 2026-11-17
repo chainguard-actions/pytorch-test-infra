@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--gather-runners-info/v20261103-20
 
 ### script-injection (severity: high)
 
-Sub-rule (a): in step 'Gather the runners information', the expression ${{ inputs.venv }} is placed directly inside the run: script, in the lines `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script before the shell runs it, so a crafted venv input can break out of the quotes and run its own commands. Fix: pass it in through env (e.g. VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
+Rule (a), direct expression interpolation: the 'Gather the runners information' step puts `${{ inputs.venv }}` straight into the run script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The expression is substituted before the shell runs, so a crafted venv input can break out of the quotes and run arbitrary commands. Fix: map it through `env:` (e.g. `VENV: ${{ inputs.venv }}`) and use `"$VENV"` in the script.
 
 Locations:
 
@@ -47,5 +47,5 @@ Locations:
 
 **Notes:**
 
-Moved ${{ inputs.venv }} into env VENV in step 'Gather the runners information' and referenced as "$VENV".
+Moved inputs.venv into step env (VENV) in 'Gather the runners information' and referenced it as "$VENV" in the script.
 

@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-build-test/v20261103-20262
 
 ### unpinned-uses (severity: high)
 
-Composite step references an action by a mutable tag instead of a full 40-char commit SHA: `uses: actions/checkout@v4`.
+The composite step uses a mutable tag instead of a full 40-character commit SHA: `uses: actions/checkout@v4`. Pin it to a commit SHA, e.g. `actions/checkout@<40-hex-sha> # v4`.
 
 Locations:
 
@@ -30,7 +30,7 @@ Locations:
 
 **Notes:**
 
-Pinned actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262 (# v4) in action.yml.
+Pinned actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262 # v4 in action.yml.
 
 ### Iteration 2
 
@@ -38,5 +38,5 @@ Pinned actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262 (# v4) in
 
 **Notes:**
 
-In action.yml, the 'Setup useful environment variables' step now removes newline and carriage-return characters from ${RUNNER_TEMP}/artifacts (printf | tr -d '\n\r') before writing RUNNER_ARTIFACT_DIR to $GITHUB_ENV. When RUNNER_TEMP has no newlines, as when the runner sets it, the value written is the same as before. Nothing was run or tested.
+In action.yml, the 'Setup useful environment variables' step now strips CR/LF from RUNNER_TEMP using printf | tr -d '\n\r' before writing RUNNER_ARTIFACT_DIR to $GITHUB_ENV.
 

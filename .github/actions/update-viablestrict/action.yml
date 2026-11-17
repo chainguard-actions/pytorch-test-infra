@@ -133,13 +133,11 @@ runs:
         # Pushing an older green commit here will fail because it's non-fast-forward, which is ok
         # to ignore because we already have the later green commit in visable/strict
         push_result=$(git push origin "${LATEST_VIABLE_SHA}:${STABLE_BRANCH}" 2>&1 || true)
-        # Upstream wrote the unquoted (whitespace-collapsed, single-line) value
-        push_result_flat=$(printf '%s' "$push_result" | tr -s '\n\r\t ' ' ')
         EOF_DELIM="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
         {
-          echo "push_result<<$EOF_DELIM"
-          echo "$push_result_flat"
-          echo "$EOF_DELIM"
+          echo "push_result<<${EOF_DELIM}"
+          echo "$push_result"
+          echo "${EOF_DELIM}"
         } >> "${GITHUB_OUTPUT}"
         echo "${push_result}"
         echo "time=$(date +%s)" >> "${GITHUB_OUTPUT}"

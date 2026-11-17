@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-nvidia-windows/v20261103-2
 
 ### script-injection (severity: high)
 
-Rule (a) is violated: a GitHub Actions expression is placed directly inside a run: block. The 'Update NVIDIA driver' step (shell: cmd) runs `${{ github.action_path }}\..\..\scripts\driver_update.bat`. The expression is filled in by template substitution before the shell parses the line. Use the runner env var instead, e.g. `"%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat"`, or pass the value through an env: variable and quote it.
+Rule (a) violation: a GitHub Actions expression is placed directly inside a run: script. Offending line: `${{ github.action_path }}\..\..\scripts\driver_update.bat`. The expression is filled in by template substitution before the cmd shell parses the line. Use the runner-provided environment variable in quotes instead, e.g. `"%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat"`.
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-Replaced the inline ${{ github.action_path }} expression in the cmd-shell 'Update NVIDIA driver' step with the runner env var, quoted: "%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat". No other expressions remain in run blocks.
+In action.yml, the 'Update NVIDIA driver' step (shell: cmd) now runs "%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat" instead of putting ${{ github.action_path }} directly in the script. The path is quoted so cmd reads it as one argument. GITHUB_ACTION_PATH is set by the runner and points to the same directory, so the script resolves as before. Not tested by running the action.
 

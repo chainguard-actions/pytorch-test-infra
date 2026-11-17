@@ -80,20 +80,20 @@ runs:
         RUNNER_ARTIFACT_DIR="${RUNNER_TEMP}/artifacts"
         sudo rm -rf "${RUNNER_ARTIFACT_DIR}"
         mkdir -p "${RUNNER_ARTIFACT_DIR}"
-        safe=$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')
-        echo "RUNNER_ARTIFACT_DIR=${safe}" >> "${GITHUB_ENV}"
+        safe_artifact_dir=$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')
+        echo "RUNNER_ARTIFACT_DIR=${safe_artifact_dir}" >> "${GITHUB_ENV}"
 
         RUNNER_TEST_RESULTS_DIR="${RUNNER_TEMP}/test-results"
         sudo rm -rf "${RUNNER_TEST_RESULTS_DIR}"
         mkdir -p "${RUNNER_TEST_RESULTS_DIR}"
-        safe=$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')
-        echo "RUNNER_TEST_RESULTS_DIR=${safe}" >> "${GITHUB_ENV}"
+        safe_test_results_dir=$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')
+        echo "RUNNER_TEST_RESULTS_DIR=${safe_test_results_dir}" >> "${GITHUB_ENV}"
 
         RUNNER_DOCS_DIR="${RUNNER_TEMP}/docs"
         sudo rm -rf "${RUNNER_DOCS_DIR}"
         mkdir -p "${RUNNER_DOCS_DIR}"
-        safe=$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')
-        echo "RUNNER_DOCS_DIR=${safe}" >> "${GITHUB_ENV}"
+        safe_docs_dir=$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')
+        echo "RUNNER_DOCS_DIR=${safe_docs_dir}" >> "${GITHUB_ENV}"
 
     - name: Needs nvidia driver?
       if: ${{ steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false' }}
@@ -116,10 +116,10 @@ runs:
       run: |
         if compgen -G "/dev/nvidia[0-9]" ; then
           echo "Found NVIDIA GPU device in /dev/nvidiaX, exporting GPU_FLAG"
-          # GPU_FLAG is a published interface: downstream workflows expand it
-          # unquoted (docker run ${GPU_FLAG:-} ...), which word-splits it into
-          # separate arguments. Keep the tokens separate in an array here and
-          # join them with single spaces so the exported value is unchanged.
+          # GPU_FLAG is a documented interface consumed by downstream workflows as an
+          # UNQUOTED word list (e.g. `docker run ${GPU_FLAG:-} ...`), matching what
+          # setup-nvidia exports. Each token is kept separate here; consumers must not
+          # double-quote it. The value is a static literal (no user input).
           gpu_args=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
           printf 'GPU_FLAG=%s\n' "${gpu_args[*]}" >> "${GITHUB_ENV}"
         else

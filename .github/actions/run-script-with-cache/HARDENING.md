@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20261103-202628** was hardened automatically. 4 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20261103-202628** was hardened automatically. 3 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-action.yml uses a mutable tag instead of a full 40-character commit SHA: `uses: actions/cache@v3`.
+action.yml references an action by a mutable tag rather than a 40-char commit SHA: `uses: actions/cache@v3`.
 
 Locations:
 
@@ -24,19 +24,13 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Run script' step puts a GitHub Actions expression directly into the run: script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. The value of inputs.is_windows is pasted into the bash script before it runs, so an attacker can inject commands. Move it into an env: variable (e.g. IS_WINDOWS) and reference it as "$IS_WINDOWS".
+Step 'Run script': (a) a GitHub expression is interpolated directly into the run script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. Pass it through an env var and double-quote it instead. (b) The workflow-controlled env vars are expanded without quotes: `if [[ ! -f ${SCRIPT} ]]; then`, `if [[ ${SCRIPT} == *.bat ]]; then`, `${CONDA_RUN} ${SCRIPT}` and `${CONDA_RUN} bash ${SCRIPT}`. SCRIPT comes from inputs.script. CONDA_RUN is inherited from the calling workflow.
 
 Locations:
 
 - `action.yml:51`
-
-### script-injection (severity: high)
-
-Rule (b): in the 'Run script' step, the env var SCRIPT (from inputs.script) and the inherited env var CONDA_RUN are expanded without quotes: `if [[ ! -f ${SCRIPT} ]]`, `${CONDA_RUN} ${SCRIPT}` and `${CONDA_RUN} bash ${SCRIPT}`. Expansions of workflow-controlled data must be double-quoted (e.g. "${SCRIPT}").
-
-Locations:
-
 - `action.yml:56`
+- `action.yml:60`
 - `action.yml:61`
 - `action.yml:63`
 
@@ -56,5 +50,5 @@ Locations:
 
 **Notes:**
 
-I pinned actions/cache to its full commit SHA, 6f8efc29b200d32929f49075959781ed54ec270c (# v3). I moved inputs.is_windows out of the run: script into an env variable, IS_WINDOWS, and the script now reads it as "$IS_WINDOWS". SCRIPT is now double-quoted everywhere it is used. I did not double-quote CONDA_RUN, even though the finding asks for it. It holds a command prefix such as 'conda run -p ...', and quoting it would pass that whole prefix as one argument, which would break the step. Instead it is split into an array with the same whitespace splitting as upstream's unquoted ${CONDA_RUN}. The array is then expanded quoted, using a form that still works under set -u when CONDA_RUN is empty. This splitting does not run anything inside the value, so it is not an injection risk. Nothing was run or tested; these are edits to action.yml only.
+I pinned actions/cache@v3 to its commit SHA 6f8efc29b200d32929f49075959781ed54ec270c and kept '# v3' as a comment. In the 'Run script' step, inputs.is_windows now comes in through an IS_WINDOWS env var and is double-quoted, and every use of SCRIPT is double-quoted. CONDA_RUN is a command prefix made of several words, so I split it into an array with an unquoted assignment. That splits it into words the same way upstream's unquoted expansion did. The array is expanded with ${arr[@]+...} so an unset or empty CONDA_RUN doesn't trip set -u on older bash. Nothing was run or tested. The changes only touch action.yml.
 

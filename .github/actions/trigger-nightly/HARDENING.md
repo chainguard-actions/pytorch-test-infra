@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--trigger-nightly/v20261103-202628
 
 ### unpinned-uses (severity: high)
 
-The composite step in action.yml uses a tag instead of a full 40-character commit SHA: `uses: actions/checkout@v4`.
+The composite step points to a version tag, not a full 40-character commit SHA: `uses: actions/checkout@v4`. Pin it to a commit SHA.
 
 Locations:
 
@@ -24,11 +24,11 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Create nightly commit' step puts a GitHub Actions expression directly into a run: script: `pushd ${{ inputs.path }}`. Whoever calls the action controls this input, and the value is pasted into the bash script without quotes, so it can inject shell commands. Fix: pass inputs.path through an env: variable and use it quoted, as in `pushd "$INPUT_PATH"`.
+Rule (a), direct expression interpolation, in the 'Create nightly commit' step: `pushd ${{ inputs.path }}`. The input is pasted into the bash script before the shell runs, so a crafted path value can run arbitrary commands. Fix: set it through env (for example `INPUT_PATH: ${{ inputs.path }}`) and use `pushd "$INPUT_PATH"` with the double quotes.
 
 Locations:
 
-- `action.yml:30`
+- `action.yml:31`
 
 ### static-inline-injection (severity: high)
 
@@ -46,5 +46,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4). Moved inputs.path into env INPUT_PATH and used it quoted: pushd "$INPUT_PATH".
+Pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4); moved inputs.path into env INPUT_PATH and used pushd "$INPUT_PATH".
 

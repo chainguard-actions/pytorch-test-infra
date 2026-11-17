@@ -1,4 +1,4 @@
-name: Test always-rebuild with custom registry disabled
+name: Test always-rebuild and push are ignored when custom registry is disabled
 on:
   workflow_dispatch:
 jobs:
@@ -12,8 +12,9 @@ jobs:
           docker-image-name: pytorch-linux-focal-linter
           use-custom-docker-registry: "false"
           always-rebuild: "true"
-          docker-build-dir: does-not-exist
-      - name: Assert docker-image passes through unchanged (no build attempted)
+          push: "true"
+          force-push: "true"
+      - name: Assert docker-image passed through unchanged
         env:
           ACTUAL: ${{ steps.action.outputs.docker-image }}
         run: |

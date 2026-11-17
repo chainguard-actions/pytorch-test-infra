@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--pull-docker-image/v20261103-2026
 
 ### script-injection (severity: high)
 
-Rule (b): the retry() helper expands its positional parameters unquoted: `$*  || (sleep 1 && $*) || (sleep 2 && $*)`. It is called as `retry login "${DOCKER_REGISTRY}"` and `retry docker pull "${DOCKER_IMAGE}"`, so the input values inputs.docker-registry and inputs.docker-image are expanded unquoted. That splits them on whitespace and expands glob characters, which can inject extra arguments into docker/aws commands. Fix: use "$@" instead of $*.
+Rule (b): the `retry` helper expands its arguments unquoted with `$*  || (sleep 1 && $*) || (sleep 2 && $*)`. It is called as `retry login "${DOCKER_REGISTRY}"` and `retry docker pull "${DOCKER_IMAGE}"`, and both values come from inputs (inputs.docker-registry and inputs.docker-image). The quoting at the call site is undone inside the helper, so whitespace and glob characters in the input are split and expanded again. That can add extra arguments or options to `docker pull` or `docker login`. Fix: change `$*` to "$@" so each argument stays intact.
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-Changed retry() in action.yml to expand its arguments as "$@" instead of unquoted $*, so the docker-registry and docker-image inputs are each passed as one argument with no word splitting or glob expansion.
+In action.yml, the retry helper now runs its arguments as "$@" instead of unquoted $*. Before this, the quoting of the docker-image and docker-registry inputs was lost inside the helper, so whitespace or glob characters in them could add extra arguments or options to docker pull or docker login. Each argument now passes through intact. Callers are unchanged: the shell function `login` and the `docker` command still run the same way. No other changes; I didn't run the action to test it.
 

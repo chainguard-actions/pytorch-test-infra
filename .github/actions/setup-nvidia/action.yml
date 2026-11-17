@@ -83,11 +83,12 @@ runs:
       run: |
         if [ "${HAS_NVIDIA}" = "true" ]; then
           echo "HAS_NVIDIA_GPU=true" >> "${GITHUB_ENV}"
-          # GPU_FLAG is a public interface consumed by caller workflows as an
-          # UNQUOTED word list (docker run ${GPU_FLAG:-} ...), so it must stay a
-          # single space-separated string. No command in this action expands it.
-          gpu_flag_words=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
-          printf 'GPU_FLAG=%s\n' "${gpu_flag_words[*]}" >> "${GITHUB_ENV}"
+          # GPU_FLAG is a whitespace-separated docker argument LIST consumed by callers
+          # (e.g. docker run ${GPU_FLAG:-} ...). Build it from an array so every token
+          # is a separate argument; consumers must expand it unquoted or split it into
+          # an array (read -r -a gpu_args <<< "$GPU_FLAG"; docker run "${gpu_args[@]}").
+          gpu_args=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
+          printf 'GPU_FLAG=%s\n' "${gpu_args[*]}" >> "${GITHUB_ENV}"
         else
           echo "HAS_NVIDIA_GPU=false" >> "${GITHUB_ENV}"
         fi

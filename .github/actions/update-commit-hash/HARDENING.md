@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--update-commit-hash/v20261103-202
 
 ### unpinned-uses (severity: high)
 
-action.yml points to actions by version tag instead of a full 40-character commit SHA: 'uses: actions/checkout@v4' (line 45), 'uses: actions/checkout@v4' (line 52), 'uses: actions/setup-python@v5' (line 63). Pin each one to a commit SHA.
+Composite action steps reference actions by mutable tags instead of 40-char commit SHAs: 'uses: actions/checkout@v4' (line 45), 'uses: actions/checkout@v4' (line 52), 'uses: actions/setup-python@v5' (line 63).
 
 Locations:
 
@@ -26,7 +26,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): expressions are pasted straight into the run: script in the 'Checkout the target repo' step: 'git clone https://github.com/${{ inputs.repo-owner }}/${{ inputs.repo-name }}.git --quiet'. Whoever calls the action controls inputs.repo-owner and inputs.repo-name, so shell metacharacters in those values become commands. Move them into env: variables (e.g. REPO_OWNER, REPO_NAME) and use them double-quoted: git clone "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" --quiet.
+Sub-rule (a): GitHub expressions are placed directly into a run: script in step 'Checkout the target repo': `git clone https://github.com/${{ inputs.repo-owner }}/${{ inputs.repo-name }}.git --quiet`. Move the inputs into env: variables and use them double-quoted, e.g. git clone "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" --quiet.
 
 Locations:
 
@@ -56,5 +56,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4) in both places and actions/setup-python to a26af69be951a213d495a4c3e4e4022e16d87065 (v5). Moved inputs.repo-owner and inputs.repo-name in the 'Checkout the target repo' step into env: as REPO_OWNER and REPO_NAME. The git clone URL now uses them inside double quotes. Not tested here.
+Pinned both actions/checkout@v4 uses to 11d5960a326750d5838078e36cf38b85af677262 and actions/setup-python@v5 to a26af69be951a213d495a4c3e4e4022e16d87065, keeping the tag as a trailing comment. In the 'Checkout the target repo' step, moved inputs.repo-owner and inputs.repo-name into the step's env: block as REPO_OWNER and REPO_NAME. The git clone URL now uses them inside double quotes. Nothing was tested; the edits were only checked by reading the file.
 
