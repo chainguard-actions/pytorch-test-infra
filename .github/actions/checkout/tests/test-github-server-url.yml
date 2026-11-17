@@ -13,24 +13,24 @@ jobs:
           ref: main
           path: server-url-target
           github-server-url: https://github.com
-      - name: Assert checkout from explicit server URL succeeded
+      - name: Assert checkout used the given server URL
         env:
           COMMIT: ${{ steps.action.outputs.commit }}
         run: |
           echo "commit: $COMMIT"
           DIR="$GITHUB_WORKSPACE/server-url-target"
           if [ ! -f "$DIR/action.yml" ]; then
-            echo "FAIL: action.yml not found in $DIR"
-            exit 1
-          fi
-          if ! echo "$COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
-            echo "FAIL: commit output is not a 40-char SHA"
+            echo "FAIL: action.yml not found"
             exit 1
           fi
           URL="$(git -C "$DIR" config --get remote.origin.url)"
-          echo "origin url: $URL"
-          if ! echo "$URL" | grep -q '^https://github.com/actions/checkout'; then
-            echo "FAIL: origin url does not use https://github.com"
+          echo "remote url: $URL"
+          case "$URL" in
+            https://github.com/actions/checkout*) ;;
+            *) echo "FAIL: unexpected remote url"; exit 1 ;;
+          esac
+          if ! echo "$COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "FAIL: commit output is not a 40-char SHA"
             exit 1
           fi
           echo "PASS"

@@ -112,9 +112,9 @@ runs:
           --required-checks "$REQUIRES" \
           --viable-strict-branch "viable/strict" \
           --main-branch "master")
-        safe_output=$(printf '%s' "$output" | tr -d '\n\r')
-        echo "latest_viable_sha=$safe_output" >> "${GITHUB_OUTPUT}"
-        echo $output
+        safe=$(printf '%s' "$output" | tr -d '\n\r')
+        echo "latest_viable_sha=$safe" >> "${GITHUB_OUTPUT}"
+        echo "$output"
 
     - name: Push SHA to viable/strict branch
       if: steps.get-latest-commit.outputs.latest_viable_sha != 'None'
@@ -136,8 +136,7 @@ runs:
         EOF_DELIM="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
         {
           echo "push_result<<${EOF_DELIM}"
-          # shellcheck disable=SC2086
-          echo $push_result
+          echo "$push_result"
           echo "${EOF_DELIM}"
         } >> "${GITHUB_OUTPUT}"
         echo "${push_result}"

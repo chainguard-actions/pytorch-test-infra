@@ -55,8 +55,7 @@ runs:
         uv venv --clear "${RUNNER_TEMP}/benchmark-upload-venv"
 
         export VIRTUAL_ENV="${RUNNER_TEMP}/benchmark-upload-venv"
-        safe_venv=$(printf '%s' "${RUNNER_TEMP}/benchmark-upload-venv" | tr -d '\n\r')
-        echo "VIRTUAL_ENV=$safe_venv" >> "$GITHUB_ENV"
+        echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV
 
         uv pip install boto3==1.35.33 psutil==7.0.0 nvidia-ml-py==13.580.82
 
@@ -113,8 +112,7 @@ runs:
           # be fixed properly
           DEVICE_TYPE=""
         fi
-        safe_device_type=$(printf '%s' "$DEVICE_TYPE" | tr -d '\n\r')
-        echo "DEVICE_TYPE=$safe_device_type" >> "$GITHUB_ENV"
+        echo "DEVICE_TYPE=$DEVICE_TYPE" >> $GITHUB_ENV
 
     - name: Check that GITHUB_TOKEN is defined
       env:

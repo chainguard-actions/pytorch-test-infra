@@ -16,12 +16,12 @@ Action **pytorch--test-infra--.github--actions--gather-runners-info/v20261109-23
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Gather the runners information' step puts the expression ${{ inputs.venv }} directly into its run: script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The input value is substituted into the script text before bash runs, so a crafted value containing quotes or $(...) can run commands. Fix: pass the input through an env: variable (e.g. VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
+Rule (a): the 'Gather the runners information' step puts the expression ${{ inputs.venv }} straight into its run: script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is pasted into the script before bash runs, so an input containing a double quote and shell metacharacters can run arbitrary commands. Fix: add `env: VENV: ${{ inputs.venv }}` to the step and use "$VENV" in the script.
 
 Locations:
 
-- `action.yml:70`
-- `action.yml:71`
+- `action.yml:73`
+- `action.yml:74`
 
 ### static-inline-injection (severity: high)
 
@@ -47,5 +47,5 @@ Locations:
 
 **Notes:**
 
-Moved ${{ inputs.venv }} into env var VENV in the 'Gather the runners information' step and referenced it as "$VENV" in the bash script.
+Moved ${{ inputs.venv }} into the step's env block as VENV and referenced it as "$VENV" in the 'Gather the runners information' step.
 

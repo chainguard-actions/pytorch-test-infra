@@ -71,8 +71,8 @@ runs:
         fi
         source "${BUILD_ENV_FILE}"
 
-        # CONDA_RUN is a command prefix (e.g. "conda run -p <env>"); split it
-        # on whitespace exactly as upstream's unquoted expansion did.
+        # CONDA_RUN is a command prefix (e.g. "conda run -p <env>"); split it on
+        # whitespace exactly as upstream's unquoted expansion did. Nothing in it is evaluated.
         # shellcheck disable=SC2206
         conda_run=(${CONDA_RUN:-})
 

@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--bc-lint/v20261109-232755** was h
 
 ### unpinned-uses (severity: high)
 
-Composite action steps use tag refs, not full commit SHAs: 'uses: actions/checkout@v4' (line 30) and 'uses: actions/checkout@v4' (line 36).
+Composite action steps use tag refs instead of full commit SHAs: 'uses: actions/checkout@v4' (line 30) and 'uses: actions/checkout@v4' (line 36).
 
 Locations:
 
@@ -25,7 +25,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Merge PR changes onto base' run block puts expressions straight into the shell script: 'git fetch origin "${{ inputs.head_sha }}"', 'git fetch origin "${{ inputs.base_sha }}"', 'git reset --hard "${{ inputs.base_sha }}"', 'git merge "${{ inputs.head_sha }}"'. Move these values into env: variables and use them double-quoted.
+Rule (a): step 'Merge PR changes onto base' puts expressions straight into the run script: 'git fetch origin "${{ inputs.head_sha }}"', 'git fetch origin "${{ inputs.base_sha }}"', 'git reset --hard "${{ inputs.base_sha }}"' and 'git merge "${{ inputs.head_sha }}"'. Move these values into env: variables and use them double-quoted.
 
 Locations:
 
@@ -36,7 +36,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Build and run BC-linter' run block puts expressions straight into the shell script, without quotes: '--base-commit=${{ inputs.base_sha }}', '--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}', '${{ inputs.suppression == 'true' && '--suppressed' || '' }}', '${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}'. The config_dir input can be anything the caller supplies.
+Rule (a): step 'Build and run BC-linter' puts expressions straight into the run script, without quotes: '--base-commit=${{ inputs.base_sha }}', '--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}', '${{ inputs.suppression == 'true' && '--suppressed' || '' }}' and '${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}'.
 
 Locations:
 
@@ -47,7 +47,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Display documentation link if failed' run block puts an input straight into the shell script: 'echo "${{ inputs.docs_link }}"'.
+Rule (a): step 'Display documentation link if failed' puts an expression straight into the run script: 'echo "${{ inputs.docs_link }}"'.
 
 Locations:
 
@@ -117,5 +117,5 @@ Locations:
 
 **Notes:**
 
-Pinned both actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262. Moved all inline ${{ }} expressions in run blocks (head_sha, base_sha, new_head_sha, suppression, config_dir, docs_link) into step env: vars. The optional --suppressed and --config-dir flags are now built into a bash array so empty values add no argument (same as upstream) and config_dir stays one quoted argument; the set -u-safe ${arr[@]+...} expansion is used.
+Pinned both actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262. Moved every input/step-output expression out of the run scripts and into env: (HEAD_SHA, BASE_SHA, NEW_HEAD_SHA, SUPPRESSION, CONFIG_DIR, DOCS_LINK), and each one is now used double-quoted. The optional --suppressed and --config-dir flags are built in a bash array, so they drop out when not set, the same as upstream. The array is expanded with the set -u-safe ${arr[@]+...} form.
 

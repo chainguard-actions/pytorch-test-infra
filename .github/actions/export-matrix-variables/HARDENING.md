@@ -16,12 +16,12 @@ Action **pytorch--test-infra--.github--actions--export-matrix-variables/v2026110
 
 ### script-injection (severity: high)
 
-Rule (b): the env var TARGET_OS comes from inputs.target-os and is expanded without double quotes in the 'Export variables' step: `if [[ ${TARGET_OS} != "linux" ]]; then` and `if [[ ${TARGET_OS} == 'windows' ]]; then`. Inside [[ ]] it is the left operand, so it is not word-split, but it is still an unquoted expansion of workflow-controlled data. Fix: write "${TARGET_OS}".
+Rule (b) violation: the env var TARGET_OS comes straight from inputs.target-os, but the script expands it without double quotes. Offending lines: `if [[ ${TARGET_OS} != "linux" ]]; then` and `if [[ ${TARGET_OS} == 'windows' ]]; then`. Inside [[ ]] the shell does not split words, but the check requires every expansion of workflow-controlled data to be double-quoted. Fix: use "${TARGET_OS}". (Unquoted ${RUNNER_TEMP} and ${GITHUB_RUN_ID} on the python output redirect lines are runner-provided values and should be quoted too, for safety.)
 
 Locations:
 
-- `action.yml:32`
-- `action.yml:38`
+- `action.yml:33`
+- `action.yml:39`
 
 ## Iteration Notes
 
@@ -31,5 +31,5 @@ Locations:
 
 **Notes:**
 
-Added double quotes around ${TARGET_OS} in both [[ ]] tests in action.yml (lines 32 and 38). The input was already passed in through env:, and the script's behavior is unchanged.
+In action.yml, both [[ ]] checks now use "${TARGET_OS}" in double quotes. The redirect targets "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}" are quoted too. ${ADD_QUOTES_AROUND_VAR} is now ${ADD_QUOTES_AROUND_VAR:+"$ADD_QUOTES_AROUND_VAR"}: the flag is still passed when set and dropped when empty, same as before. Nothing was run to test these edits.
 

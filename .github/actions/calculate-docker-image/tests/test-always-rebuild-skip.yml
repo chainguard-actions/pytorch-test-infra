@@ -1,4 +1,4 @@
-name: Test always-rebuild with no build script (build skipped)
+name: Test always-rebuild and push are ignored when build is skipped
 on:
   workflow_dispatch:
 jobs:
@@ -9,17 +9,19 @@ jobs:
       - id: action
         uses: .
         with:
-          docker-image-name: rebuild-image:v1
-          docker-build-dir: does-not-exist/docker
-          always-rebuild: "true"
+          docker-image-name: pytorch-linux-focal-linter
+          docker-build-dir: does/not/exist
           repo-name: pytorch
-      - name: Assert image name passed through and build skipped
+          always-rebuild: "true"
+          push: "true"
+          force-push: "true"
+      - name: Assert image name returned unchanged (no build/push attempted)
         env:
           ACTUAL: ${{ steps.action.outputs.docker-image }}
         run: |
           echo "actual: $ACTUAL"
-          if [ "$ACTUAL" != "rebuild-image:v1" ]; then
-            echo "FAIL: expected 'rebuild-image:v1'"
+          if [ "$ACTUAL" != "pytorch-linux-focal-linter" ]; then
+            echo "FAIL: expected 'pytorch-linux-focal-linter'"
             exit 1
           fi
           echo "PASS"

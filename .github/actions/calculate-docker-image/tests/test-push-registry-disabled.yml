@@ -1,4 +1,4 @@
-name: Test push input with custom registry disabled (no push performed)
+name: Test push input with custom registry disabled
 on:
   workflow_dispatch:
 jobs:
@@ -6,22 +6,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create a build dir with a build script
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/push-build-dir"
+          printf '#!/bin/bash\necho "should not run"\nexit 1\n' > "$GITHUB_WORKSPACE/push-build-dir/build.sh"
+          chmod +x "$GITHUB_WORKSPACE/push-build-dir/build.sh"
       - id: action
         uses: .
         with:
-          docker-image-name: push-image:latest
-          docker-build-dir: tests/fixtures/docker
+          docker-image-name: "my-image:custom"
+          docker-build-dir: push-build-dir
           use-custom-docker-registry: "false"
-          push: "true"
-          force-push: "true"
           repo-name: pytorch
+          push: "true"
       - name: Assert image name returned unchanged
         env:
           ACTUAL: ${{ steps.action.outputs.docker-image }}
         run: |
           echo "actual: $ACTUAL"
-          if [ "$ACTUAL" != "push-image:latest" ]; then
-            echo "FAIL: expected 'push-image:latest'"
+          if [ "$ACTUAL" != "my-image:custom" ]; then
+            echo "FAIL: expected 'my-image:custom'"
             exit 1
           fi
           echo "PASS"

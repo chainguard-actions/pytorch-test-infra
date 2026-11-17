@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--update-commit-hash/v20261109-232
 
 ### unpinned-uses (severity: high)
 
-action.yml pins its actions to version tags instead of full 40-character commit SHAs: 'uses: actions/checkout@v4' (line 45), 'uses: actions/checkout@v4' (line 52), 'uses: actions/setup-python@v5' (line 63).
+action.yml references actions by mutable tags rather than full 40-char commit SHAs: 'uses: actions/checkout@v4' (line 45), 'uses: actions/checkout@v4' (line 52), 'uses: actions/setup-python@v5' (line 63).
 
 Locations:
 
@@ -26,7 +26,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Sub-rule (a): the 'Checkout the target repo' step puts GitHub expressions straight into a run: script: 'git clone https://github.com/${{ inputs.repo-owner }}/${{ inputs.repo-name }}.git --quiet'. A crafted input value can run shell commands. Fix: pass the inputs through env: variables and quote them, e.g. git clone "https://github.com/${REPO_OWNER}/${REPO_NAME}.git".
+Rule (a) violation: GitHub Actions expressions are interpolated directly into a run: script in step 'Checkout the target repo': 'git clone https://github.com/${{ inputs.repo-owner }}/${{ inputs.repo-name }}.git --quiet'. Caller-supplied inputs are substituted into the shell script before parsing, allowing command injection. Move them to env: variables (e.g. REPO_OWNER, REPO_NAME) and reference them double-quoted: git clone "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" --quiet.
 
 Locations:
 
@@ -56,5 +56,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/checkout (two places) to 11d5960a326750d5838078e36cf38b85af677262 # v4 and actions/setup-python to a26af69be951a213d495a4c3e4e4022e16d87065 # v5. Moved inputs.repo-owner and inputs.repo-name into the 'Checkout the target repo' step's env block; the git clone URL now uses them as quoted variables.
+Pinned actions/checkout@v4 (both uses) to 11d5960a326750d5838078e36cf38b85af677262 and actions/setup-python@v5 to a26af69be951a213d495a4c3e4e4022e16d87065. In the 'Checkout the target repo' step, moved inputs.repo-owner and inputs.repo-name into env (REPO_OWNER, REPO_NAME). The clone URL now uses them inside double quotes.
 

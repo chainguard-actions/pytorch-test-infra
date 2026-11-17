@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--trigger-nightly/v20261109-232755
 
 ### unpinned-uses (severity: high)
 
-Composite step uses a mutable tag instead of a full commit SHA: `uses: actions/checkout@v4`.
+action.yml composite step uses a mutable tag ref: 'uses: actions/checkout@v4'. Pin it to a full 40-character commit SHA.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Create nightly commit' step puts an expression straight into the run script, unquoted: `pushd ${{ inputs.path }}`. Whatever the caller passes as inputs.path becomes shell code, so a value like `x; malicious` runs as a command. Fix: set it through env (e.g. INPUT_PATH: ${{ inputs.path }}) and use `pushd "$INPUT_PATH"`.
+Rule (a): the 'Create nightly commit' step puts an expression straight into the run: script: 'pushd ${{ inputs.path }}'. Move inputs.path into an env: variable and use it quoted, e.g. pushd "$INPUT_PATH".
 
 Locations:
 
@@ -46,5 +46,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4). Moved inputs.path into env INPUT_PATH and used pushd "$INPUT_PATH".
+Pinned actions/checkout to commit 11d5960a326750d5838078e36cf38b85af677262, the commit the v4 tag points to; the '# v4' comment stays so the version is still readable. In the 'Create nightly commit' step, inputs.path now comes in through the step's env: as INPUT_PATH, and the script runs pushd "$INPUT_PATH" (quoted) instead of putting the expression straight into the script. Nothing was run to test these edits.
 

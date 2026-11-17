@@ -79,10 +79,10 @@ runs:
       - name: Log Available Webhook Fields
         shell: bash
         env:
-          GH_REF_NAME: ${{ github.ref_name }}
-          GH_EVENT_REF: ${{ github.event.ref }}
-          GH_REF: ${{ github.ref }}
-          GH_BASE_REF: ${{ github.base_ref }}
+          GH_CTX_REF_NAME: ${{ github.ref_name }}
+          GH_CTX_EVENT_REF: ${{ github.event.ref }}
+          GH_CTX_REF: ${{ github.ref }}
+          GH_CTX_BASE_REF: ${{ github.base_ref }}
         run: |
           echo "ENV VARS"
           echo "${GITHUB_REF_NAME}"
@@ -90,10 +90,10 @@ runs:
           echo "${GITHUB_BASE_REF}"
 
           echo "GITHUB PROVIDED"
-          echo "${GH_REF_NAME}"
-          echo "${GH_EVENT_REF}"
-          echo "${GH_REF}"
-          echo "${GH_BASE_REF}"
+          echo "${GH_CTX_REF_NAME}"
+          echo "${GH_CTX_EVENT_REF}"
+          echo "${GH_CTX_REF}"
+          echo "${GH_CTX_BASE_REF}"
       - name: Set artifact name
         shell: bash
         env:
@@ -108,9 +108,9 @@ runs:
           # Convert long python version (e.g. 3.10.19) to short major.minor version
           # (e.g. 3.10), while preserving special suffixes like "t" (e.g. 3.13t, 3.14t)
           SHORT_PYTHON_VERSION=$(echo "${PYTHON_VERSION}" | sed -E 's/^([0-9]+\.[0-9]+[a-z]?).*/\1/')
-          ARTIFACT_NAME="${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}"
-          SAFE_ARTIFACT_NAME=$(printf '%s' "${ARTIFACT_NAME}" | tr -d '\n\r')
-          echo "ARTIFACT_NAME=${SAFE_ARTIFACT_NAME}" >> "${GITHUB_ENV}"
+          ARTIFACT_NAME_RAW="${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}"
+          ARTIFACT_NAME_SAFE=$(printf '%s' "${ARTIFACT_NAME_RAW}" | tr -d '\n\r')
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME_SAFE}" >> "${GITHUB_ENV}"
       - name: Setup miniconda (for pytorch_pkg_helpers)
         if: ${{ inputs.setup-miniconda == 'true' }}
         uses: chainguard-actions/conda-incubator-setup-miniconda@b5f012d1f15cb72b8cf888ece1640fff51d4678c # v3.1.1

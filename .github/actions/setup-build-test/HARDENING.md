@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-build-test/v20261109-23275
 
 ### unpinned-uses (severity: high)
 
-Composite step uses a mutable tag instead of a full 40-character commit SHA: `uses: actions/checkout@v4`.
+Composite step references an action by a mutable tag instead of a full 40-character commit SHA: `uses: actions/checkout@v4`.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### github-env-injection (severity: high)
 
-The 'Setup useful environment variables' step writes `RUNNER_ARTIFACT_DIR=${RUNNER_TEMP}/artifacts` to $GITHUB_ENV. RUNNER_TEMP is a process env var that the composite action inherits and does not set in its own script. The value is not passed through `printf '%s' ... | tr -d '\n\r'` before the write. Strip newlines first, e.g. `safe=$(printf '%s' "$RUNNER_TEMP" | tr -d '\n\r'); echo "RUNNER_ARTIFACT_DIR=${safe}/artifacts" >> "$GITHUB_ENV"`.
+Composite run step writes an inherited process env var to $GITHUB_ENV without the sanitization step: `echo "RUNNER_ARTIFACT_DIR=${RUNNER_TEMP}/artifacts" >> "${GITHUB_ENV}"`. RUNNER_TEMP is not set inside this script, so under this check it counts as workflow-controlled. Strip newlines first: `safe=$(printf '%s' "$RUNNER_TEMP" | tr -d '\n\r')`, then write `RUNNER_ARTIFACT_DIR=${safe}/artifacts`.
 
 Locations:
 
@@ -38,5 +38,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262 (# v4). RUNNER_TEMP now has newlines stripped (printf | tr -d '\n\r') before RUNNER_ARTIFACT_DIR is written to GITHUB_ENV.
+Pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4). RUNNER_TEMP now has newlines removed before RUNNER_ARTIFACT_DIR is written to GITHUB_ENV.
 

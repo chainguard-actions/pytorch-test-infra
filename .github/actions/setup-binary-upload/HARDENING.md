@@ -16,20 +16,20 @@ Action **pytorch--test-infra--.github--actions--setup-binary-upload/v20261109-23
 
 ### unpinned-uses (severity: high)
 
-action.yml references actions by mutable tag instead of a full 40-char commit SHA: 'uses: actions/setup-python@v5' and 'uses: actions/checkout@v4'.
+Composite action steps use mutable tag refs instead of full 40-character commit SHAs: 'uses: actions/setup-python@v5' and 'uses: actions/checkout@v4'.
 
 Locations:
 
 - `action.yml:36`
-- `action.yml:61`
+- `action.yml:63`
 
 ### github-env-injection (severity: high)
 
-Step 'Set the artifact name' writes values derived from inputs.repository, inputs.ref, inputs.python-version, inputs.cuda-version and inputs.arch (via env vars REPOSITORY, REF, SHORT_PYTHON_VERSION, CU_VERSION, ARCH) to $GITHUB_ENV without the printf '%s' ... | tr -d '\n\r' sanitization: echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}". A newline in any input lets the caller inject extra environment variables.
+Step 'Set the artifact name' writes values taken from inputs (REPOSITORY, REF, CU_VERSION, ARCH from inputs.*, plus SHORT_PYTHON_VERSION built from inputs.python-version) to $GITHUB_ENV without first running them through printf '%s' ... | tr -d '\n\r'. Offending line: echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}". A newline in any of these inputs could add arbitrary environment variables for later steps.
 
 Locations:
 
-- `action.yml:58`
+- `action.yml:60`
 
 ## Iteration Notes
 
@@ -39,5 +39,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/setup-python to a26af69be951a213d495a4c3e4e4022e16d87065 (v5) and actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4). The ARTIFACT_NAME value is now built in a local variable first, then has newlines and carriage returns stripped with printf '%s' | tr -d '\n\r' before it is written to $GITHUB_ENV. No tests were run; these changes were not executed.
+Pinned actions/setup-python to a26af69be951a213d495a4c3e4e4022e16d87065 (v5) and actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4). ARTIFACT_NAME is now built into a variable first, run through printf '%s' | tr -d '\n\r', and only then written to $GITHUB_ENV.
 

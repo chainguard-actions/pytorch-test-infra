@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-nvidia-windows/v20261109-2
 
 ### script-injection (severity: high)
 
-Rule (a): a GitHub Actions expression is placed directly inside a run: block in the 'Update NVIDIA driver' step (shell: cmd). The offending line is `${{ github.action_path }}\..\..\scripts\driver_update.bat`. The expression is filled in by the template before cmd parses the line. Fix: use the runner-provided env var instead, written as "%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat" (quoted).
+Rule (a), direct expression interpolation: the 'Update NVIDIA driver' step puts a GitHub Actions expression straight into the run: script: `${{ github.action_path }}\..\..\scripts\driver_update.bat`. Template substitution happens before cmd parses the line. Fix: set the path through the step's env: or use the built-in %GITHUB_ACTION_PATH% variable, and double-quote it, for example "%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat".
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-In action.yml, the 'Update NVIDIA driver' step (shell: cmd) no longer puts ${{ github.action_path }} directly into the script. It now runs "%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat", using the env var the runner already sets, in quotes, with the same relative path as before. cmd now expands the path when it runs the line. Before, GitHub pasted the text into the script before cmd parsed it. I didn't change anything else, and I haven't run the action to test this.
+Replaced the inline ${{ github.action_path }} in the cmd step with the runner's built-in %GITHUB_ACTION_PATH% env var, double-quoted: "%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat". Shell remains cmd; behavior otherwise unchanged.
 
