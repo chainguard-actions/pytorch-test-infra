@@ -30,9 +30,5 @@ Locations:
 
 **Notes:**
 
-In the "Export GPU detection result" step, the GPU flags (--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all) are now built as a bash array called gpu_args. Two environment variables come from that array:
-- GPU_FLAG has exactly the same value as upstream. Downstream pytorch workflows use it unquoted (docker run ${GPU_FLAG}) and rely on the shell splitting it into separate arguments, so changing it would break them. The value is a fixed string with no input from the workflow, so it can't be used for injection.
-- GPU_FLAG_ARGS is new and holds one token per line. It's written with a random heredoc delimiter, so callers who want quoted arguments can load it into an array without one argument swallowing the others.
-
-The change hasn't been run or re-analyzed. A static check that matches any flag-plus-value stored in one variable may still flag GPU_FLAG. Keeping it was deliberate: removing it or splitting its value would break every downstream caller. Nothing else in action.yml changed.
+In the "Export GPU detection result" step, GPU_FLAG is now built from a bash array (gpu_args=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)), so each docker argument is defined as its own token. It is then joined with ${gpu_args[*]} and written with printf. The value in GITHUB_ENV is byte-for-byte what upstream wrote. This was required: downstream PyTorch workflows read GPU_FLAG and expand it unquoted (docker run ${GPU_FLAG:-}), which splits it into separate arguments, so changing the value or its format would break them. The value is a static literal with no workflow-controlled data, so there was no injection risk. I added a comment saying it is an argument list and that callers wanting an array should use gpu_args=($GPU_FLAG). The fix has not been run or re-scanned. If the analyzer only looks for a flag and its value written together, it may still flag this step, but the env var's contract can't change without breaking consumers.
 

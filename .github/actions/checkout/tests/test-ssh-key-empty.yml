@@ -1,4 +1,4 @@
-name: Test empty ssh-key with ssh-known-hosts falls back to HTTPS
+name: Test empty ssh-key falls back to HTTPS token auth
 on:
   workflow_dispatch:
 jobs:
@@ -11,24 +11,23 @@ jobs:
         with:
           repository: actions/checkout
           ref: main
-          path: ssh-target
+          path: ssh-empty-target
           ssh-key: ''
-          ssh-known-hosts: 'example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl'
-          ssh-strict: 'true'
-          ssh-user: git
-      - name: Assert HTTPS checkout used (no SSH key configured)
+          ssh-known-hosts: |
+            example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+      - name: Assert HTTPS checkout succeeded
         env:
           COMMIT: ${{ steps.action.outputs.commit }}
         run: |
           echo "commit: $COMMIT"
-          DIR="$GITHUB_WORKSPACE/ssh-target"
+          DIR="$GITHUB_WORKSPACE/ssh-empty-target"
           if [ ! -f "$DIR/action.yml" ]; then
             echo "FAIL: action.yml not found"
             exit 1
           fi
-          URL="$(git -C "$DIR" config --get remote.origin.url)"
-          echo "origin: $URL"
-          case "$URL" in
+          ORIGIN="$(git -C "$DIR" remote get-url origin)"
+          echo "origin: $ORIGIN"
+          case "$ORIGIN" in
             https://*) ;;
             *) echo "FAIL: expected HTTPS origin when ssh-key is empty"; exit 1 ;;
           esac

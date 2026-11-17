@@ -13,7 +13,7 @@ jobs:
           ref: main
           path: server-url-target
           github-server-url: https://github.com
-      - name: Assert checkout from explicit server URL
+      - name: Assert checkout from explicit server URL succeeded
         env:
           COMMIT: ${{ steps.action.outputs.commit }}
         run: |
@@ -23,9 +23,9 @@ jobs:
             echo "FAIL: action.yml not found"
             exit 1
           fi
-          URL="$(git -C "$DIR" config --get remote.origin.url)"
-          echo "origin: $URL"
-          case "$URL" in
+          ORIGIN="$(git -C "$DIR" remote get-url origin)"
+          echo "origin: $ORIGIN"
+          case "$ORIGIN" in
             https://github.com/actions/checkout*) ;;
             *) echo "FAIL: unexpected origin URL"; exit 1 ;;
           esac

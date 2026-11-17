@@ -83,19 +83,11 @@ runs:
       run: |
         if [ "${HAS_NVIDIA}" = "true" ]; then
           echo "HAS_NVIDIA_GPU=true" >> "${GITHUB_ENV}"
-          # GPU_FLAG is part of this action's public interface: downstream workflows
-          # expand it UNQUOTED (docker run ${GPU_FLAG} ...) so it word-splits into
-          # separate arguments. It is a fixed literal (no workflow-controlled data).
-          # Consumers that prefer to quote can use GPU_FLAG_ARGS (one token per line)
-          # with: mapfile -t gpu_args <<< "$GPU_FLAG_ARGS"; docker run "${gpu_args[@]}" ...
+          # GPU_FLAG is a whitespace-separated docker argument LIST consumed by callers
+          # as an unquoted expansion (docker run ${GPU_FLAG:-} ...), which splits it into
+          # separate arguments. Callers that need an array should use: gpu_args=($GPU_FLAG)
           gpu_args=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
           printf 'GPU_FLAG=%s\n' "${gpu_args[*]}" >> "${GITHUB_ENV}"
-          EOF_DELIM="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
-          {
-            echo "GPU_FLAG_ARGS<<${EOF_DELIM}"
-            printf '%s\n' "${gpu_args[@]}"
-            echo "${EOF_DELIM}"
-          } >> "${GITHUB_ENV}"
         else
           echo "HAS_NVIDIA_GPU=false" >> "${GITHUB_ENV}"
         fi

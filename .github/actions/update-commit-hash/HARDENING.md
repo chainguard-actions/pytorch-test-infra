@@ -14,23 +14,23 @@ Action **pytorch--test-infra--.github--actions--update-commit-hash/v20261027-001
 
 ## Findings Fixed
 
-### script-injection (severity: high)
-
-Sub-rule (a), direct expression interpolation, in step 'Checkout the target repo'. The offending line is `git clone https://github.com/${{ inputs.repo-owner }}/${{ inputs.repo-name }}.git --quiet`. The caller supplies these inputs, and their values are pasted into the shell script before bash runs it. Fix: move them into env: variables (e.g. REPO_OWNER and REPO_NAME) and reference them double-quoted: `git clone "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" --quiet`.
-
-Locations:
-
-- `action.yml:61`
-
 ### unpinned-uses (severity: high)
 
-Three composite steps reference actions by a mutable tag instead of a full 40-character commit SHA: `uses: actions/checkout@v4` (line 45), `uses: actions/checkout@v4` (line 52) and `uses: actions/setup-python@v5` (line 63). Pin each one to a full commit SHA, with the version as a trailing comment.
+action.yml uses actions by mutable tag instead of a full 40-character commit SHA: 'uses: actions/checkout@v4' (line 45), 'uses: actions/checkout@v4' (line 52), 'uses: actions/setup-python@v5' (line 63).
 
 Locations:
 
 - `action.yml:45`
 - `action.yml:52`
 - `action.yml:63`
+
+### script-injection (severity: high)
+
+Rule (a) is violated: GitHub expressions are placed directly inside a run: script in the 'Checkout the target repo' step: 'git clone https://github.com/${{ inputs.repo-owner }}/${{ inputs.repo-name }}.git --quiet'. The values of inputs.repo-owner and inputs.repo-name are pasted into the script before the shell runs it, so shell metacharacters in them would run as commands. Fix: pass them in through env: (e.g. REPO_OWNER, REPO_NAME) and quote them: git clone "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" --quiet.
+
+Locations:
+
+- `action.yml:61`
 
 ### static-inline-injection (severity: high)
 
@@ -52,13 +52,9 @@ Locations:
 
 ### Iteration 1
 
-**Fixes applied:** script-injection, static-inline-injection, unpinned-uses
+**Fixes applied:** unpinned-uses, script-injection, static-inline-injection
 
 **Notes:**
 
-I made two changes to action.yml and haven't run the action since.
-
-1. Script injection: the 'Checkout the target repo' step no longer pastes inputs.repo-owner and inputs.repo-name into the shell script. They now go into the step's env: block as REPO_OWNER and REPO_NAME, and the clone command uses them double-quoted: git clone "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" --quiet.
-
-2. Pinned actions: I looked up the commit for each tag and pinned both actions/checkout steps to 11d5960a326750d5838078e36cf38b85af677262 (v4) and actions/setup-python to a26af69be951a213d495a4c3e4e4022e16d87065 (v5). The version is kept as a trailing comment on each line.
+I pinned both actions/checkout@v4 references to 11d5960a326750d5838078e36cf38b85af677262 and actions/setup-python@v5 to a26af69be951a213d495a4c3e4e4022e16d87065. Each pin keeps a comment naming its tag. In the 'Checkout the target repo' step, inputs.repo-owner and inputs.repo-name now come in through the step's env: as REPO_OWNER and REPO_NAME, and the clone URL that uses them is double-quoted. I didn't run anything to test these changes.
 

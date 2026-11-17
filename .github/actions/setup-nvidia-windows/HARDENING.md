@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-nvidia-windows/v20261027-0
 
 ### script-injection (severity: high)
 
-Sub-rule (a): a GitHub Actions expression is placed directly inside a run: script. The offending line is `${{ github.action_path }}\..\..\scripts\driver_update.bat`, in the 'Update NVIDIA driver' step (shell: cmd). Fix: add `env: ACTION_PATH: ${{ github.action_path }}` to the step and call `"%ACTION_PATH%\..\..\scripts\driver_update.bat"` in the script. The quotes are part of the fix.
+Rule (a) violation: the expression is placed directly inside a run: script. In the 'Update NVIDIA driver' step, line 11 reads `${{ github.action_path }}\..\..\scripts\driver_update.bat`. The expression is filled in before the cmd shell runs, so its text becomes part of the command. Fix: use the runner-provided environment variable instead, e.g. `"%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat"`.
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-In the 'Update NVIDIA driver' step (shell: cmd), I moved ${{ github.action_path }} into env as ACTION_PATH. The script now calls "%ACTION_PATH%\..\..\scripts\driver_update.bat" using quoted cmd syntax.
+In the 'Update NVIDIA driver' step (shell: cmd), replaced the inline ${{ github.action_path }} expression with the runner-provided %GITHUB_ACTION_PATH% environment variable, quoted: "%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat". Relative path and invocation otherwise unchanged.
 

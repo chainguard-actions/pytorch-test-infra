@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--bc-lint/v20261027-001733** was hardened automatically. 9 finding(s) were identified and resolved across 2 iteration(s).
+Action **pytorch--test-infra--.github--actions--bc-lint/v20261027-001733** was hardened automatically. 11 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-Two composite steps pin actions to a version tag instead of a full 40-character commit SHA: line 30 `uses: actions/checkout@v4` and line 36 `uses: actions/checkout@v4`.
+Two composite steps pin an action to a movable tag instead of a full commit SHA: line 30 'uses: actions/checkout@v4' and line 36 'uses: actions/checkout@v4'. Pin both to a 40-character commit SHA.
 
 Locations:
 
@@ -25,12 +25,26 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): `${{ ... }}` expressions are pasted directly into `run:` scripts in three steps. Step 'Merge PR changes onto base' (lines 51-54), e.g. `git fetch origin "${{ inputs.head_sha }}"`, `git reset --hard "${{ inputs.base_sha }}"`, `git merge "${{ inputs.head_sha }}"`. Step 'Build and run BC-linter' (lines 71-74): `--base-commit=${{ inputs.base_sha }}`, `--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}`, `${{ inputs.suppression == 'true' && '--suppressed' || '' }}`, `${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}`. Step 'Display documentation link if failed' (line 80): `echo "${{ inputs.docs_link }}"`. The inputs should be passed through `env:` variables and expanded with double quotes.
+Rule (a): in the 'Merge PR changes onto base' step, input expressions are pasted straight into the run: script. Lines 51-54: 'git fetch origin "${{ inputs.head_sha }}"', 'git fetch origin "${{ inputs.base_sha }}"', 'git reset --hard "${{ inputs.base_sha }}"' and 'git merge "${{ inputs.head_sha }}"'. Move these values into env: variables and expand them double-quoted.
 
 Locations:
 
 - `action.yml:51`
+
+### script-injection (severity: high)
+
+Rule (a): in the 'Build and run BC-linter' step, expressions are pasted straight into the run: script without quotes. Line 71: '--base-commit=${{ inputs.base_sha }}'. Line 72: '--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}'. Line 73: '${{ inputs.suppression == 'true' && '--suppressed' || '' }}'. Line 74: '${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}'. Move these values into env: variables and expand them double-quoted. For the optional arguments, use the guarded form ${VAR:+"$VAR"}.
+
+Locations:
+
 - `action.yml:71`
+
+### script-injection (severity: high)
+
+Rule (a): in the 'Display documentation link if failed' step, line 80 pastes an input straight into the run: script: 'echo "${{ inputs.docs_link }}"'. Move it into an env: variable and expand it double-quoted.
+
+Locations:
+
 - `action.yml:80`
 
 ### static-inline-injection (severity: high)
@@ -97,13 +111,5 @@ Locations:
 
 **Notes:**
 
-Pinned both actions/checkout@v4 uses to 11d5960a326750d5838078e36cf38b85af677262 (# v4). Moved all ${{ }} expressions in run: blocks (head_sha, base_sha, new_head_sha output, suppression, config_dir, docs_link) into step env: and referenced them as quoted shell variables. Optional --suppressed and --config-dir flags are now built in a bash array (expanded with the set -u-safe ${arr[@]+...} form) so they drop out when unset, preserving upstream behavior.
-
-### Iteration 2
-
-**Fixes applied:** script-injection, static-inline-injection
-
-**Notes:**
-
-In the 'Merge PR changes onto base' step, moved inputs.head_sha and inputs.base_sha into env vars (INPUT_HEAD_SHA, INPUT_BASE_SHA) and changed the git fetch, reset and merge commands to use "$INPUT_HEAD_SHA" and "$INPUT_BASE_SHA". Nothing else changed.
+Pinned both actions/checkout@v4 uses to 11d5960a326750d5838078e36cf38b85af677262 (# v4). Moved all ${{ }} expressions in run: blocks (head_sha, base_sha, new_head_sha output, suppression/config_dir flags, docs_link) into step env: and referenced them as double-quoted shell variables; optional flags use ${VAR:+"$VAR"} so empty values drop out as upstream's empty expressions did. The --config-dir=<value> flag stays a single '='-joined argument, the same as upstream.
 

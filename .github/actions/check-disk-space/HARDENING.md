@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--check-disk-space/v20261027-00173
 
 ### script-injection (severity: high)
 
-Rule (b), unquoted shell expansion of untrusted data. The env var MINIMUM_AVAILABLE_SPACE_IN_GB comes from inputs.minimum-available-space-in-gb, and the script expands it unquoted inside arithmetic expansion: `MINIMUM_AVAILABLE_SPACE_IN_KB=$(($MINIMUM_AVAILABLE_SPACE_IN_GB * 1024 * 1024))`. Bash arithmetic evaluates the expanded text as an expression. A value such as `a[$(cmd)]` would therefore run commands through array-subscript evaluation. Fix: quote the expansion and check that the value is numeric before using it, for example `[[ "$MINIMUM_AVAILABLE_SPACE_IN_GB" =~ ^[0-9]+$ ]] || exit 1`.
+Rule (b): the env var MINIMUM_AVAILABLE_SPACE_IN_GB holds the value of inputs.minimum-available-space-in-gb. It is expanded unquoted inside bash arithmetic on this line: `MINIMUM_AVAILABLE_SPACE_IN_KB=$(($MINIMUM_AVAILABLE_SPACE_IN_GB * 1024 * 1024))`. Bash evaluates array subscripts inside arithmetic, so an input such as `a[$(cmd)]` runs a command. Fix: check that the value is a whole number before using it, e.g. `[[ "$MINIMUM_AVAILABLE_SPACE_IN_GB" =~ ^[0-9]+$ ]] || exit 1`. Then reference it quoted.
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-Added a check at the top of the run script that exits with an error unless MINIMUM_AVAILABLE_SPACE_IN_GB is a non-negative integer (^[0-9]+$). This runs before check_disk_space, so the arithmetic expansion only gets digits. Changed the arithmetic to $(( 10#${MINIMUM_AVAILABLE_SPACE_IN_GB} * 1024 * 1024 )) so a value with a leading zero is read as decimal, not octal. Valid integer inputs, including the default 6, behave as before. Non-integer values such as 6.5 now fail with an error. Before this change, bash arithmetic rejected those values too.
+action.yml now checks the minimum-available-space-in-gb input before using it. If the value isn't a whole number (^[0-9]+$), the step fails with an error message, so a value like a[$(cmd)] never reaches bash arithmetic. The check runs at the top level of the step, outside check_disk_space (whose output is captured into a variable), so the exit really stops the step. The variable is also quoted inside the arithmetic expansion now. Valid numeric inputs behave as before. I haven't run the action to test this.
 

@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--setup-binary-builds/v20261027-001733** was hardened automatically. 4 finding(s) were identified and resolved across 2 iteration(s).
+Action **pytorch--test-infra--.github--actions--setup-binary-builds/v20261027-001733** was hardened automatically. 4 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-Composite action steps reference actions by tag instead of a full 40-character commit SHA: 'uses: actions/checkout@v4' (line 55) and 'uses: conda-incubator/setup-miniconda@v3.1.1' (line 92).
+action.yml has `uses:` references pinned to tags, not full commit SHAs: `uses: actions/checkout@v4` (line 55) and `uses: conda-incubator/setup-miniconda@v3.1.1` (line 92).
 
 Locations:
 
@@ -25,18 +25,15 @@ Locations:
 
 ### script-injection (severity: high)
 
-Sub-rule (a): the 'Log Available Webhook Fields' step puts GitHub expressions directly into the run script: echo "${{ github.ref_name }}", echo "${{ github.event.ref }}", echo "${{ github.ref }}" and echo "${{ github.base_ref }}". These values are substituted into the script before the shell runs, so an attacker who controls a ref name can inject commands. Fix: pass them through env: variables and quote the expansions.
+Rule (a): the 'Log Available Webhook Fields' step puts GitHub expressions straight into the run script: `echo "${{ github.ref_name }}"`, `echo "${{ github.event.ref }}"`, `echo "${{ github.ref }}"`, `echo "${{ github.base_ref }}"`. Branch and ref names can be controlled by an attacker, and the values are substituted before the shell parses the script.
 
 Locations:
 
 - `action.yml:71`
-- `action.yml:72`
-- `action.yml:73`
-- `action.yml:74`
 
 ### script-injection (severity: high)
 
-Sub-rule (b): in the 'Setup conda environment for build' step, PYTHON_VERSION comes from inputs.python-version and is expanded without quotes in 'case $PYTHON_VERSION in'. Fix: quote it as "$PYTHON_VERSION".
+Rule (b): in the 'Setup conda environment for build' step, `case $PYTHON_VERSION in` expands the env var PYTHON_VERSION without quotes. Its value comes from inputs.python-version. It should be written as `case "$PYTHON_VERSION" in`. The `# shellcheck disable=SC2153` directive above it does not trigger the array-assignment exemption.
 
 Locations:
 
@@ -44,7 +41,7 @@ Locations:
 
 ### github-env-injection (severity: high)
 
-The 'Set artifact name' step writes 'echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}"'. CU_VERSION, ARCH and PYTHON_VERSION (the source of SHORT_PYTHON_VERSION) come from inputs. REPOSITORY and REF are inherited from the calling workflow's environment. None of them goes through printf '%s' ... | tr -d '\n\r' first, so a value containing a newline can inject arbitrary environment variables.
+The 'Set artifact name' step writes `echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}"`. CU_VERSION and ARCH come from inputs.cuda-version and inputs.arch. REPOSITORY and REF are process env vars inherited from the calling workflow. SHORT_PYTHON_VERSION comes from inputs.python-version. None of these values go through `printf '%s' ... | tr -d '\n\r'` before the write, so a newline in any of them could inject extra environment variables.
 
 Locations:
 
@@ -58,28 +55,9 @@ Locations:
 
 **Notes:**
 
-All changes are in action.yml.
+Fixed every finding in action.yml. Nothing was run or tested after the edits.
 
-- **unpinned-uses:** pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4) and conda-incubator/setup-miniconda to 505e6394dae86d6a5c7fbb6e3fb8938e3e863830 (v3.1.1). Both SHAs came from lookup_action_sha, and the tag is kept in a trailing comment.
-- **script-injection:** in the 'Log Available Webhook Fields' step, the four github.* expressions now come in through env vars (CTX_REF_NAME, CTX_EVENT_REF, CTX_REF, CTX_BASE_REF) and are echoed quoted. In the conda setup step, the case statement now quotes the variable: case "$PYTHON_VERSION".
-- **github-env-injection:** the 'Set artifact name' step now builds the artifact name in a variable, strips newlines and carriage returns with printf '%s' | tr -d '\n\r', and then writes it to GITHUB_ENV. REPOSITORY and REF still come from the calling workflow's environment, as upstream does; the newline stripping covers them as well.
-
-### Iteration 2
-
-**Fixes applied:** script-injection, github-env-injection
-
-**Notes:**
-
-I fixed all three findings in action.yml and repaired the parts of the file that were corrupted. While I was editing, the edit tool damaged the file further, so I rewrote it in full instead. I did not run or validate the result.
-
-1. **script-injection (debug step):** Moved the shell/env/run block out of the actions/checkout step into its own step, 'Log Available Webhook Fields'. Removed the stray `}}"` and the inline `echo "${{ github.base_ref }}"`; the step now prints only the CTX_BASE_REF environment variable.
-2. **github-env-injection (Set artifact name):** Put back the SHORT_PYTHON_VERSION line, which had been cut off. The artifact name is now built in ARTIFACT_NAME_RAW, newlines are removed with `printf '%s' | tr -d '\n\r'`, and only that cleaned value is written to GITHUB_ENV. The unsanitized write is gone.
-3. **script-injection (conda setup step):** Fixed the broken OPENSSL_PIN line to `export OPENSSL_PIN="openssl=3.5.6"` and quoted the variable in `case "$PYTHON_VERSION" in`.
-
-Three of these repairs are my reconstruction, because the original text was lost:
-- The step name 'Log Available Webhook Fields'.
-- The version `3.5.6`, taken from the comment above that line.
-- A `# shellcheck disable=SC2153` line before the case statement, rebuilt from the fragment `le=SC2153`.
-
-I also wrote a new comment on the SHORT_PYTHON_VERSION line, since the original wording was lost. REPOSITORY and REF are still read from the calling workflow's environment, as before.
+- unpinned-uses: pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4) and conda-incubator/setup-miniconda to 505e6394dae86d6a5c7fbb6e3fb8938e3e863830 (v3.1.1). Both SHAs came from lookups, and the tag is kept in a trailing comment.
+- script-injection: the four github.* ref expressions in the 'Log Available Webhook Fields' step now go through env vars (GH_REF_NAME, GH_EVENT_REF, GH_REF, GH_BASE_REF) and are echoed in double quotes. In the conda setup step, `case $PYTHON_VERSION in` is now `case "$PYTHON_VERSION" in`.
+- github-env-injection: ARTIFACT_NAME is now assembled into a variable and passed through `printf '%s' ... | tr -d '\n\r'` before it is written to GITHUB_ENV, so a newline in any input can't add extra environment variables. The step runs with `set -euxo pipefail`, so a failure inside the pipeline still stops it.
 

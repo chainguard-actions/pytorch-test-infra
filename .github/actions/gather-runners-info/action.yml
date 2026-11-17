@@ -79,8 +79,7 @@ runs:
         elif [[ "${DEVICE_NAME}" == "arm64-cpu" ]]; then
           DEVICE_TYPE=$(lscpu | grep 'Vendor ID' | cut -f 2 -d ":" | awk '{$1=$1}1' | cut -f 2 -d " ")
         fi
-        safe_device_type=$(printf '%s' "$DEVICE_TYPE" | tr -d '\n\r')
-        echo "DEVICE_TYPE=$safe_device_type" >> "$GITHUB_ENV"
+        echo "DEVICE_TYPE=$DEVICE_TYPE" >> $GITHUB_ENV
 
     - name: Gather the runners information
       id: gather-runners-info

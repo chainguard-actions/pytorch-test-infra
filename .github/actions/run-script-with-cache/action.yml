@@ -71,12 +71,10 @@ runs:
         fi
         source "${BUILD_ENV_FILE}"
 
-        # CONDA_RUN is a command prefix (e.g. "conda run -p ..."); split it on whitespace
-        # like the original unquoted expansion did, without glob expansion.
-        conda_run=()
-        if [[ -n "${CONDA_RUN:-}" ]]; then
-          read -r -d '' -a conda_run <<< "${CONDA_RUN}" || true
-        fi
+        # CONDA_RUN is a command prefix (e.g. "conda run -p ... --no-capture-output");
+        # split it on whitespace exactly as upstream's unquoted ${CONDA_RUN} did.
+        # shellcheck disable=SC2206
+        conda_run=(${CONDA_RUN:-})
 
         if [[ ! -f "${SCRIPT}" ]]; then
           echo "::error::Specified script file (${SCRIPT}) not found, not going execute it"

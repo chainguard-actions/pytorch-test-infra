@@ -109,7 +109,7 @@ runs:
         TEST_INFRA_PATH="${GITHUB_ACTION_PATH}/../../.."
 
         output=$(python "${TEST_INFRA_PATH}/tools/scripts/fetch_latest_green_commit.py" \
-          --required-checks "$REQUIRES" \
+          --required-checks "${REQUIRES}" \
           --viable-strict-branch "viable/strict" \
           --main-branch "master")
         safe_output=$(printf '%s' "$output" | tr -d '\n\r')
@@ -133,10 +133,16 @@ runs:
         # Pushing an older green commit here will fail because it's non-fast-forward, which is ok
         # to ignore because we already have the later green commit in visable/strict
         push_result=$(git push origin "${LATEST_VIABLE_SHA}:${STABLE_BRANCH}" 2>&1 || true)
+        # Collapse whitespace like upstream's unquoted echo (without globbing)
+        set -f
+        # shellcheck disable=SC2206
+        push_words=($push_result)
+        set +f
+        collapsed_push_result="${push_words[*]}"
         EOF_DELIM="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
         {
           echo "push_result<<${EOF_DELIM}"
-          printf '%s\n' "$push_result"
+          printf '%s\n' "${collapsed_push_result}"
           echo "${EOF_DELIM}"
         } >> "${GITHUB_OUTPUT}"
         echo "${push_result}"

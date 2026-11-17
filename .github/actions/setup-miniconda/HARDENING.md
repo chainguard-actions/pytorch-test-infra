@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--setup-miniconda/v20261027-001733** was hardened automatically. 6 finding(s) were identified and resolved across 2 iteration(s).
+Action **pytorch--test-infra--.github--actions--setup-miniconda/v20261027-001733** was hardened automatically. 6 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Get date' step puts an input expression straight into the run: script: `echo "default_packages_checksum=$(echo -n ${{ inputs.default-packages }} | md5sum | awk '{print $1}' )" >> "${GITHUB_OUTPUT}"`. The value is substituted into the script before the shell parses it, so the calling workflow can inject shell commands. Fix: pass it through an env: variable and quote it, e.g. printf '%s' "$DEFAULT_PACKAGES".
+Rule (a): the 'Get date' step puts an expression straight into the run: script: `echo "default_packages_checksum=$(echo -n ${{ inputs.default-packages }} | md5sum | awk '{print $1}' )" >> "${GITHUB_OUTPUT}"`. The value of inputs.default-packages is pasted into the script before the shell runs, so shell metacharacters in it would execute as commands. Fix: pass it through an env: variable and use "$DEFAULT_PACKAGES" in the script.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-The 'Setup conda environment with python' step breaks both rules. Rule (a): `${{ inputs.default-packages }} \` is substituted directly into the `conda create` command. Rule (b): `${ENV_FILE_FLAG} \` is expanded without quotes, and it is built from the untrusted input ENV_FILE (`ENV_FILE_FLAG="--file ${ENV_FILE}"`), so the shell will split and glob the value. Fix: pass default-packages through an env: variable and expand it as a bash array or another controlled form. Pass the env file as separate quoted arguments, e.g. `--file "$ENV_FILE"`.
+The 'Setup conda environment with python' step breaks two rules. Rule (a): `${{ inputs.default-packages }} \` is interpolated directly into the conda create command. Rule (b): ENV_FILE_FLAG is built from the input-derived ENV_FILE (`ENV_FILE_FLAG="--file ${ENV_FILE}"`) and then expanded unquoted (`${ENV_FILE_FLAG} \`). Fix: route default-packages through env: and turn it into an array (e.g. `# shellcheck disable=SC2206` followed by PKGS=($DEFAULT_PACKAGES)). Build the env-file flag as an array too, e.g. ENV_FILE_ARGS=(--file "$ENV_FILE"), and expand it as "${ENV_FILE_ARGS[@]}".
 
 Locations:
 
@@ -33,7 +33,7 @@ Locations:
 
 ### github-env-injection (severity: high)
 
-The 'Update GitHub path to include miniconda install' step writes the inherited process variable PATH to $GITHUB_ENV without the required sanitization: `echo "PATH=${MINICONDA_INSTALL_PATH}/bin:${PATH}"` inside a `{ ... } >> "${GITHUB_ENV}"` block. This script does not set PATH, so the calling workflow controls it. Fix: run printf '%s' ... | tr -d '\n\r' on the value before writing it.
+The 'Update GitHub path to include miniconda install' step writes the inherited process env var PATH to $GITHUB_ENV without sanitizing it: `echo "PATH=${MINICONDA_INSTALL_PATH}/bin:${PATH}"` inside `{ ... } >> "${GITHUB_ENV}"`. In a composite action the calling workflow controls PATH, and the value is not passed through `printf '%s' ... | tr -d '\n\r'` before the write. A newline in it could inject extra environment variables.
 
 Locations:
 
@@ -41,7 +41,7 @@ Locations:
 
 ### unpinned-uses (severity: high)
 
-Two composite steps reference an action by a mutable tag instead of a full 40-character commit SHA: `uses: actions/cache@v3` (Setup miniconda cache) and `uses: actions/cache@v3` (Setup miniconda env cache).
+action.yml uses composite action steps pinned to a mutable tag instead of a 40-character commit SHA: `uses: actions/cache@v3` (line 47, 'Setup miniconda cache') and `uses: actions/cache@v3` (line 105, 'Setup miniconda env cache').
 
 Locations:
 
@@ -68,20 +68,16 @@ Locations:
 
 ### Iteration 1
 
-**Fixes applied:** script-injection, static-inline-injection, github-env-injection, unpinned-uses
+**Fixes applied:** script-injection, github-env-injection, unpinned-uses, static-inline-injection
 
 **Notes:**
 
-Moved inputs.default-packages into env DEFAULT_PACKAGES in both the 'Get date' and 'conda create' steps. Upstream pasted the expression straight into the script, so the value is now split into a bash array with the quote-aware xargs method (with the xargs -r true check for unmatched quotes and an empty-value guard). The checksum is computed over the space-joined array, which gives the same text echo -n produced, so cache keys stay the same. The env file flag is now an array (--file "$ENV_FILE"). PATH is passed through tr -d '\n\r' before it is written to GITHUB_ENV. Both actions/cache@v3 uses are pinned to 6f8efc29b200d32929f49075959781ed54ec270c # v3.
+I fixed all six findings in action.yml.
 
-### Iteration 2
+- **Pinned actions:** both actions/cache@v3 references now point to commit 6f8efc29b200d32929f49075959781ed54ec270c, with a `# v3` comment.
+- **default-packages input:** in both affected steps the value now comes in through an env var (DEFAULT_PACKAGES) instead of being pasted into the script. Upstream pasted it straight into the script, so the shell honoured quotes in it. To keep that behaviour, I split it into an array with the quote-aware xargs method (guarded for empty values, and it fails on an unmatched quote). The checksum is still computed from `echo -n` of the same words, so cache keys for normal values don't change. The `conda create` call uses `"${PKGS[@]}"`. One small difference: upstream's version also expanded glob characters like `*` in package names against files; the new split passes them to conda as plain text.
+- **Env-file flag:** this is now built as an array, `ENV_FILE_ARGS=(--file "$ENV_FILE")`, and passed as `"${ENV_FILE_ARGS[@]}"`, so file paths containing spaces stay one argument.
+- **PATH written to GITHUB_ENV:** newlines are now stripped with `printf '%s' ... | tr -d '\n\r'` before the value is written.
 
-**Fixes applied:** unpinned-uses, github-env-injection
-
-**Notes:**
-
-- unpinned-uses: Both actions/cache@v3 uses are now pinned to 6f8efc29b200d32929f49075959781ed54ec270c # v3. The SHA came from lookup_action_sha.
-- github-env-injection: MINICONDA_INSTALL_PATH and CONDA_EXE now go through printf '%s' | tr -d '\n\r' before they are written to GITHUB_PATH or GITHUB_ENV. GITHUB_PATH is now quoted. CONDA_PREFIX and CONDA_RUNTIME get the same treatment before CONDA_ENV, CONDA_PREFIX, CONDA_RUN and CONDA_INSTALL are written.
-- Repaired damage from the previous pass: a pin edit had been pasted into the middle of the default-packages split in the 'Get date' step and into a comment. The checksum now hashes the raw input again (printf '%s\n' | md5sum, which gives the same result as upstream's echo).
-- Fixed a bug where default packages were never installed: DEFAULT_PKGS was used in the conda create step but never defined there. It is now built in that step with the quote-aware xargs split, because upstream pasted the input expression directly into the script. The empty-value guard and the unmatched-quote check are both in place.
+I haven't run the action to test these changes.
 

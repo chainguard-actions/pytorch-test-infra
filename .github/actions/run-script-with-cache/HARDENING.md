@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20261027-001733** was hardened automatically. 3 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20261027-001733** was hardened automatically. 4 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-A composite step uses an action by a version tag instead of a full 40-character commit SHA: `uses: actions/cache@v3`.
+The composite step uses a mutable tag instead of a full 40-character commit SHA: `uses: actions/cache@v3`. Pin it to a commit SHA.
 
 Locations:
 
@@ -24,11 +24,18 @@ Locations:
 
 ### script-injection (severity: high)
 
-The 'Run script' step breaks both rules. (a) An expression is placed directly inside the run: script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. Fix: pass inputs.is_windows through an env: variable and quote it. (b) Env vars holding workflow-controlled values are expanded without double quotes. SCRIPT comes from inputs.script, and CONDA_RUN is inherited from the calling workflow. The unquoted lines are: `if [[ ! -f ${SCRIPT} ]]; then`, `if [[ ${SCRIPT} == *.bat ]]; then`, `${CONDA_RUN} ${SCRIPT}` and `${CONDA_RUN} bash ${SCRIPT}`. Because ${SCRIPT} is unquoted when it is run as a command, the shell splits it into words and expands glob characters in it.
+In the 'Run script' step, rule (a) is violated: an expression is placed directly in the run script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. The caller controls inputs.is_windows, and the value is substituted into the script before bash runs, so it can inject commands. Pass it through env (e.g. IS_WINDOWS) and use "$IS_WINDOWS".
 
 Locations:
 
 - `action.yml:51`
+
+### script-injection (severity: high)
+
+In the 'Run script' step, rule (b) is violated: workflow-controlled env vars are expanded without double quotes. SCRIPT comes from inputs.script, and CONDA_RUN is inherited from the calling workflow. Offending lines: `if [[ ! -f ${SCRIPT} ]]; then`, `if [[ ${SCRIPT} == *.bat ]]; then`, `${CONDA_RUN} ${SCRIPT}`, `${CONDA_RUN} bash ${SCRIPT}`. Wrap ${SCRIPT} in double quotes, and handle CONDA_RUN safely (e.g. quote it or turn it into an array).
+
+Locations:
+
 - `action.yml:56`
 - `action.yml:60`
 - `action.yml:61`
@@ -50,9 +57,5 @@ Locations:
 
 **Notes:**
 
-All three findings are fixed in action.yml. I haven't run the action or any tests.
-
-- **unpinned-uses:** `actions/cache@v3` is now pinned to its commit, written as `actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3`.
-- **static-inline-injection / script-injection:** `inputs.is_windows` now goes into the step's `env:` as `IS_WINDOWS` and is quoted where it's checked. Every use of `${SCRIPT}` is now in double quotes.
-- **`CONDA_RUN`:** I didn't simply quote this one, though the finding asked for it. It holds a command prefix like `conda run -p ...`, and in one pair of quotes it would become a single word, which the shell would try to run as one program name. Instead the script now splits it on whitespace into an array, the same way upstream's unquoted version did, but without glob expansion. If `CONDA_RUN` is empty or unset, nothing is added in front of the script (the array is expanded in a form that's safe with `set -u` on macOS's older bash 3.2). How the script is run (`.bat` files directly, everything else via `bash`) is unchanged.
+Pinned actions/cache@v3 to its commit SHA 6f8efc29b200d32929f49075959781ed54ec270c, keeping '# v3' as a comment. Moved inputs.is_windows into env as IS_WINDOWS and quoted it. Put double quotes around every use of ${SCRIPT}. CONDA_RUN is a command prefix such as 'conda run -p ...', so quoting it would turn it into one word. Instead I split it into a bash array with an unquoted assignment, which splits it the same way upstream's unquoted ${CONDA_RUN} did. The array is expanded as ${arr[@]+"${arr[@]}"} so an empty CONDA_RUN still works under set -u, including on older bash. Nothing was run or tested.
 

@@ -45,9 +45,9 @@ runs:
     - name: Create nightly commit
       shell: bash
       env:
-        PATH_INPUT: ${{ inputs.path }}
+        INPUT_PATH: ${{ inputs.path }}
       run: |
-        pushd "$PATH_INPUT"
+        pushd "$INPUT_PATH"
         git config --global user.email "pytorchbot@pytorch.com"
         git config --global user.name "pytorchbot"
         git fetch origin nightly

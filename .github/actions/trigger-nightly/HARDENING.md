@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--trigger-nightly/v20261027-001733** was hardened automatically. 3 finding(s) were identified and resolved across 2 iteration(s).
+Action **pytorch--test-infra--.github--actions--trigger-nightly/v20261027-001733** was hardened automatically. 3 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-A composite step uses a version tag instead of a full 40-character commit SHA: `uses: actions/checkout@v4`.
+action.yml uses a tag instead of a full commit SHA: 'uses: actions/checkout@v4'.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Sub-rule (a): an expression is placed directly in the run script: `pushd ${{ inputs.path }}`. A malicious `path` input becomes shell code. Fix: set PATH_INPUT: ${{ inputs.path }} in the step's env: block and use `pushd "$PATH_INPUT"`.
+Rule (a): the 'Create nightly commit' step puts an expression straight into the run: script: 'pushd ${{ inputs.path }}'. Move it into an env var such as INPUT_PATH and use it with double quotes: pushd "$INPUT_PATH".
 
 Locations:
 
@@ -46,13 +46,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4). Moved inputs.path into the env var PATH_INPUT in the 'Create nightly commit' step and quoted it as pushd "$PATH_INPUT".
-
-### Iteration 2
-
-**Fixes applied:** unpinned-uses
-
-**Notes:**
-
-Pinned actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262 # v4 in action.yml.
+Pinned actions/checkout to the full commit SHA 11d5960a326750d5838078e36cf38b85af677262, keeping '# v4' as a comment. In the 'Create nightly commit' step, inputs.path now goes into the step's env as INPUT_PATH, and the script uses it as pushd "$INPUT_PATH" instead of the inline expression. Nothing has been run to test these changes.
 

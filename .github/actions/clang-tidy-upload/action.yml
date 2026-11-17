@@ -61,8 +61,8 @@ runs:
         aws-region: us-east-1
         output-credentials: true
 
-    - name: Upload clang-tidy to s3
-      uses: seemethere/upload-artifact-s3@baba72d0712b404f646cebe0730933554ebce96a # v5
+    - uses: seemethere/upload-artifact-s3@baba72d0712b404f646cebe0730933554ebce96a # v5
+      name: Publish clang-tidy binary
       if: ${{ fromJSON(inputs.upload-to-s3) }}
       with:
         if-no-files-found: error
@@ -70,8 +70,8 @@ runs:
         s3-bucket: oss-clang-format
         path: clang-tidy
 
-    - name: Upload clang-format to s3
-      uses: seemethere/upload-artifact-s3@baba72d0712b404f646cebe0730933554ebce96a # v5
+    - uses: seemethere/upload-artifact-s3@baba72d0712b404f646cebe0730933554ebce96a # v5
+      name: Publish clang-format binary
       if: ${{ fromJSON(inputs.upload-to-s3) }}
       with:
         if-no-files-found: error

@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--pull-docker-image/v20261027-0017
 
 ### script-injection (severity: high)
 
-Rule (b): data from the inputs is expanded unquoted. The step correctly passes inputs.docker-image and inputs.docker-registry through env vars (DOCKER_IMAGE, DOCKER_REGISTRY) and quotes them where they are passed in, e.g. `retry docker pull "${DOCKER_IMAGE}"` and `retry login "${DOCKER_REGISTRY}"`. But the helper `retry () { $*  || (sleep 1 && $*) || (sleep 2 && $*) }` expands them again with an unquoted `$*`. That splits the input-controlled values on whitespace and expands glob characters, so a crafted docker-image or docker-registry value (e.g. 'img --some-flag x') can add extra arguments to docker or aws. Fix: use "$@" instead of $* in retry.
+Rule (b): unquoted expansion of workflow-controlled data. The retry helper runs its arguments as `$*  || (sleep 1 && $*) || (sleep 2 && $*)`. It is called as `retry login "${DOCKER_REGISTRY}"` and `retry docker pull "${DOCKER_IMAGE}"`, and both values come from inputs (inputs.docker-registry / inputs.docker-image). Quoting at the call site does not help, because the unquoted $* splits each value on whitespace again and expands globs. A crafted input can therefore pass extra arguments or flags to docker/aws. Fix: use "$@" in place of $* (e.g. `"$@" || (sleep 1 && "$@") || (sleep 2 && "$@")`).
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-Changed the retry() helper in action.yml so it runs its arguments as "$@" instead of the unquoted $*. DOCKER_IMAGE and DOCKER_REGISTRY now each reach the command as one argument, with no word splitting or glob expansion. Existing callers (retry login "$REG", retry docker pull "$IMG") behave the same.
+In action.yml, the retry helper now runs its arguments as "$@" instead of the unquoted $*. Before, the shell split docker-registry and docker-image on whitespace and expanded globs, so a crafted input could add extra arguments or flags to aws/docker. Now each value reaches the command as one argument. Nothing else changed.
 

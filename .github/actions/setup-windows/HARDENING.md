@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-windows/v20261027-001733**
 
 ### github-env-injection (severity: high)
 
-Step 'Setup useful environment variables' writes RUNNER_ARTIFACT_DIR and RUNNER_TEST_RESULTS_DIR to $GITHUB_ENV. Both values are built from the process env var RUNNER_TEMP, which the composite action inherits and does not compute itself. Neither value goes through the required sanitisation (printf '%s' ... | tr -d '\n\r') before the write. Offending lines: echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}" and echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR}" >> "${GITHUB_ENV}". The runner normally sets RUNNER_TEMP, but the check counts every inherited env var as untrusted.
+Step 'Setup useful environment variables' writes values built from the inherited process env var RUNNER_TEMP to $GITHUB_ENV with no sanitization: echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}" and echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR}" >> "${GITHUB_ENV}". The script reads RUNNER_TEMP but never sets it, so under this check it counts as workflow-controlled. Fix: run each value through printf '%s' "$VAR" | tr -d '\n\r' right before writing it.
 
 Locations:
 
@@ -25,7 +25,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Sub-rule (b) is violated: an inherited env var is expanded without quotes in step 'Setup useful environment variables'. Offending line: RUNNER_ARTIFACT_DIR="$(cygpath ${RUNNER_TEMP})/artifacts". The ${RUNNER_TEMP} inside the command substitution should be written as "${RUNNER_TEMP}".
+Rule (b), unquoted variable expansion: in step 'Setup useful environment variables' the line RUNNER_ARTIFACT_DIR="$(cygpath ${RUNNER_TEMP})/artifacts" expands the inherited env var RUNNER_TEMP without quotes inside a command substitution. Fix: use "$(cygpath "${RUNNER_TEMP}")/artifacts".
 
 Locations:
 
@@ -39,5 +39,5 @@ Locations:
 
 **Notes:**
 
-Quoted ${RUNNER_TEMP} inside the cygpath command substitution. RUNNER_ARTIFACT_DIR and RUNNER_TEST_RESULTS_DIR are now sanitized with printf '%s' | tr -d '\n\r' before being written to $GITHUB_ENV. Command substitution of cygpath kept as a bare assignment so errexit behavior is unchanged.
+In the 'Setup useful environment variables' step: quoted RUNNER_TEMP inside the cygpath command substitution, and passed RUNNER_ARTIFACT_DIR / RUNNER_TEST_RESULTS_DIR through printf '%s' | tr -d '\n\r' before writing them to $GITHUB_ENV. Nothing else changed.
 

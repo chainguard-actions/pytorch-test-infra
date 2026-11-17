@@ -1,4 +1,4 @@
-name: Test push input ignored when build is skipped
+name: Test push input with skipped build (no build dir)
 on:
   workflow_dispatch:
 jobs:
@@ -9,18 +9,18 @@ jobs:
       - id: action
         uses: .
         with:
-          docker-image-name: pytorch-linux-jammy-py3
-          docker-build-dir: does/not/exist
-          repo-name: myrepo
+          docker-image-name: pytorch-linux-focal-linter
+          docker-build-dir: does-not-exist/docker
           push: "true"
           force-push: "true"
-      - name: Assert image passed through unchanged and no push attempted
+          repo-name: test-repo
+      - name: Assert docker-image passthrough
         env:
           ACTUAL: ${{ steps.action.outputs.docker-image }}
         run: |
           echo "actual: $ACTUAL"
-          if [ "$ACTUAL" != "pytorch-linux-jammy-py3" ]; then
-            echo "FAIL: expected 'pytorch-linux-jammy-py3'"
+          if [ "$ACTUAL" != "pytorch-linux-focal-linter" ]; then
+            echo "FAIL: expected 'pytorch-linux-focal-linter'"
             exit 1
           fi
           echo "PASS"
