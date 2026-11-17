@@ -65,7 +65,9 @@ runs:
             while IFS= read -r -d '' t; do pkgs+=("$t"); done \
               < <(printf '%s' "$DEFAULT_PACKAGES" | xargs -r sh -c 'printf "%s\0" "$@"' sh)
           fi
-          echo "default_packages_checksum=$(echo -n "${pkgs[@]}" | md5sum | awk '{print $1}' )" >> "${GITHUB_OUTPUT}"
+          checksum="$(echo -n "${pkgs[@]}" | md5sum | awk '{print $1}')" || true
+          safe_checksum=$(printf '%s' "$checksum" | tr -d '\n\r')
+          echo "default_packages_checksum=${safe_checksum}" >> "${GITHUB_OUTPUT}"
 
       - name: Setup miniconda cache
         id: miniconda-cache
@@ -82,7 +84,7 @@ runs:
         run: |
           MINICONDA_INSTALL_PATH="${RUNNER_TEMP}/miniconda"
           mkdir -p "${MINICONDA_INSTALL_PATH}"
-          case ${RUNNER_OS}-${RUNNER_ARCH} in
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
             Linux-X64)
               MINICONDA_ARCH="Linux-x86_64"
               ;;
@@ -107,13 +109,13 @@ runs:
         run: |
           set -x
 
-          MINICONDA_INSTALL_PATH="${RUNNER_TEMP}/miniconda"
-          echo "${MINICONDA_INSTALL_PATH}/bin" >> $GITHUB_PATH
+          MINICONDA_INSTALL_PATH=$(printf '%s' "${RUNNER_TEMP}/miniconda" | tr -d '\n\r')
+          SAFE_PATH=$(printf '%s' "${PATH}" | tr -d '\n\r')
+          echo "${MINICONDA_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
           # NB: GITHUB_PATH has a lower priority than PATH, so also set the path
           # here to make sure that the correct conda is used
-          SAFE_PATH=$(printf '%s' "${MINICONDA_INSTALL_PATH}/bin:${PATH}" | tr -d '\n\r')
           {
-            echo "PATH=${SAFE_PATH}"
+            echo "PATH=${MINICONDA_INSTALL_PATH}/bin:${SAFE_PATH}"
             echo "CONDA_EXE=${MINICONDA_INSTALL_PATH}/bin/conda";
           } >> "${GITHUB_ENV}"
 
@@ -152,12 +154,12 @@ runs:
             echo "::warning::Specified env file (${ENV_FILE}) not found, not going to include it"
           fi
 
-          CONDA_EXTRA_FLAGS=""
+          CONDA_EXTRA_FLAGS=()
 
-          pkgs=()
+          PKGS=()
           if [ -n "$DEFAULT_PACKAGES" ]; then
             printf '%s' "$DEFAULT_PACKAGES" | xargs -r true >/dev/null   # fails on an unmatched quote
-            while IFS= read -r -d '' t; do pkgs+=("$t"); done \
+            while IFS= read -r -d '' t; do PKGS+=("$t"); done \
               < <(printf '%s' "$DEFAULT_PACKAGES" | xargs -r sh -c 'printf "%s\0" "$@"' sh)
           fi
 
@@ -170,8 +172,8 @@ runs:
             --prefix "${CONDA_BASE_ENV}" \
             "${ENV_FILE_FLAG[@]}" \
             python="${PYTHON_VERSION}" \
-            "${pkgs[@]}" \
-            ${CONDA_EXTRA_FLAGS}
+            "${PKGS[@]}" \
+            "${CONDA_EXTRA_FLAGS[@]}"
 
           if [[ -f "${PIP_REQUIREMENTS_FILE}" ]]; then
             "${CONDA_RUNTIME}" run -p "${CONDA_BASE_ENV}" --no-capture-output python3 -mpip install -r "${PIP_REQUIREMENTS_FILE}"
@@ -217,11 +219,13 @@ runs:
           fi
 
           # Keep exporting CONDA_PREFIX under CONDA_ENV because the latter could be used elsewhere
-          echo "CONDA_ENV=${CONDA_PREFIX}" >> "${GITHUB_ENV}"
+          SAFE_CONDA_PREFIX=$(printf '%s' "${CONDA_PREFIX}" | tr -d '\n\r')
+          SAFE_CONDA_RUNTIME=$(printf '%s' "${CONDA_RUNTIME}" | tr -d '\n\r')
+          echo "CONDA_ENV=${SAFE_CONDA_PREFIX}" >> "${GITHUB_ENV}"
 
-          echo "CONDA_PREFIX=${CONDA_PREFIX}" >> "${GITHUB_ENV}"
-          echo "CONDA_RUN=${CONDA_RUNTIME} run -p ${CONDA_PREFIX} --no-capture-output" >> "${GITHUB_ENV}"
-          echo "CONDA_INSTALL=${CONDA_RUNTIME} install --yes --quiet -p ${CONDA_PREFIX}" >> "${GITHUB_ENV}"
+          echo "CONDA_PREFIX=${SAFE_CONDA_PREFIX}" >> "${GITHUB_ENV}"
+          echo "CONDA_RUN=${SAFE_CONDA_RUNTIME} run -p ${SAFE_CONDA_PREFIX} --no-capture-output" >> "${GITHUB_ENV}"
+          echo "CONDA_INSTALL=${SAFE_CONDA_RUNTIME} install --yes --quiet -p ${SAFE_CONDA_PREFIX}" >> "${GITHUB_ENV}"
 
       - name: Reset channel priority
         shell: bash

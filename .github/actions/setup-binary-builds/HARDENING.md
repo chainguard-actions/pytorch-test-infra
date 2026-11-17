@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-binary-builds/v20260922-15
 
 ### unpinned-uses (severity: high)
 
-action.yml has uses: references pinned to tags instead of 40-character commit SHAs: 'uses: actions/checkout@v4' and 'uses: conda-incubator/setup-miniconda@v3.1.1'.
+action.yml uses action refs pinned to tags instead of 40-character commit SHAs: 'uses: actions/checkout@v4' (line 55) and 'uses: conda-incubator/setup-miniconda@v3.1.1' (line 92).
 
 Locations:
 
@@ -25,7 +25,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Log Available Webhook Fields' step puts GitHub expressions straight into the run: script: echo "${{ github.ref_name }}", echo "${{ github.event.ref }}", echo "${{ github.ref }}", echo "${{ github.base_ref }}". Branch and ref names can be set by an attacker, so these values are substituted into the script before the shell runs it. Pass them through env: variables, or use the existing $GITHUB_REF_NAME/$GITHUB_REF/$GITHUB_BASE_REF variables, and quote them.
+Rule (a): the 'Log Available Webhook Fields' step puts GitHub expressions straight into the run script: echo "${{ github.ref_name }}", echo "${{ github.event.ref }}", echo "${{ github.ref }}", echo "${{ github.base_ref }}". An attacker-controlled branch or tag name can break out of the quotes and run commands. Pass these values through env: variables and quote them.
 
 Locations:
 
@@ -33,7 +33,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (b): in the 'Setup conda environment for build' step, the input-derived PYTHON_VERSION (from inputs.python-version) is expanded without quotes: 'case $PYTHON_VERSION in'. The shellcheck directive above it disables SC2153, not SC2086/SC2206, and this is not an array assignment. Change it to 'case "$PYTHON_VERSION" in'.
+Rule (b): the 'Setup conda environment for build' step expands the env var PYTHON_VERSION (from inputs.python-version) without quotes: 'case $PYTHON_VERSION in'. It should be 'case "$PYTHON_VERSION" in'.
 
 Locations:
 
@@ -41,7 +41,7 @@ Locations:
 
 ### github-env-injection (severity: high)
 
-The 'Set artifact name' step writes values the calling workflow controls into $GITHUB_ENV without the printf '%s' ... | tr -d '\n\r' cleanup step: echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}". CU_VERSION and ARCH come from inputs, and SHORT_PYTHON_VERSION comes from inputs.python-version. REPOSITORY and REF are not set in this step, so they are env vars inherited from the calling workflow. A newline in any of them can inject extra environment variables.
+The 'Set artifact name' step writes 'echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}"'. This value comes from untrusted sources: inputs.python-version, inputs.cuda-version and inputs.arch (passed in through env), plus REPOSITORY and REF, which this step inherits from the calling environment. None of them goes through printf '%s' ... | tr -d '\n\r' first, so a newline in any of them could inject extra environment variables.
 
 Locations:
 
@@ -55,5 +55,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/checkout (v4) and conda-incubator/setup-miniconda (v3.1.1) to full commit SHAs. Moved the github.ref_name, event.ref, ref and base_ref expressions in the 'Log Available Webhook Fields' step into env vars. Quoted $PYTHON_VERSION in the case statement. ARTIFACT_NAME is now built in a variable first, newlines and carriage returns are stripped with printf | tr -d '\n\r', and then it is written to GITHUB_ENV. REPOSITORY and REF are still read from the calling workflow's env, as upstream does.
+Pinned actions/checkout to 11d5960a… (v4) and conda-incubator/setup-miniconda to 505e6394… (v3.1.1). In 'Log Available Webhook Fields', moved the github.* expressions into env vars that the script now echoes. Quoted $PYTHON_VERSION in the case statement. In 'Set artifact name', the ARTIFACT_NAME value is built first and passed through printf '%s' | tr -d '\n\r' before it is written to GITHUB_ENV. REPOSITORY and REF still come from the caller's environment, as they did upstream.
 

@@ -10,43 +10,63 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--setup-miniconda/v20260922-155642** was hardened automatically. 6 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--setup-miniconda/v20260922-155642** was hardened automatically. 8 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Get date' step puts an expression straight into the run script: `echo "default_packages_checksum=$(echo -n ${{ inputs.default-packages }} | md5sum | awk '{print $1}' )" >> "${GITHUB_OUTPUT}"`. The inputs.default-packages value is inserted into the script before bash parses it, so a caller can run shell commands through it. Fix: pass it in through an env: variable and expand that variable with double quotes.
+Rule (a): the 'Get date' step puts an expression directly into the run script: `echo "default_packages_checksum=$(echo -n ${{ inputs.default-packages }} | md5sum | awk '{print $1}' )" >> "${GITHUB_OUTPUT}"`. The input is pasted into the shell script before bash runs, so `$(...)`, backticks or `;` in the value would execute.
 
 Locations:
 
-- `action.yml:43`
+- `action.yml:42`
 
 ### script-injection (severity: high)
 
-Two problems in the step 'Setup conda environment with python'. Rule (a): `${{ inputs.default-packages }} \` is inserted straight into the `conda create` command line. Rule (b): `${ENV_FILE_FLAG} \` is expanded without quotes, and it holds the workflow-controlled value inputs.environment-file (ENV_FILE_FLAG="--file ${ENV_FILE}"). This is a plain variable, not an array assignment with a shellcheck directive, so the exemption does not apply. Fix: pass default-packages through env: and expand it in a safe way, and build the --file option from a quoted "$ENV_FILE", for example with a bash array.
+Rule (a): the 'Setup conda environment with python' step puts `${{ inputs.default-packages }}` directly into the `conda create` command (line 138). Rule (b): the same step expands `${ENV_FILE_FLAG}` unquoted (line 136). That variable is built from the workflow-controlled input `inputs.environment-file` (`ENV_FILE_FLAG="--file ${ENV_FILE}"`).
 
 Locations:
 
-- `action.yml:139`
-- `action.yml:137`
+- `action.yml:138`
+- `action.yml:136`
+
+### script-injection (severity: high)
+
+Rule (b): the 'Install miniconda' step expands inherited env vars unquoted in a case statement: `case ${RUNNER_OS}-${RUNNER_ARCH} in`. In a composite action, env vars are inherited from the calling workflow, so these must be double-quoted.
+
+Locations:
+
+- `action.yml:59`
 
 ### github-env-injection (severity: high)
 
-The step 'Update GitHub path to include miniconda install' writes the inherited process variable $PATH to $GITHUB_ENV (`echo "PATH=${MINICONDA_INSTALL_PATH}/bin:${PATH}"` inside a block appended to "${GITHUB_ENV}") without first stripping newlines with `printf '%s' ... | tr -d '\n\r'`. PATH is inherited from the calling workflow's environment, so a value containing a newline could add extra environment variables.
+The 'Update GitHub path to include miniconda install' step forwards inherited process env vars into special files with no sanitization. It runs `echo "PATH=${MINICONDA_INSTALL_PATH}/bin:${PATH}"` into $GITHUB_ENV, and the GITHUB_PATH write is built from the inherited `${RUNNER_TEMP}`. Neither write is preceded by `printf '%s' ... | tr -d '\n\r'`.
 
 Locations:
 
-- `action.yml:90`
+- `action.yml:85`
+- `action.yml:89`
+
+### github-env-injection (severity: high)
+
+The 'Clone the base conda environment and update GitHub env' step writes CONDA_ENV, CONDA_PREFIX, CONDA_RUN and CONDA_INSTALL to $GITHUB_ENV. These values come from the inherited env vars RUNNER_TEMP and GITHUB_RUN_ID and from `which conda`, which depends on the inherited PATH. None of these writes is sanitized with `printf '%s' ... | tr -d '\n\r'`.
+
+Locations:
+
+- `action.yml:185`
+- `action.yml:187`
+- `action.yml:188`
+- `action.yml:189`
 
 ### unpinned-uses (severity: high)
 
-Composite steps use a version tag instead of a full commit SHA: `uses: actions/cache@v3` (line 47, 'Setup miniconda cache') and `uses: actions/cache@v3` (line 105, 'Setup miniconda env cache'). Pin both to a 40-character commit SHA.
+The composite action's steps use tag references instead of full commit SHAs: `uses: actions/cache@v3` (line 46) and `uses: actions/cache@v3` (line 104).
 
 Locations:
 
-- `action.yml:47`
-- `action.yml:105`
+- `action.yml:46`
+- `action.yml:104`
 
 ### static-inline-injection (severity: high)
 
@@ -68,9 +88,15 @@ Locations:
 
 ### Iteration 1
 
-**Fixes applied:** script-injection, static-inline-injection, github-env-injection, unpinned-uses
+**Fixes applied:** script-injection, github-env-injection, unpinned-uses, static-inline-injection
 
 **Notes:**
 
-I moved inputs.default-packages into env: DEFAULT_PACKAGES in the 'Get date' step and the 'Setup conda environment' step. Upstream pasted the value straight into the script, so the shell split it into words and honoured quotes. To keep that behaviour, each step now splits it into an array with the quote-aware xargs method: an empty value is skipped and an unmatched quote stops the step. The array is then passed as "${pkgs[@]}". The checksum comes out the same as before, because echo -n of the array joins the words with single spaces. ENV_FILE_FLAG is now an array, (--file "$ENV_FILE"), passed as "${ENV_FILE_FLAG[@]}". Before the PATH line is written to GITHUB_ENV, newlines are now stripped with printf | tr -d '\n\r'. Both actions/cache@v3 uses are pinned to 6f8efc29b200d32929f49075959781ed54ec270c (# v3), which is the commit the v3 tag points to. I haven't run the changed workflow.
+I fixed all eight findings in action.yml. I haven't run the action or its tests after the changes.
+
+- **Inline input in two steps:** I moved `inputs.default-packages` out of the run scripts and into `env:` in both the 'Get date' step and the 'Setup conda environment' step. Upstream pasted the input straight into the script, so the shell honoured quotes in the value. To keep that behaviour, the new code splits the value into a list with the quote-aware xargs method (it stops with an error if a quote is left unclosed, and does nothing if the value is empty). The checksum is still computed from `echo -n` of the space-joined package list, as before. That command used to sit inside echo, so a failure there never stopped the step; I added `|| true` to keep it that way. The checksum also has newlines stripped before it is written to GITHUB_OUTPUT.
+- **Environment file flag:** `ENV_FILE_FLAG` was a single string expanded unquoted. It is now a list, `(--file "$ENV_FILE")`, so the file path stays one quoted argument. `CONDA_EXTRA_FLAGS` is now an empty list for the same reason.
+- **Platform check:** `case "${RUNNER_OS}-${RUNNER_ARCH}"` is now quoted.
+- **GITHUB_PATH / GITHUB_ENV writes:** newlines are now stripped from the miniconda install path and from PATH before they are written. In the clone step, the same goes for CONDA_PREFIX and the conda path from `which conda` before CONDA_ENV, CONDA_PREFIX, CONDA_RUN and CONDA_INSTALL are written.
+- **Pinning:** both `actions/cache@v3` references are now pinned to commit 6f8efc29b200d32929f49075959781ed54ec270c, with `# v3` kept as a comment.
 

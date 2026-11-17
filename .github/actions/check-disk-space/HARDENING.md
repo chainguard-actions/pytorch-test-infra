@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--check-disk-space/v20260922-15564
 
 ### script-injection (severity: high)
 
-Rule (b): in the composite step 'Get disk space usage and throw an error for low disk space', the env var MINIMUM_AVAILABLE_SPACE_IN_GB comes from inputs.minimum-available-space-in-gb and is expanded without quotes inside a bash arithmetic expression: `MINIMUM_AVAILABLE_SPACE_IN_KB=$(($MINIMUM_AVAILABLE_SPACE_IN_GB * 1024 * 1024))`. Bash arithmetic evaluates the value it is given, so input such as `a[$(cmd)]` can run commands. Check that the value is a whole number first (e.g. `[[ "$MINIMUM_AVAILABLE_SPACE_IN_GB" =~ ^[0-9]+$ ]] || exit 1`), then do the arithmetic.
+Rule (b) violation: an env var holding workflow-controlled data is expanded unquoted. The line is `MINIMUM_AVAILABLE_SPACE_IN_KB=$(($MINIMUM_AVAILABLE_SPACE_IN_GB * 1024 * 1024))`. MINIMUM_AVAILABLE_SPACE_IN_GB comes from inputs.minimum-available-space-in-gb. Because `$VAR` inside `$(( ))` is expanded as text before the arithmetic is evaluated, a crafted input such as `a[$(cmd)]` makes bash evaluate the array subscript and run the command. Fix: check the value is numeric first (e.g. `[[ "$MINIMUM_AVAILABLE_SPACE_IN_GB" =~ ^[0-9]+$ ]] || exit 1`), then use it as a quoted or bare variable name in the arithmetic.
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-In action.yml, the step now checks that MINIMUM_AVAILABLE_SPACE_IN_GB matches ^[0-9]+$ at the top level, before any arithmetic, and fails the step with an error if it doesn't. This stops values like 'a[$(cmd)]' from being evaluated. The arithmetic now uses the 10# prefix (base 10), so a value with leading zeros such as 08 isn't read as octal. Upstream only works with whole numbers, so valid inputs behave as before. One behaviour change: a malformed value used to cause an arithmetic error inside the check's subshell and the step could still pass; now it fails clearly. Nothing was run to test this.
+action.yml: the step now checks MINIMUM_AVAILABLE_SPACE_IN_GB against ^[0-9]+$ at the top level before anything else runs, and exits 1 if it is not a number. The check sits outside check_disk_space because that function runs inside $(...), where an exit would only end the subshell and not the step. The arithmetic now names the variable bare ($((MINIMUM_AVAILABLE_SPACE_IN_GB * 1024 * 1024))), so the input text is no longer pasted into the expression. No test run; checked by reading the file. For whole numbers the result is the same as upstream.
 

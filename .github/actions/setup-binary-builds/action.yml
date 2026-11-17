@@ -79,10 +79,10 @@ runs:
       - name: Log Available Webhook Fields
         shell: bash
         env:
-          GH_CTX_REF_NAME: ${{ github.ref_name }}
-          GH_CTX_EVENT_REF: ${{ github.event.ref }}
-          GH_CTX_REF: ${{ github.ref }}
-          GH_CTX_BASE_REF: ${{ github.base_ref }}
+          CTX_REF_NAME: ${{ github.ref_name }}
+          CTX_EVENT_REF: ${{ github.event.ref }}
+          CTX_REF: ${{ github.ref }}
+          CTX_BASE_REF: ${{ github.base_ref }}
         run: |
           echo "ENV VARS"
           echo "${GITHUB_REF_NAME}"
@@ -90,10 +90,10 @@ runs:
           echo "${GITHUB_BASE_REF}"
 
           echo "GITHUB PROVIDED"
-          echo "${GH_CTX_REF_NAME}"
-          echo "${GH_CTX_EVENT_REF}"
-          echo "${GH_CTX_REF}"
-          echo "${GH_CTX_BASE_REF}"
+          echo "${CTX_REF_NAME}"
+          echo "${CTX_EVENT_REF}"
+          echo "${CTX_REF}"
+          echo "${CTX_BASE_REF}"
       - name: Set artifact name
         shell: bash
         env:

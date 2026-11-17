@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-binary-upload/v20260922-15
 
 ### unpinned-uses (severity: high)
 
-Composite action steps reference actions by mutable tag instead of a full 40-char commit SHA: 'uses: actions/setup-python@v5' (line 36) and 'uses: actions/checkout@v4' (line 61).
+action.yml has composite steps that reference actions by mutable tag instead of a full 40-character commit SHA: 'uses: actions/setup-python@v5' (line 36) and 'uses: actions/checkout@v4' (line 61).
 
 Locations:
 
@@ -25,7 +25,7 @@ Locations:
 
 ### github-env-injection (severity: high)
 
-Step 'Set the artifact name' writes values built from inputs.repository, inputs.ref, inputs.python-version, inputs.cuda-version and inputs.arch (passed in through env vars REPOSITORY, REF, PYTHON_VERSION, CU_VERSION, ARCH) to $GITHUB_ENV, and nothing strips newlines first: echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}". A value containing a newline could inject extra environment variables. To fix it, run the composed value through printf '%s' ... | tr -d '\n\r' before writing it.
+The step 'Set the artifact name' writes values from inputs to $GITHUB_ENV without sanitizing them first. The values are inputs.repository, inputs.ref, inputs.python-version, inputs.cuda-version and inputs.arch, passed in as the REPOSITORY, REF, PYTHON_VERSION, CU_VERSION and ARCH env vars. The offending line is: echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}". Replacing '/' does not remove newlines or carriage returns. A value containing a newline could therefore add arbitrary environment variables. The fix is to build the value and run it through printf '%s' ... | tr -d '\n\r' right before the write.
 
 Locations:
 
@@ -39,5 +39,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/setup-python@v5 to a26af69be951a213d495a4c3e4e4022e16d87065 and actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262. The artifact name is now built first, then passed through printf '%s' | tr -d '\n\r' before it is written to GITHUB_ENV.
+Pinned actions/setup-python to a26af69be951a213d495a4c3e4e4022e16d87065 (v5) and actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4). In the 'Set the artifact name' step, ARTIFACT_NAME is now built into a variable and passed through printf '%s' | tr -d '\n\r' before it is written to GITHUB_ENV. The step already runs under bash with pipefail, so a failure is still reported. I haven't run the action after these changes.
 

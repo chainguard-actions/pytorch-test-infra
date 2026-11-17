@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--trigger-nightly/v20260922-155642
 
 ### unpinned-uses (severity: high)
 
-Composite step uses a mutable tag instead of a full commit SHA: 'uses: actions/checkout@v4'.
+action.yml composite step uses a mutable tag rather than a full commit SHA: 'uses: actions/checkout@v4'.
 
 Locations:
 
@@ -24,11 +24,11 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the expression is placed straight into the run: script in step 'Create nightly commit': 'pushd ${{ inputs.path }}'. Anyone who controls inputs.path can inject shell commands. Fix: pass the value through an env: variable (e.g. INPUT_PATH: ${{ inputs.path }}) and quote it in the script: pushd "$INPUT_PATH".
+Rule (a) violated: the expression is interpolated straight into the run: script in step 'Create nightly commit': 'pushd ${{ inputs.path }}'. Move it into an env: variable (e.g. INPUT_PATH) and use it double-quoted: pushd "$INPUT_PATH".
 
 Locations:
 
-- `action.yml:31`
+- `action.yml:30`
 
 ### static-inline-injection (severity: high)
 
@@ -46,5 +46,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4). Moved inputs.path into env INPUT_PATH and used quoted "$INPUT_PATH" in pushd.
+Pinned actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262 (# v4). In the 'Create nightly commit' step, moved inputs.path into env INPUT_PATH and used pushd "$INPUT_PATH".
 

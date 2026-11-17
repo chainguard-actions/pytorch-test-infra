@@ -73,10 +73,10 @@ runs:
       run: |
         RUNNER_ARTIFACT_DIR="$(cygpath "${RUNNER_TEMP}")/artifacts"
         mkdir -p "${RUNNER_ARTIFACT_DIR}"
-        safe_artifact_dir=$(printf '%s' "$RUNNER_ARTIFACT_DIR" | tr -d '\n\r')
+        safe_artifact_dir=$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')
         echo "RUNNER_ARTIFACT_DIR=${safe_artifact_dir}" >> "${GITHUB_ENV}"
 
         RUNNER_TEST_RESULTS_DIR="${RUNNER_TEMP}/test-results"
         mkdir -p "${RUNNER_TEST_RESULTS_DIR}"
-        safe_test_results_dir=$(printf '%s' "$RUNNER_TEST_RESULTS_DIR" | tr -d '\n\r')
+        safe_test_results_dir=$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')
         echo "RUNNER_TEST_RESULTS_DIR=${safe_test_results_dir}" >> "${GITHUB_ENV}"

@@ -1,4 +1,4 @@
-name: Test push input with skip path
+name: Test push input with skip path (no build script)
 on:
   workflow_dispatch:
 jobs:
@@ -14,7 +14,7 @@ jobs:
           repo-name: myrepo
           push: "true"
           force-push: "true"
-      - name: Assert docker-image passes through unchanged (push ignored on skip path)
+      - name: Assert docker-image passes through unchanged and no push attempted
         env:
           ACTUAL: ${{ steps.action.outputs.docker-image }}
         run: |

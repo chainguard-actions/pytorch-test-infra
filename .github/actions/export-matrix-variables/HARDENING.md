@@ -16,12 +16,12 @@ Action **pytorch--test-infra--.github--actions--export-matrix-variables/v2026092
 
 ### script-injection (severity: high)
 
-Rule (b): the 'Export variables' step expands the workflow-controlled env var TARGET_OS (from ${{ inputs.target-os }}) without double quotes: `if [[ ${TARGET_OS} != "linux" ]]; then` and `if [[ ${TARGET_OS} == 'windows' ]]; then`. Write it as "${TARGET_OS}".
+Rule (b) violation: the env var TARGET_OS comes straight from inputs.target-os, so the calling workflow controls it, and it is expanded without double quotes in the 'Export variables' step. Offending lines: `if [[ ${TARGET_OS} != "linux" ]]; then` and `if [[ ${TARGET_OS} == 'windows' ]]; then`. Fix: quote both, e.g. `[[ "${TARGET_OS}" != "linux" ]]` and `[[ "${TARGET_OS}" == 'windows' ]]`.
 
 Locations:
 
-- `action.yml:32`
-- `action.yml:38`
+- `action.yml:33`
+- `action.yml:39`
 
 ## Iteration Notes
 
@@ -31,5 +31,5 @@ Locations:
 
 **Notes:**
 
-Quoted the ${TARGET_OS} expansions in both [[ ]] tests in action.yml (lines 32 and 38). The value was already passed in through env:, so no other changes were needed. ${ADD_QUOTES_AROUND_VAR} stays unquoted on purpose: the script sets it to a fixed value or leaves it empty, so it drops out as an argument when empty.
+Quoted ${TARGET_OS} in both [[ ]] tests in the 'Export variables' step of action.yml. Behavior is unchanged: inside [[ ]] the left side is never word-split, and the right-hand patterns were already literal quoted strings. The input was already passed through env:.
 

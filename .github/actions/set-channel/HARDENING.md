@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--set-channel/v20260922-155642** w
 
 ### script-injection (severity: high)
 
-Rule (b): the step 'Set CHANNEL for tagged pushes' expands an untrusted variable without quotes: `if [[ ${GITHUB_REF_NAME} = *-rc[0-9]* ]]; then`. GITHUB_REF_NAME is the tag name, and whoever pushes the tag chooses it. Inside [[ ]] bash does not split words or expand globs on the left side, so this is hard to exploit. It still breaks the rule that every expansion of workflow-controllable data must be double-quoted. Fix: write it as `[[ "${GITHUB_REF_NAME}" = *-rc[0-9]* ]]` and leave the pattern on the right unquoted.
+Rule (b) violation: an unquoted shell expansion of workflow-controlled data in the 'Set CHANNEL for tagged pushes' step. The line is `if [[ ${GITHUB_REF_NAME} = *-rc[0-9]* ]]; then`. GITHUB_REF_NAME holds the tag or branch name, which whoever pushes the ref can choose. Inside [[ ]] bash does not split words or expand globs on the left side, so this is low risk in practice. The check still requires the expansion to be double-quoted. Fix: `if [[ "${GITHUB_REF_NAME}" = *-rc[0-9]* ]]; then`.
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-Quoted ${GITHUB_REF_NAME} on the left side of the [[ ]] test in the 'Set CHANNEL for tagged pushes' step. The glob pattern on the right is still unquoted, so the RC match works the same as before.
+Quoted ${GITHUB_REF_NAME} in the [[ ]] test in action.yml. The right side is still an unquoted glob, so the match works the same as before.
 

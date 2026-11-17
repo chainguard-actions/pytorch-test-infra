@@ -1,0 +1,469 @@
+#!/bin/bash
+set -euo pipefail
+
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+export DESIRED_DEVTOOLSET="cxx11-abi"
+
+#######################################
+# Helper Functions
+#######################################
+
+# Handle aarch64 CUDA builds by overriding to CPU mode for validation
+handle_aarch64_cuda_override() {
+    if [[ ${TARGET_OS} == 'linux-aarch64' && (${MATRIX_GPU_ARCH_TYPE} == 'cuda-aarch64' || ${MATRIX_GPU_ARCH_TYPE} == 'cuda') ]]; then
+        echo "Detected aarch64 CUDA build (${MATRIX_GPU_ARCH_TYPE}) - overriding to test CPU fallback mode"
+        export MATRIX_GPU_ARCH_TYPE="cpu"
+    fi
+}
+
+# Get Python version and conda extra parameters based on MATRIX_PYTHON_VERSION
+get_python_config() {
+    case ${MATRIX_PYTHON_VERSION} in
+        3.14t)
+            PYTHON_V=3.14.0rc1
+            CONDA_EXTRA_PARAM=" python-freethreading -c conda-forge/label/python_rc -c conda-forge"
+            ;;
+        3.14)
+            PYTHON_V=3.14.0rc1
+            CONDA_EXTRA_PARAM=" -c conda-forge/label/python_rc -c conda-forge"
+            ;;
+        # Note: 3.15 / 3.15t are intentionally absent here. They are provisioned
+        # via uv (CPython 3.15.0b4) in the interpreter-setup branch below and
+        # never reach the conda create path that reads CONDA_EXTRA_PARAM.
+        *)
+            PYTHON_V=${MATRIX_PYTHON_VERSION}
+            CONDA_EXTRA_PARAM=""
+            ;;
+    esac
+    export PYTHON_V CONDA_EXTRA_PARAM
+}
+
+# Update conda based on target OS
+update_conda() {
+    if [[ ${TARGET_OS} == 'macos-arm64' ]]; then
+        conda update -y -n base -c defaults conda
+    elif [[ ${TARGET_OS} != 'linux-aarch64' ]]; then
+        # Conda pinned see issue: https://github.com/ContinuumIO/anaconda-issues/issues/13350
+        conda install -y conda=23.11.0
+    fi
+}
+
+# Modify installation command based on various flags
+build_installation_command() {
+    local installation="${MATRIX_INSTALLATION}"
+    installation=${installation/"conda install"/"conda install -y"}
+
+    # force-reinstall: latest version of packages are reinstalled
+    if [[ ${USE_FORCE_REINSTALL:-} == 'true' ]]; then
+        installation=${installation/"pip3 install"/"pip3 install --force-reinstall"}
+    fi
+
+    # extra-index-url: extra dependencies are downloaded from pypi
+    if [[ ${USE_EXTRA_INDEX_URL:-} == 'true' ]]; then
+        installation=${installation/"--index-url"/"--extra-index-url"}
+    fi
+
+    # torch-only option: remove torchvision
+    if [[ ${TORCH_ONLY:-} == 'true' ]]; then
+        installation=${installation/" torchvision"/""}
+    fi
+
+    # include-torchaudio option: add torchaudio to installation
+    if [[ ${INCLUDE_TORCHAUDIO:-} == 'true' ]]; then
+        installation=${installation/"torchvision "/"torchvision torchaudio "}
+    fi
+
+    # if RELEASE version is passed as parameter - install specific version
+    if [[ -n ${RELEASE_VERSION:-} ]]; then
+        installation=${installation/"torch "/"torch==${RELEASE_VERSION} "}
+        installation=${installation/"-y pytorch "/"-y pytorch==${RELEASE_VERSION} "}
+        installation=${installation/"::pytorch "/"::pytorch==${RELEASE_VERSION} "}
+    fi
+
+    echo "${installation}"
+}
+
+# Get test suffix based on flags
+get_test_suffix() {
+    if [[ ${TORCH_ONLY:-} == 'true' ]]; then
+        echo "--package torchonly"
+    elif [[ ${INCLUDE_TORCHAUDIO:-} == 'true' ]]; then
+        echo ""
+    else
+        echo "--package torch_torchvision"
+    fi
+}
+
+# Configure environment variables for wheel variants based on GPU type
+configure_wheel_variant_env() {
+    case ${MATRIX_GPU_ARCH_VERSION:-} in
+        12.6*)
+            export NV_VARIANT_PROVIDER_FORCE_CUDA_DRIVER_VERSION='12.6'
+            export NV_VARIANT_PROVIDER_FORCE_SM_ARCH='6.0'
+            ;;
+        12.8*)
+            export NV_VARIANT_PROVIDER_FORCE_CUDA_DRIVER_VERSION='12.8'
+            export NV_VARIANT_PROVIDER_FORCE_SM_ARCH='9.0'
+            ;;
+        13.0*)
+            export NV_VARIANT_PROVIDER_FORCE_CUDA_DRIVER_VERSION='13.0'
+            export NV_VARIANT_PROVIDER_FORCE_SM_ARCH='9.0'
+            ;;
+    esac
+
+    if [[ ${MATRIX_GPU_ARCH_TYPE:-} == 'xpu' ]]; then
+        export INTEL_VARIANT_PROVIDER_FORCE_DEVICE_IP='30.0.4'
+    fi
+
+    if [[ ${MATRIX_GPU_ARCH_TYPE:-} == 'rocm' ]]; then
+        export AMD_VARIANT_PROVIDER_FORCE_GFX_ARCH="gfx1100"
+        export AMD_VARIANT_PROVIDER_FORCE_ROCM_VERSION="${MATRIX_GPU_ARCH_VERSION}.0"
+    fi
+}
+
+# Get variant index URL based on channel
+get_variant_index_url() {
+    if [[ ${MATRIX_CHANNEL:-} == 'release' ]]; then
+        echo "https://wheelnext.github.io/variants-index/v0.0.3/"
+    else
+        echo "https://wheelnext.github.io/variants-index-test/v0.0.3/"
+    fi
+}
+
+# Install packages using wheel variants with uv
+# Sets TEST_SUFFIX global variable
+install_wheel_variants() {
+    local variant_packages="torch torchvision"
+    local variant_index_url
+
+    variant_index_url=$(get_variant_index_url)
+
+    if [[ ${TORCH_ONLY:-} == 'true' ]]; then
+        variant_packages="torch"
+        TEST_SUFFIX="--package torchonly"
+    else
+        TEST_SUFFIX="--package torch_torchvision"
+    fi
+
+    configure_wheel_variant_env
+
+    if [[ ${TARGET_OS} == 'windows' ]]; then
+        powershell -ExecutionPolicy Bypass -c "\$env:INSTALLER_DOWNLOAD_URL='https://wheelnext.astral.sh/v0.0.3'; irm https://astral.sh/uv/install.ps1 | iex"
+        export PATH="${HOME}/.local/bin/:${PATH}"
+    else
+        curl -LsSf https://astral.sh/uv/install.sh | \
+            INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh/v0.0.3 sh
+        source "${HOME}/.local/bin/env"
+        uv venv --python "${MATRIX_PYTHON_VERSION}"
+        source .venv/bin/activate
+    fi
+
+    uv pip install --index "${variant_index_url}" ${variant_packages} --force-reinstall --verbose
+}
+
+# Install numpy 1.x for Python < 3.13
+install_numpy_1x() {
+    local minor_version
+    minor_version=$(echo "${MATRIX_PYTHON_VERSION}" | cut -d . -f 2)
+
+    if [[ ${minor_version} -lt 13 ]]; then
+        pip3 install numpy==1.26.4 --force-reinstall
+    fi
+}
+
+# Run smoke tests
+run_smoke_tests() {
+    local test_suffix="$1"
+
+    pushd "${PWD}/.ci/pytorch/"
+
+    if [[ ${TARGET_OS} == 'linux' ]]; then
+        export CONDA_LIBRARY_PATH="$(dirname $(which python))/../lib"
+        export LD_LIBRARY_PATH="${CONDA_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}"
+        source ./check_binary.sh
+    fi
+
+    # Run test ops if enabled (CUDA + Python < 3.13)
+    if [[ ${INCLUDE_TEST_OPS:-} == 'true' && ${MATRIX_GPU_ARCH_TYPE:-} == 'cuda' && ${MATRIX_PYTHON_VERSION} != "3.13" ]]; then
+        source "${SCRIPT_DIR}/validate_test_ops.sh"
+    fi
+
+    # torch.compile is not supported on Python 3.15+ (torch.compile() raises
+    # RuntimeError at call time), so disable the compile smoke test there.
+    local compile_check=""
+    if [[ ${MATRIX_PYTHON_VERSION} == "3.15" || ${MATRIX_PYTHON_VERSION} == "3.15t" ]]; then
+        compile_check="--torch-compile-check disabled"
+    fi
+
+    # Regular smoke test
+    ${PYTHON_RUN} ./smoke_test/smoke_test.py ${test_suffix} ${compile_check}
+
+    # For pip install also test with latest numpy
+    if [[ ${MATRIX_PACKAGE_TYPE} == 'wheel' ]]; then
+        pip3 install numpy --upgrade --force-reinstall
+        ${PYTHON_RUN} ./smoke_test/smoke_test.py ${test_suffix} ${compile_check}
+    fi
+
+    popd
+}
+
+# Test CUDA device visibility
+test_cuda_device() {
+    if [[ ${MATRIX_GPU_ARCH_TYPE:-} == 'cuda' ]]; then
+        # Run from /tmp to avoid importing torch source directory instead of installed package
+        (cd /tmp && python -c "import torch;import os;print(torch.cuda.device_count(), torch.__version__);os.environ['CUDA_VISIBLE_DEVICES']='0';print(torch.empty(2, device='cuda'))")
+    fi
+}
+
+# Cleanup the environment created for this run.
+#
+# ENV_NAME is a conda env name on the conda path but a venv *directory* on the
+# uv path, so `conda env remove -n` would fail with EnvironmentLocationNotFound
+# and, under `set -e`, fail the whole job after the tests had already passed.
+cleanup_conda_env() {
+    if [[ ${TARGET_OS} != linux* ]]; then
+        if [[ ${USING_UV_VENV} == 'yes' ]]; then
+            # `deactivate` is a function defined by the venv activate script.
+            if declare -F deactivate > /dev/null; then
+                deactivate
+            fi
+            rm -rf "${ENV_NAME}"
+        else
+            conda deactivate
+            conda env remove -n "${ENV_NAME}"
+        fi
+    fi
+}
+
+# Read a wheel's compressed download size, in MB, out of a captured pip log.
+#
+# $1 = log file, $2 = distribution name as it appears in the wheel filename.
+# Prints the size, or nothing when that wheel is absent from the log (already
+# satisfied, or installed from a local file). "<dist>-[0-9]" keeps a request for
+# "torch" from matching the torchvision-/torchaudio- wheels.
+parse_wheel_size_mb() {
+    local log_file="$1" dist="$2" frag size unit
+    frag=$(grep -oiE "${dist}-[0-9][^ /]*\.whl \([0-9.]+ ?[kKmMgG]i?B\)" "${log_file}" | tail -1 || true)
+    if [[ -z ${frag} ]]; then
+        return 0
+    fi
+    size=$(echo "${frag}" | sed -E 's/.*\(([0-9.]+) ?([A-Za-z]+)\)$/\1/')
+    unit=$(echo "${frag}" | sed -E 's/.*\(([0-9.]+) ?([A-Za-z]+)\)$/\2/')
+    case ${unit} in
+        B)             awk "BEGIN{printf \"%.1f\", ${size}/1024/1024}" ;;
+        kB|KB|kiB|KiB) awk "BEGIN{printf \"%.1f\", ${size}/1024}" ;;
+        MB|MiB)        awk "BEGIN{printf \"%.1f\", ${size}}" ;;
+        GB|GiB)        awk "BEGIN{printf \"%.1f\", ${size}*1024}" ;;
+        *) echo "::warning::wheel-size: unrecognized size unit '${unit}' for ${dist}" >&2 ;;
+    esac
+}
+
+# Fail the build if the installed torch wheel exceeds a hard size ceiling.
+#
+# Scope: Linux x86_64 + aarch64 wheels only, excluding ROCm (whose wheels are
+# legitimately multi-GB). The measured value is the compressed .whl DOWNLOAD
+# size as reported by pip on its "Downloading"/"Using cached" line -- i.e. the
+# same size published to download.pytorch.org / PyPI, not the (much larger)
+# unpacked install footprint. Reads the captured pip-install log ($1).
+#
+# Ceiling is ${WHEEL_SIZE_THRESHOLD_MB} MB (default 850).
+check_wheel_size() {
+    local log_file="$1"
+    local threshold_mb="${WHEEL_SIZE_THRESHOLD_MB:-850}"
+
+    # Only linux / linux-aarch64 wheels; skip libtorch and ROCm.
+    if [[ ${TARGET_OS} != 'linux' && ${TARGET_OS} != 'linux-aarch64' ]]; then
+        return 0
+    fi
+    if [[ ${MATRIX_PACKAGE_TYPE} != 'wheel' || ${MATRIX_GPU_ARCH_TYPE:-} == 'rocm' ]]; then
+        echo "Wheel-size check skipped for package=${MATRIX_PACKAGE_TYPE} arch=${MATRIX_GPU_ARCH_TYPE:-cpu}"
+        return 0
+    fi
+
+    local size_mb
+    size_mb=$(parse_wheel_size_mb "${log_file}" torch)
+    if [[ -z ${size_mb} ]]; then
+        echo "::warning::wheel-size check: could not find the torch wheel size in the pip output; skipping"
+        return 0
+    fi
+
+    # Always surface the measured size (as an annotation) whether or not the
+    # check passes, so it is visible on the run summary of a successful job too.
+    echo "::notice::torch wheel size: ${size_mb} MB (arch=${MATRIX_GPU_ARCH_TYPE:-cpu} os=${TARGET_OS} py=${MATRIX_PYTHON_VERSION:-?}); ceiling ${threshold_mb} MB"
+    if awk "BEGIN{exit !(${size_mb} > ${threshold_mb})}"; then
+        echo "::error::torch wheel ${size_mb} MB exceeds the ${threshold_mb} MB ceiling (arch=${MATRIX_GPU_ARCH_TYPE:-cpu}, os=${TARGET_OS}, py=${MATRIX_PYTHON_VERSION:-?})"
+        return 1
+    fi
+}
+
+# Report what this build actually installed, and how big it is.
+#
+# Complements check_wheel_size, which only measures linux/linux-aarch64 pip
+# wheels and exists to enforce a ceiling: this runs for every build on every OS
+# and never fails, so windows/macos/ROCm sizes are visible too.
+#
+# The report itself is built by build_report.py; see that script for what the
+# two size figures mean. Runs while the env is still active, because
+# cleanup_conda_env removes it on non-linux.
+write_build_report() {
+    local torch_wheel_mb="${1:-}" vision_wheel_mb="${2:-}"
+    local report
+
+    report=$("${PYTHON_RUN}" "${SCRIPT_DIR}/build_report.py" \
+        --target-os "${TARGET_OS}" \
+        --python-version "${MATRIX_PYTHON_VERSION:-?}" \
+        --gpu-arch-type "${MATRIX_GPU_ARCH_TYPE:-cpu}" \
+        --gpu-arch-version "${MATRIX_GPU_ARCH_VERSION:-}" \
+        --torch-wheel-mb "${torch_wheel_mb}" \
+        --torchvision-wheel-mb "${vision_wheel_mb}") || report="| field | value |
+| --- | --- |
+| report | failed to collect |"
+
+    echo "--- Build report"
+    echo "${report}"
+
+    # linux_job_v2 passes GITHUB_STEP_SUMMARY into the container and bind-mounts
+    # the file at the same absolute path, so it is writable there. The guard is
+    # for the paths that do not set it at all -- e.g. running this script by hand.
+    if [[ -n ${GITHUB_STEP_SUMMARY:-} ]]; then
+        {
+            echo "### ${MATRIX_PACKAGE_TYPE:-wheel}: ${TARGET_OS} / py${MATRIX_PYTHON_VERSION:-?} / ${MATRIX_GPU_ARCH_TYPE:-cpu} ${MATRIX_GPU_ARCH_VERSION:-}"
+            echo "${report}"
+            echo
+        } >> "${GITHUB_STEP_SUMMARY}"
+    fi
+}
+
+#######################################
+# Main Script
+#######################################
+
+handle_aarch64_cuda_override
+
+# torchvision wheels are not published for Python 3.15 / 3.15t yet, so validate
+# torch only: skip the torchvision install and its smoke-test module check.
+# Guard with :- since libtorch builds run this before the libtorch exit below
+# and do not set MATRIX_PYTHON_VERSION (set -u would abort otherwise).
+if [[ ${MATRIX_PYTHON_VERSION:-} == "3.15" || ${MATRIX_PYTHON_VERSION:-} == "3.15t" ]]; then
+    export TORCH_ONLY=true
+fi
+
+if [[ ${MATRIX_PACKAGE_TYPE} == "libtorch" ]]; then
+    LIBTORCH_PYTHON="python3"
+    if [[ ${TARGET_OS} == 'windows' ]]; then
+        # Windows runners only source conda.sh at this point without activating
+        # an env, so no python is on PATH yet. Activate base to get one.
+        conda activate base
+        LIBTORCH_PYTHON="python"
+    fi
+    "${LIBTORCH_PYTHON}" "${SCRIPT_DIR}/validate_libtorch.py" "${MATRIX_INSTALLATION}"
+    exit 0
+fi
+
+# Set Python executable based on OS
+export PYTHON_RUN="python3"
+if [[ ${TARGET_OS} == 'windows' ]]; then
+    export PYTHON_RUN="python"
+fi
+
+# Setup the Python environment.
+#
+# Python 3.15 is still pre-release, and conda-forge's default channel does not
+# carry it, so provision the interpreter with uv (from python-build-standalone)
+# instead of conda. A --seed venv provides pip so the rest of the flow (pip3
+# install, smoke tests) is unchanged.
+#
+# Pin b4, NOT b1: `import torch` segfaults under the 3.15.0b1 build. The crash is
+# pybind11 3.0.4's gil_scoped_acquire teardown in python_tracer::init(), reached
+# from torch._C._autograd_init():
+#     THPAutograd_initExtension -> python_tracer::init()
+#       -> ~gil_scoped_acquire() -> dec_ref() -> PyThreadState_Clear -> SIGSEGV
+# Verified with the cp315 nightly on both interpreters: b1 segfaults, b4 imports
+# and runs (matmul/autograd, and 3.15t with the GIL genuinely disabled).
+USING_UV_VENV="no"
+if [[ ${MATRIX_PYTHON_VERSION} == "3.15" || ${MATRIX_PYTHON_VERSION} == "3.15t" ]]; then
+    USING_UV_VENV="yes"
+    UV_PYTHON="3.15.0b4"
+    if [[ ${MATRIX_PYTHON_VERSION} == "3.15t" ]]; then
+        UV_PYTHON="3.15.0b4+freethreaded"
+    fi
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    source "${HOME}/.local/bin/env"
+    uv venv --seed --python "${UV_PYTHON}" "${ENV_NAME}"
+    # uv lays the venv out the platform way: Scripts/ on Windows, bin/ elsewhere.
+    if [[ ${TARGET_OS} == 'windows' ]]; then
+        source "${ENV_NAME}/Scripts/activate"
+    else
+        source "${ENV_NAME}/bin/activate"
+    fi
+else
+    update_conda
+    get_python_config
+    conda create -y -n "${ENV_NAME}" python="${PYTHON_V}" pip ${CONDA_EXTRA_PARAM}
+    conda activate "${ENV_NAME}"
+fi
+
+# Save original PATH for macos-arm64 workaround
+export OLD_PATH=${PATH}
+# This promotes the *conda* env's bin to the front of PATH. On the uv path there
+# is no conda env to promote: CONDA_PREFIX still points at base (python 3.14),
+# so prepending it shadows the venv's python3/pip3 and the run would install and
+# validate the wrong interpreter instead of 3.15.
+if [[ ${TARGET_OS} == 'macos-arm64' && ${USING_UV_VENV} == 'no' ]]; then
+    export PATH="${CONDA_PREFIX}/bin:${PATH}"
+fi
+
+# Nightly ROCm validation runs on the lean pytorch/almalinux-builder:cpu-main
+# image, which does not ship libatomic.so.1. torch's _C extension links it, so
+# `import torch` fails with "libatomic.so.1: cannot open shared object file".
+# conda envs mask this by pulling libatomic in via libgcc, but the uv-based
+# 3.15 env does not, so install it explicitly. Scoped to ROCm on Linux.
+if [[ ${MATRIX_GPU_ARCH_TYPE:-} == 'rocm' && ${TARGET_OS} == 'linux' ]]; then
+    (dnf install -y libatomic || yum install -y libatomic) || true
+fi
+
+# Remove previous installation if wheel package
+if [[ ${MATRIX_PACKAGE_TYPE} == 'wheel' ]]; then
+    pip3 uninstall -y torch torchaudio torchvision || true
+fi
+
+# Install packages
+TORCH_WHEEL_MB=""
+TORCHVISION_WHEEL_MB=""
+if [[ ${USE_WHEEL_VARIANTS:-} == 'true' ]]; then
+    install_wheel_variants
+else
+    INSTALLATION=$(build_installation_command)
+    TEST_SUFFIX=$(get_test_suffix)
+    # Tee the install output so we can read the torch wheel's download size off
+    # pip's "Downloading"/"Using cached" line (set -o pipefail keeps eval's exit
+    # status, so a failed install still aborts).
+    WHEEL_INSTALL_LOG="$(mktemp)"
+    eval "${INSTALLATION}" 2>&1 | tee "${WHEEL_INSTALL_LOG}"
+    check_wheel_size "${WHEEL_INSTALL_LOG}"
+    TORCH_WHEEL_MB="$(parse_wheel_size_mb "${WHEEL_INSTALL_LOG}" torch)"
+    TORCHVISION_WHEEL_MB="$(parse_wheel_size_mb "${WHEEL_INSTALL_LOG}" torchvision)"
+    rm -f "${WHEEL_INSTALL_LOG}"
+fi
+
+# Install numpy 1.x after torch install
+install_numpy_1x
+
+# Report versions and sizes for this build. Before the smoke tests on purpose:
+# everything the report describes is already installed, and a failing smoke test
+# is exactly when the versions and sizes are worth having in the summary.
+write_build_report "${TORCH_WHEEL_MB}" "${TORCHVISION_WHEEL_MB}"
+
+# Run tests
+run_smoke_tests "${TEST_SUFFIX}"
+
+# Restore PATH for macos-arm64
+if [[ ${TARGET_OS} == 'macos-arm64' ]]; then
+    export PATH=${OLD_PATH}
+fi
+
+# Test CUDA device visibility
+test_cuda_device
+
+# Cleanup
+cleanup_conda_env

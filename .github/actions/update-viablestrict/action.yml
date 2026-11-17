@@ -109,12 +109,12 @@ runs:
         TEST_INFRA_PATH="${GITHUB_ACTION_PATH}/../../.."
 
         output=$(python "${TEST_INFRA_PATH}/tools/scripts/fetch_latest_green_commit.py" \
-          --required-checks "${REQUIRES}" \
+          --required-checks "$REQUIRES" \
           --viable-strict-branch "viable/strict" \
           --main-branch "master")
         safe_output=$(printf '%s' "$output" | tr -d '\n\r')
-        echo "latest_viable_sha=${safe_output}" >> "${GITHUB_OUTPUT}"
-        echo "${output}"
+        echo "latest_viable_sha=$safe_output" >> "${GITHUB_OUTPUT}"
+        echo $output
 
     - name: Push SHA to viable/strict branch
       if: steps.get-latest-commit.outputs.latest_viable_sha != 'None'
@@ -133,13 +133,11 @@ runs:
         # Pushing an older green commit here will fail because it's non-fast-forward, which is ok
         # to ignore because we already have the later green commit in visable/strict
         push_result=$(git push origin "${LATEST_VIABLE_SHA}:${STABLE_BRANCH}" 2>&1 || true)
-        # Upstream's unquoted echo collapsed the output onto one line; keep that.
-        safe_push_result=$(printf '%s' "$push_result" | tr '\n\r' '  ')
         EOF_DELIM="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
         {
-          echo "push_result<<${EOF_DELIM}"
-          echo "${safe_push_result}"
-          echo "${EOF_DELIM}"
+          echo "push_result<<$EOF_DELIM"
+          echo $push_result
+          echo "$EOF_DELIM"
         } >> "${GITHUB_OUTPUT}"
         echo "${push_result}"
         echo "time=$(date +%s)" >> "${GITHUB_OUTPUT}"

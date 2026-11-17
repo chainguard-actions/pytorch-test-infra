@@ -1,4 +1,4 @@
-name: Test explicit github-server-url
+name: Test explicit github-server-url and ssh-known-hosts with token auth
 on:
   workflow_dispatch:
 jobs:
@@ -13,6 +13,8 @@ jobs:
           ref: main
           path: server-url-target
           github-server-url: https://github.com
+          # ssh-known-hosts is only used with ssh-key; with token auth it must be harmless
+          ssh-known-hosts: "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
       - name: Assert files checked out
         run: |
           if [ ! -f "$GITHUB_WORKSPACE/server-url-target/action.yml" ]; then
@@ -21,7 +23,7 @@ jobs:
             exit 1
           fi
           echo "PASS"
-      - name: Assert remote URL uses the given server
+      - name: Assert origin uses the given server URL
         run: |
           URL="$(git -C "$GITHUB_WORKSPACE/server-url-target" remote get-url origin)"
           echo "origin: $URL"
@@ -36,7 +38,7 @@ jobs:
           echo "commit: $COMMIT"
           HEAD_SHA="$(git -C "$GITHUB_WORKSPACE/server-url-target" rev-parse HEAD)"
           if [ "$COMMIT" != "$HEAD_SHA" ]; then
-            echo "FAIL: commit output '$COMMIT' != HEAD '$HEAD_SHA'"
+            echo "FAIL: commit output does not match HEAD ($HEAD_SHA)"
             exit 1
           fi
           echo "PASS"

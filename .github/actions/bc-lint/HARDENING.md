@@ -14,9 +14,18 @@ Action **pytorch--test-infra--.github--actions--bc-lint/v20260922-155642** was h
 
 ## Findings Fixed
 
+### unpinned-uses (severity: high)
+
+Composite action steps reference actions by mutable tag instead of a full 40-char commit SHA: line 30 'uses: actions/checkout@v4' and line 36 'uses: actions/checkout@v4'.
+
+Locations:
+
+- `action.yml:30`
+- `action.yml:36`
+
 ### script-injection (severity: high)
 
-Rule (a): the 'Merge PR changes onto base' step puts ${{ inputs.head_sha }} and ${{ inputs.base_sha }} straight into the run: script, e.g. `git fetch origin "${{ inputs.head_sha }}"`, `git reset --hard "${{ inputs.base_sha }}"` and `git merge "${{ inputs.head_sha }}"`. The values are substituted into the script before bash runs, so the double quotes don't protect against injection. Fix: pass them through env vars (HEAD_SHA/BASE_SHA) and use "$HEAD_SHA"/"$BASE_SHA".
+Rule (a): the 'Merge PR changes onto base' step puts expressions straight into the run script: 'git fetch origin "${{ inputs.head_sha }}"', 'git fetch origin "${{ inputs.base_sha }}"', 'git reset --hard "${{ inputs.base_sha }}"' and 'git merge "${{ inputs.head_sha }}"'. A value containing quotes or $(...) can run shell commands. Pass the inputs through env: and use "$HEAD_SHA" / "$BASE_SHA" in the script.
 
 Locations:
 
@@ -27,7 +36,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Build and run BC-linter' step puts expressions straight into the run: script, unquoted: `--base-commit=${{ inputs.base_sha }}`, `--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}`, `${{ inputs.suppression == 'true' && '--suppressed' || '' }}` and `${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}`. inputs.base_sha and inputs.config_dir are controlled by the caller. Fix: move them to env vars and expand them double-quoted, or with the guarded form ${VAR:+"$VAR"} for the optional flags.
+Rule (a): the 'Build and run BC-linter' step puts expressions straight into the run script, unquoted: '--base-commit=${{ inputs.base_sha }}', '--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}', '${{ inputs.suppression == 'true' && '--suppressed' || '' }}' and '${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}'. A crafted inputs.base_sha or inputs.config_dir can run any command. Pass these through env: and use double-quoted expansions, with the ${VAR:+"..."} form for the optional flags.
 
 Locations:
 
@@ -38,20 +47,11 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Display documentation link if failed' step puts ${{ inputs.docs_link }} straight into the run: script: `echo "${{ inputs.docs_link }}"`. Fix: pass it through an env var and use echo "$DOCS_LINK".
+Rule (a): the 'Display documentation link if failed' step puts an expression straight into the run script: 'echo "${{ inputs.docs_link }}"'. A docs_link containing quotes or $(...) can run commands. Pass it through env: (DOCS_LINK) and use echo "$DOCS_LINK".
 
 Locations:
 
 - `action.yml:80`
-
-### unpinned-uses (severity: high)
-
-The composite steps use tag refs instead of full commit SHAs: `uses: actions/checkout@v4` (line 30) and `uses: actions/checkout@v4` (line 36).
-
-Locations:
-
-- `action.yml:30`
-- `action.yml:36`
 
 ### static-inline-injection (severity: high)
 
@@ -113,9 +113,9 @@ Locations:
 
 ### Iteration 1
 
-**Fixes applied:** script-injection, static-inline-injection, unpinned-uses
+**Fixes applied:** unpinned-uses, script-injection, static-inline-injection
 
 **Notes:**
 
-Moved inputs.head_sha, base_sha, docs_link, config_dir, suppression and steps.merge_changes.outputs.new_head_sha out of the run: scripts and into step env: blocks. The scripts now use them as double-quoted variables. The optional --suppressed and --config-dir flags are collected in a bash array that is empty when the flags aren't set, and the array is expanded safely under set -u. Pinned both actions/checkout@v4 uses to 11d5960a326750d5838078e36cf38b85af677262. No tests were run, so these changes have not been checked at runtime.
+Pinned both actions/checkout@v4 references to 11d5960a326750d5838078e36cf38b85af677262 (# v4). Moved inputs.head_sha/base_sha, the merge step output, suppression, config_dir and docs_link into step env: blocks and referenced them as quoted shell variables. Optional --suppressed / --config-dir flags are built in a bash array (each flag stays its own argument; the array expansion is guarded so it works with set -u on older bash).
 

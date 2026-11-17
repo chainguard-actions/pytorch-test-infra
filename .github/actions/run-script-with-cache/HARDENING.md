@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20260922-155642** was hardened automatically. 4 finding(s) were identified and resolved across 2 iteration(s).
+Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20260922-155642** was hardened automatically. 3 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-action.yml uses a tag, not a full commit SHA: `uses: actions/cache@v3`. Pin it to a 40-character commit SHA.
+action.yml references an action by a mutable tag instead of a full 40-character commit SHA: `uses: actions/cache@v3`.
 
 Locations:
 
@@ -24,20 +24,12 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Run script' step puts an expression straight into the run: script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. The caller controls this input, and it is substituted into the script before bash runs. Pass it through an env: variable and quote it, e.g. `"$IS_WINDOWS"`.
+Step 'Run script' breaks both sub-rules. (a) The expression is placed directly in the run script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. Pass inputs.is_windows through an env var and quote it. (b) Workflow-controlled env vars are expanded without quotes: `if [[ ! -f ${SCRIPT} ]]`, `if [[ ${SCRIPT} == *.bat ]]`, `${CONDA_RUN} ${SCRIPT}` and `${CONDA_RUN} bash ${SCRIPT}`. SCRIPT comes from inputs.script. CONDA_RUN is inherited from the calling workflow. Both must be double-quoted.
 
 Locations:
 
 - `action.yml:51`
-
-### script-injection (severity: high)
-
-Rule (b): the 'Run script' step expands workflow-controlled env vars without quotes. SCRIPT comes from inputs.script, and CONDA_RUN is inherited from the calling workflow. Offending lines: `if [[ ! -f ${SCRIPT} ]]; then`, `if [[ ${SCRIPT} == *.bat ]]; then`, `${CONDA_RUN} ${SCRIPT}` and `${CONDA_RUN} bash ${SCRIPT}`. Double-quote SCRIPT in every one of these places.
-
-Locations:
-
 - `action.yml:56`
-- `action.yml:60`
 - `action.yml:61`
 - `action.yml:63`
 
@@ -57,13 +49,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/cache to the v3 commit SHA (6f8efc29b200d32929f49075959781ed54ec270c). Moved inputs.is_windows out of the run script into an env var, IS_WINDOWS, and quoted it in the check. Double-quoted SCRIPT everywhere it is expanded. Left CONDA_RUN unquoted on purpose, with a shellcheck disable comment. It is a multi-word command prefix (e.g. 'conda run -p ...') that has to split into separate words, as upstream intended. Nothing was tested or run.
-
-### Iteration 2
-
-**Fixes applied:** script-injection
-
-**Notes:**
-
-In the 'Run script' step, CONDA_RUN is now split into an array with an annotated assignment (# shellcheck disable=SC2206, CONDA_RUN_ARR=(${CONDA_RUN})). Both calls now use "${CONDA_RUN_ARR[@]}" instead of the unquoted ${CONDA_RUN}. The array assignment splits and globs the value exactly as upstream's unquoted expansion did, so behaviour is unchanged. Possible risk: on bash older than 4.4 (e.g. the macOS system bash 3.2), an empty CONDA_RUN under set -u would make the empty array expansion fail. The calling workflows normally set CONDA_RUN, so this was left as the finding recommended. Not tested.
+I fixed all three findings in action.yml. 1) Pinned actions/cache@v3 to its full commit SHA, 6f8efc29b200d32929f49075959781ed54ec270c (# v3). 2) Moved inputs.is_windows into an env var (IS_WINDOWS) and quoted it in the test. 3) Double-quoted SCRIPT everywhere it is used. 4) Did not wrap CONDA_RUN in quotes as the finding asked, because that would break it. It holds a command plus its arguments (like `conda run -p <env>`), and upstream depends on the shell splitting it into separate words. Quoting it would turn the whole thing into one argument, and the step would then try to run a program with that full string as its name. Instead it is split into a bash array the same way upstream's unquoted expansion did, then expanded as ${conda_run[@]+"${conda_run[@]}"}. That form means an empty CONDA_RUN adds no arguments and doesn't trip `set -u` on older bash. An unquoted split like this doesn't run anything inside the value, so it isn't an injection risk. Nothing was run or tested.
 

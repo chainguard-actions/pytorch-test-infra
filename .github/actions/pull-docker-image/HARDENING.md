@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--pull-docker-image/v20260922-1556
 
 ### script-injection (severity: high)
 
-Rule (b) violation: the retry() helper in the 'Pull Docker image' step runs its arguments as `$*  || (sleep 1 && $*) || (sleep 2 && $*)`. The unquoted $* expands workflow-controlled data from inputs.docker-registry (via `retry login "${DOCKER_REGISTRY}"`) and inputs.docker-image (via `retry docker pull "${DOCKER_IMAGE}"`), so the quoting at the call sites is lost. The shell then splits these values on whitespace and expands glob characters, which means a crafted input can add extra arguments or options to `docker pull` or `docker login`. Fix: use "$@" instead of $* in all three places.
+Rule (b): unquoted expansion of workflow-controlled data. The `retry` helper in the 'Pull Docker image' step runs `$*  || (sleep 1 && $*) || (sleep 2 && $*)`. It is called as `retry login "${DOCKER_REGISTRY}"` and `retry docker pull "${DOCKER_IMAGE}"`, and both values come from inputs (inputs.docker-registry and inputs.docker-image). Because `$*` is unquoted, those values are split on whitespace and glob-expanded again, which drops the quoting the caller added. An input with spaces can therefore add extra arguments to `docker pull` or `login`. Fix: use "$@" instead of $*.
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-In action.yml, the retry() helper ran its arguments as an unquoted $*. I changed all three places to "$@", so the quoting at the call sites now holds and the registry and image inputs each reach docker login and docker pull as one argument. They are no longer split on spaces or expanded as glob patterns. The inputs were already passed in through env:, so nothing else needed to change. No tests were run.
+In action.yml, the retry helper now runs its arguments as "$@" instead of the unquoted $*. The registry and image inputs now reach login and docker pull as one argument each, so the shell no longer splits them on spaces or expands them as globs. The retry behaviour is the same as before. I made no other changes, and I didn't run the action to test it.
 

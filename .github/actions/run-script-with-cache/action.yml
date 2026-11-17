@@ -71,16 +71,18 @@ runs:
         fi
         source "${BUILD_ENV_FILE}"
 
+        # CONDA_RUN is a command prefix (e.g. "conda run -p <env>"); split it into
+        # words exactly as upstream's unquoted expansion did.
+        # shellcheck disable=SC2206
+        conda_run=(${CONDA_RUN:-})
+
         if [[ ! -f "${SCRIPT}" ]]; then
           echo "::error::Specified script file (${SCRIPT}) not found, not going execute it"
           exit 1
         else
-          # Split CONDA_RUN on whitespace (same as upstream's unquoted expansion)
-          # shellcheck disable=SC2206
-          CONDA_RUN_ARR=(${CONDA_RUN})
           if [[ "${SCRIPT}" == *.bat ]]; then
-            "${CONDA_RUN_ARR[@]}" "${SCRIPT}"
+            ${conda_run[@]+"${conda_run[@]}"} "${SCRIPT}"
           else
-            "${CONDA_RUN_ARR[@]}" bash "${SCRIPT}"
+            ${conda_run[@]+"${conda_run[@]}"} bash "${SCRIPT}"
           fi
         fi
