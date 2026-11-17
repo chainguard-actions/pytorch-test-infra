@@ -10,25 +10,5 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--pull-docker-image/v20261109-192709** was hardened automatically. 1 finding(s) were identified and resolved across 1 iteration(s).
-
-## Findings Fixed
-
-### script-injection (severity: high)
-
-Rule (b): the retry() helper expands its arguments unquoted with `$*  || (sleep 1 && $*) || (sleep 2 && $*)`. It is called as `retry login "${DOCKER_REGISTRY}"` and `retry docker pull "${DOCKER_IMAGE}"`, and both values come from inputs (inputs.docker-registry, inputs.docker-image). The unquoted $* splits those values on whitespace and expands globs, so an input can add extra arguments or options to the commands (for example `img --some-flag`). That undoes the quoting at the call site. Use "$@" instead.
-
-Locations:
-
-- `action.yml:30`
-
-## Iteration Notes
-
-### Iteration 1
-
-**Fixes applied:** script-injection
-
-**Notes:**
-
-Changed retry() in action.yml so it expands its arguments as "$@" instead of the unquoted $*. Each argument now reaches the command as one word, so a docker-image or docker-registry value can't be split into extra arguments or options. The callers pass single values, so they work as before.
+Action **pytorch--test-infra--.github--actions--pull-docker-image/v20261109-192709** was analyzed against the hardening policy and no findings were identified: the upstream action already passes every check.
 

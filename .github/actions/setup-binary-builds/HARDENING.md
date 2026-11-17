@@ -16,16 +16,16 @@ Action **pytorch--test-infra--.github--actions--setup-binary-builds/v20261109-19
 
 ### unpinned-uses (severity: high)
 
-action.yml pins composite steps to tags instead of full commit SHAs: 'uses: actions/checkout@v4' and 'uses: conda-incubator/setup-miniconda@v3.1.1'.
+action.yml uses action refs pinned to a tag, not a full commit SHA: 'uses: actions/checkout@v4' and 'uses: conda-incubator/setup-miniconda@v3.1.1'.
 
 Locations:
 
 - `action.yml:55`
-- `action.yml:90`
+- `action.yml:92`
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Log Available Webhook Fields' step puts GitHub expressions straight into the run: script: echo "${{ github.ref_name }}", echo "${{ github.event.ref }}", echo "${{ github.ref }}", echo "${{ github.base_ref }}". A crafted ref or branch name could inject shell commands. Read them from env vars like $GITHUB_REF_NAME instead.
+Rule (a): the 'Log Available Webhook Fields' step puts GitHub expressions straight into its run: script: echo "${{ github.ref_name }}", echo "${{ github.event.ref }}", echo "${{ github.ref }}", echo "${{ github.base_ref }}". The ref values can be chosen by an attacker (branch or tag names), so they could inject shell commands.
 
 Locations:
 
@@ -33,19 +33,19 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (b): the 'Setup conda environment for build' step expands a value from inputs.python-version without quotes: 'case $PYTHON_VERSION in'. It should be 'case "$PYTHON_VERSION" in'.
+Rule (b): in the 'Setup conda environment for build' step, the env var PYTHON_VERSION comes from inputs.python-version and is expanded without quotes in 'case $PYTHON_VERSION in'. It should be written as 'case "$PYTHON_VERSION" in'. The shellcheck SC2153 directive does not cover this case.
 
 Locations:
 
-- `action.yml:145`
+- `action.yml:153`
 
 ### github-env-injection (severity: high)
 
-The 'Set artifact name' step writes 'echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}"' with no sanitization. CU_VERSION and ARCH come from inputs, SHORT_PYTHON_VERSION comes from inputs.python-version, and REPOSITORY/REF are env vars inherited from the calling workflow. None of them pass through printf '%s' ... | tr -d '\n\r' first, so a value containing a newline can inject arbitrary environment variables.
+The 'Set artifact name' step writes 'echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}"' with no sanitization. CU_VERSION and ARCH come from inputs, SHORT_PYTHON_VERSION is derived from inputs.python-version, and REPOSITORY and REF are env vars inherited from the calling workflow. None of these pass through printf '%s' ... | tr -d '\n\r' first, so a newline in any of them could inject extra environment variables.
 
 Locations:
 
-- `action.yml:87`
+- `action.yml:89`
 
 ## Iteration Notes
 
@@ -55,10 +55,5 @@ Locations:
 
 **Notes:**
 
-All four findings are fixed in action.yml.
-
-- **unpinned-uses:** pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4) and conda-incubator/setup-miniconda to 505e6394dae86d6a5c7fbb6e3fb8938e3e863830 (v3.1.1). The SHAs came from lookup_action_sha, and each line keeps its tag as a trailing comment.
-- **script-injection (Log Available Webhook Fields step):** the four expressions (github.ref_name, github.event.ref, github.ref, github.base_ref) now come in through the step's env: block as GH_CTX_* variables, and the script echoes those quoted variables. The step still logs the same values.
-- **script-injection (Setup conda environment for build step):** `case $PYTHON_VERSION in` is now `case "$PYTHON_VERSION" in`.
-- **github-env-injection (Set artifact name step):** the artifact name is built the same way as before, passed through `printf '%s' ... | tr -d '\n\r'`, and then written to GITHUB_ENV, so a newline in any part of it can no longer add extra environment variables. The step uses `set -euxo pipefail`, so a failing command still stops it.
+Pinned actions/checkout to 11d5960a… (v4) and setup-miniconda to 505e6394… (v3.1.1). Moved github.ref_name, event.ref, ref and base_ref into env vars in the logging step. Quoted $PYTHON_VERSION in the case statement. In 'Set artifact name' the ARTIFACT_NAME value is now built first, then passed through printf '%s' | tr -d '\n\r' before it is written to GITHUB_ENV.
 

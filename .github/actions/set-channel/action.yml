@@ -29,7 +29,7 @@ runs:
       run: |
         set -euxo pipefail
         # reference ends with an RC suffix
-        if [[ ${GITHUB_REF_NAME} = *-rc[0-9]* ]]; then
+        if [[ "${GITHUB_REF_NAME}" = *-rc[0-9]* ]]; then
           echo "CHANNEL=test" >> "${GITHUB_ENV}"
         fi
     - name: Set Release CHANNEL for release

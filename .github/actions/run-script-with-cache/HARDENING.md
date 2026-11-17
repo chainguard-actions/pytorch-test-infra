@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20261109-192709** was hardened automatically. 3 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20261109-192709** was hardened automatically. 4 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-action.yml composite step uses a mutable tag instead of a full 40-char commit SHA: `uses: actions/cache@v3`.
+action.yml references an action by a mutable tag instead of a 40-character commit SHA: `uses: actions/cache@v3`.
 
 Locations:
 
@@ -24,11 +24,18 @@ Locations:
 
 ### script-injection (severity: high)
 
-Step 'Run script' violates rule (a): a GitHub Actions expression is placed directly in the run script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. The value of inputs.is_windows is pasted into the script before bash runs, so it can inject commands. Move it into an env var (e.g. IS_WINDOWS: ${{ inputs.is_windows }}) and use "$IS_WINDOWS". The same step also violates rule (b): the workflow-controlled env vars SCRIPT (from inputs.script) and CONDA_RUN (inherited from the calling workflow) are expanded without quotes: `if [[ ! -f ${SCRIPT} ]]` (line 56), `if [[ ${SCRIPT} == *.bat ]]` (line 60), `${CONDA_RUN} ${SCRIPT}` (line 61), `${CONDA_RUN} bash ${SCRIPT}` (line 63). Quote them, e.g. "$SCRIPT".
+Rule (a): the 'Run script' step puts a GitHub expression straight into the run script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. The input should go into an env var (e.g. IS_WINDOWS) and be referenced as "$IS_WINDOWS".
 
 Locations:
 
 - `action.yml:51`
+
+### script-injection (severity: high)
+
+Rule (b): in the 'Run script' step, the env var SCRIPT (set from inputs.script) and the inherited env var CONDA_RUN are expanded without double quotes: `if [[ ! -f ${SCRIPT} ]]`, `if [[ ${SCRIPT} == *.bat ]]`, `${CONDA_RUN} ${SCRIPT}` and `${CONDA_RUN} bash ${SCRIPT}`. Both come from the calling workflow and need double quotes.
+
+Locations:
+
 - `action.yml:56`
 - `action.yml:60`
 - `action.yml:61`
@@ -50,11 +57,10 @@ Locations:
 
 **Notes:**
 
-I pinned actions/cache@v3 to its full commit SHA, 6f8efc29b200d32929f49075959781ed54ec270c, and kept '# v3' as a comment.
+I fixed all four findings, all in action.yml. Nothing has been run or tested yet.
 
-I moved inputs.is_windows out of the run script into an IS_WINDOWS environment variable, and SCRIPT is now quoted everywhere it is used.
-
-I did not simply quote CONDA_RUN, though the finding suggests it. It holds a command prefix such as 'conda run -p <env>', and quoting it would pass that as one word, so the command would break. Instead it goes into a bash array assigned unquoted, which splits it the same way upstream's unquoted expansion did. The array is expanded with the ${arr[@]+"${arr[@]}"} pattern, so an empty or unset CONDA_RUN does not trigger set -u's unbound-variable error in older bash 3.2 (macOS runners). Splitting a variable this way does not run anything inside its value, so it is not an injection risk.
-
-Nothing was run or tested after these edits.
+- **Unpinned action:** `actions/cache@v3` is now pinned to the commit SHA that v3 currently points to, `6f8efc29b200d32929f49075959781ed54ec270c`, with a `# v3` comment so it stays readable.
+- **Inline expression:** `inputs.is_windows` is now passed in through `env:` as `IS_WINDOWS` and checked as `"${IS_WINDOWS}"`, so it is no longer pasted straight into the script.
+- **Unquoted variables:** every use of `SCRIPT` is now in double quotes.
+- **`CONDA_RUN`:** I did not simply quote this one, even though the finding asks for it. It holds a command prefix (something like `conda run -p <env>`), and quoting it would pass the whole thing as one word, so the script would try to run a program with that full name and fail. Instead it is split into an array the same way upstream split it, by assigning it unquoted, and run as `${conda_run[@]+"${conda_run[@]}"}`. That form is safe under `set -u` (strict mode errors on unset variables) and drops out entirely when `CONDA_RUN` is empty. An unquoted expansion only splits on spaces and expands wildcards; it doesn't run anything inside the value, so this is not an injection risk. A scanner that wants every variable quoted may still flag this line.
 

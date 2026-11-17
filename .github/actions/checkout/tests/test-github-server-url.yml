@@ -1,4 +1,4 @@
-name: Test explicit github-server-url
+name: Test explicit github-server-url and ssh-known-hosts
 on:
   workflow_dispatch:
 jobs:
@@ -13,7 +13,9 @@ jobs:
           ref: main
           path: server-url-target
           github-server-url: https://github.com
-      - name: Assert checkout from explicit server URL succeeded
+          # ssh-known-hosts is only applied when ssh-key is set; token auth is used here
+          ssh-known-hosts: "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+      - name: Assert checkout via explicit server URL succeeded
         env:
           COMMIT: ${{ steps.action.outputs.commit }}
         run: |
@@ -29,8 +31,8 @@ jobs:
           fi
           URL="$(git -C "$DIR" remote get-url origin)"
           echo "origin: $URL"
-          case "$URL" in
-            https://github.com/actions/checkout*) ;;
-            *) echo "FAIL: origin URL does not use github.com server"; exit 1 ;;
-          esac
+          if ! echo "$URL" | grep -q '^https://github.com/actions/checkout'; then
+            echo "FAIL: origin URL does not use the given server URL"
+            exit 1
+          fi
           echo "PASS"

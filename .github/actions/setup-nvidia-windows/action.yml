@@ -27,7 +27,7 @@ runs:
       env:
         ACTION_PATH: ${{ github.action_path }}
       run: |
-        "%ACTION_PATH%\..\..\scripts\driver_update.bat"
+        call "%ACTION_PATH%\..\..\scripts\driver_update.bat"
     - name: Verify NVIDIA driver
       shell: cmd
       run: nvidia-smi

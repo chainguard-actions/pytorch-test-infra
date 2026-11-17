@@ -72,9 +72,9 @@ runs:
         # Convert long python version (e.g. 3.10.19) to short major.minor version
         # (e.g. 3.10), while preserving special suffixes like "t" (e.g. 3.13t, 3.14t)
         SHORT_PYTHON_VERSION=$(echo "${PYTHON_VERSION}" | sed -E 's/^([0-9]+\.[0-9]+[a-z]?).*/\1/')
-        ARTIFACT_NAME_RAW="${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}"
-        ARTIFACT_NAME_SAFE=$(printf '%s' "${ARTIFACT_NAME_RAW}" | tr -d '\n\r')
-        echo "ARTIFACT_NAME=${ARTIFACT_NAME_SAFE}" >> "${GITHUB_ENV}"
+        RAW_ARTIFACT_NAME="${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}"
+        SAFE_ARTIFACT_NAME=$(printf '%s' "${RAW_ARTIFACT_NAME}" | tr -d '\n\r')
+        echo "ARTIFACT_NAME=${SAFE_ARTIFACT_NAME}" >> "${GITHUB_ENV}"
 
     # Need to checkout the target repository to run pkg-helpers
     - uses: chainguard-actions/actions-checkout@31bbccf724702f8a0dc7a3ed7db8fcca2066babc # v4
@@ -95,7 +95,7 @@ runs:
       run: |
         set -ex
 
-        python -m pip install ${GITHUB_WORKSPACE}/test-infra/tools/pkg-helpers
+        python -m pip install "${GITHUB_WORKSPACE}/test-infra/tools/pkg-helpers"
 
         BUILD_ENV_FILE="${RUNNER_TEMP}/build_env_${GITHUB_RUN_ID}"
         python -m pytorch_pkg_helpers > "${BUILD_ENV_FILE}"

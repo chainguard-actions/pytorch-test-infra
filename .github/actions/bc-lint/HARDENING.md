@@ -14,44 +14,38 @@ Action **pytorch--test-infra--.github--actions--bc-lint/v20261109-192709** was h
 
 ## Findings Fixed
 
-### script-injection (severity: high)
-
-Rule (a): the 'Merge PR changes onto base' step puts ${{ inputs.head_sha }} and ${{ inputs.base_sha }} directly into the run: script, e.g. `git fetch origin "${{ inputs.head_sha }}"`, `git reset --hard "${{ inputs.base_sha }}"` and `git merge "${{ inputs.head_sha }}"`. The double quotes don't help, because the value is substituted into the script text before the shell runs. Fix: pass the inputs through env: variables (e.g. HEAD_SHA, BASE_SHA) and use "$HEAD_SHA" and "$BASE_SHA" in the script.
-
-Locations:
-
-- `action.yml:51`
-- `action.yml:52`
-- `action.yml:53`
-- `action.yml:54`
-
-### script-injection (severity: high)
-
-Rule (a): the 'Build and run BC-linter' step puts expressions directly into the run: script without quotes: `--base-commit=${{ inputs.base_sha }}`, `--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}`, `${{ inputs.suppression == 'true' && '--suppressed' || '' }}` and `${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}`. config_dir and base_sha are free-text values supplied by the caller. Fix: pass them through env: variables and quote each one, using the ${VAR:+"$VAR"} form for the optional arguments.
-
-Locations:
-
-- `action.yml:71`
-- `action.yml:72`
-- `action.yml:73`
-- `action.yml:74`
-
-### script-injection (severity: high)
-
-Rule (a): the 'Display documentation link if failed' step puts an input directly into the script: `echo "${{ inputs.docs_link }}"`. Fix: pass it through an env: variable and use echo "$DOCS_LINK".
-
-Locations:
-
-- `action.yml:80`
-
 ### unpinned-uses (severity: high)
 
-Two composite steps use a version tag instead of a full commit SHA: `uses: actions/checkout@v4` (line 30, the pytorch/test-infra checkout) and `uses: actions/checkout@v4` (line 36, the repo checkout). Pin both to a 40-character commit SHA.
+Composite action steps reference actions by mutable tag rather than full commit SHA: line 30 'uses: actions/checkout@v4' and line 36 'uses: actions/checkout@v4'.
 
 Locations:
 
 - `action.yml:30`
 - `action.yml:36`
+
+### script-injection (severity: high)
+
+Rule (a): step 'Merge PR changes onto base' interpolates expressions directly into the run script: 'git fetch origin "${{ inputs.head_sha }}"', 'git fetch origin "${{ inputs.base_sha }}"', 'git reset --hard "${{ inputs.base_sha }}"', 'git merge "${{ inputs.head_sha }}" || MERGE_CONFLICT=1'.
+
+Locations:
+
+- `action.yml:51`
+
+### script-injection (severity: high)
+
+Rule (a): step 'Build and run BC-linter' interpolates expressions directly and unquoted into the run script: '--base-commit=${{ inputs.base_sha }}', '--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}', '${{ inputs.suppression == 'true' && '--suppressed' || '' }}', '${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}'.
+
+Locations:
+
+- `action.yml:71`
+
+### script-injection (severity: high)
+
+Rule (a): step 'Display documentation link if failed' interpolates an input directly into the run script: 'echo "${{ inputs.docs_link }}"'.
+
+Locations:
+
+- `action.yml:80`
 
 ### static-inline-injection (severity: high)
 
@@ -113,9 +107,9 @@ Locations:
 
 ### Iteration 1
 
-**Fixes applied:** script-injection, static-inline-injection, unpinned-uses
+**Fixes applied:** unpinned-uses, script-injection, static-inline-injection
 
 **Notes:**
 
-Pinned both actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262. Moved head_sha, base_sha, new_head_sha, suppression flag, config_dir and docs_link into step env: blocks and referenced them as quoted shell vars; optional args use ${VAR:+...} so they drop out when empty, preserving upstream argument behavior.
+Pinned both actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262. Moved all ${{ }} expressions in run: blocks (head_sha, base_sha, new_head_sha, suppression, config_dir, docs_link) into step env: and referenced them as quoted shell variables. The optional --suppressed and --config-dir flags are built with a bash array, guarded so the array is safe to expand under set -u, so nothing is passed when they are unset. Note: the action itself is unchanged by design; I didn't run it to check.
 

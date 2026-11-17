@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-nvidia-windows/v20261109-1
 
 ### script-injection (severity: high)
 
-Rule (a): a GitHub Actions expression is placed straight into the run: script of the 'Update NVIDIA driver' step: `${{ github.action_path }}\..\..\scripts\driver_update.bat`. The value is pasted into the cmd script before the shell runs, so special characters in the path are parsed as commands. Fix: pass the path through an env var (for example, env: ACTION_PATH: ${{ github.action_path }}) and call it as "%ACTION_PATH%\..\..\scripts\driver_update.bat". Under cmd, the runner also sets GITHUB_ACTION_PATH, so "%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat" works too.
+Rule (a) violation: the GitHub Actions expression is placed directly inside a run: script (shell: cmd) in the 'Update NVIDIA driver' step. Offending line: `${{ github.action_path }}\..\..\scripts\driver_update.bat`. Fix: pass the value through an env var (e.g. ACTION_PATH: ${{ github.action_path }}) and reference it quoted in the script, e.g. `call "%ACTION_PATH%\..\..\scripts\driver_update.bat"`. Alternatively, use the runner-provided GITHUB_ACTION_PATH env var: `call "%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat"`.
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-Moved ${{ github.action_path }} out of the cmd run: script in the 'Update NVIDIA driver' step. It is now set in the step's env: as ACTION_PATH, and the step runs "%ACTION_PATH%\..\..\scripts\driver_update.bat". The path is quoted so a path with spaces still runs. The script is still invoked directly, the same way upstream did. Nothing else changed.
+I fixed the script-injection finding in the 'Update NVIDIA driver' step of action.yml. The step runs under shell: cmd, so I moved ${{ github.action_path }} into the step's env as ACTION_PATH. The script now calls it by its quoted cmd path: call "%ACTION_PATH%\..\..\scripts\driver_update.bat". This line is the last one in the script, so using `call` gives the same exit code as upstream running the .bat directly. I haven't run anything. The repo's test fakes cmd on Linux and only checks that 'driver_update.bat' and 'scripts' appear in the command it was given, so a real Windows runner is the only thing that will confirm %ACTION_PATH% expands and the script starts.
 

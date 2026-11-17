@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--export-matrix-variables/v2026110
 
 ### script-injection (severity: high)
 
-Rule (b): the env var TARGET_OS comes from inputs.target-os, which the calling workflow controls, and it is expanded without double quotes in the 'Export variables' step: `if [[ ${TARGET_OS} != "linux" ]]; then` and `if [[ ${TARGET_OS} == 'windows' ]]; then`. Quote it as "${TARGET_OS}".
+Rule (b) violation: the env var TARGET_OS comes from inputs.target-os, which the calling workflow controls, but it is expanded without double quotes in the 'Export variables' step: `if [[ ${TARGET_OS} != "linux" ]]; then` and `if [[ ${TARGET_OS} == 'windows' ]]; then`. Quote it as "${TARGET_OS}".
 
 Locations:
 
@@ -31,5 +31,5 @@ Locations:
 
 **Notes:**
 
-Added double quotes around ${TARGET_OS} in both [[ ]] tests in action.yml (lines 33 and 39). While there, I made two small changes that keep behaviour the same. ADD_QUOTES_AROUND_VAR is now passed as ${ADD_QUOTES_AROUND_VAR:+"$ADD_QUOTES_AROUND_VAR"}, so the flag is still dropped when the variable is empty. The ${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID} redirect targets are now quoted. Nothing was run to test these changes.
+In the 'Export variables' step of action.yml, both `[[ ... ]]` comparisons now quote ${TARGET_OS}. The step behaves exactly as before. I also quoted the redirect target path built from RUNNER_TEMP and GITHUB_RUN_ID; this was not part of the finding and is only an extra precaution. I left ${ADD_QUOTES_AROUND_VAR} unquoted on purpose: the script sets it itself to either an empty string or one fixed flag, so no outside input reaches it. Quoting it would hand the Python script an empty argument whenever it is empty. Nothing was run or tested after the edits.
 

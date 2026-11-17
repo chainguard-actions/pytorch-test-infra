@@ -77,23 +77,25 @@ runs:
       shell: bash
       working-directory: ${{ inputs.repository }}
       run: |
-        RUNNER_ARTIFACT_DIR="${RUNNER_TEMP}/artifacts"
+        SAFE_RUNNER_TEMP="$(printf '%s' "${RUNNER_TEMP}" | tr -d '\n\r')"
+
+        RUNNER_ARTIFACT_DIR="${SAFE_RUNNER_TEMP}/artifacts"
         sudo rm -rf "${RUNNER_ARTIFACT_DIR}"
         mkdir -p "${RUNNER_ARTIFACT_DIR}"
-        safe_artifact_dir=$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')
-        echo "RUNNER_ARTIFACT_DIR=${safe_artifact_dir}" >> "${GITHUB_ENV}"
+        safe="$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')"
+        echo "RUNNER_ARTIFACT_DIR=${safe}" >> "${GITHUB_ENV}"
 
-        RUNNER_TEST_RESULTS_DIR="${RUNNER_TEMP}/test-results"
+        RUNNER_TEST_RESULTS_DIR="${SAFE_RUNNER_TEMP}/test-results"
         sudo rm -rf "${RUNNER_TEST_RESULTS_DIR}"
         mkdir -p "${RUNNER_TEST_RESULTS_DIR}"
-        safe_test_results_dir=$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')
-        echo "RUNNER_TEST_RESULTS_DIR=${safe_test_results_dir}" >> "${GITHUB_ENV}"
+        safe="$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')"
+        echo "RUNNER_TEST_RESULTS_DIR=${safe}" >> "${GITHUB_ENV}"
 
-        RUNNER_DOCS_DIR="${RUNNER_TEMP}/docs"
+        RUNNER_DOCS_DIR="${SAFE_RUNNER_TEMP}/docs"
         sudo rm -rf "${RUNNER_DOCS_DIR}"
         mkdir -p "${RUNNER_DOCS_DIR}"
-        safe_docs_dir=$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')
-        echo "RUNNER_DOCS_DIR=${safe_docs_dir}" >> "${GITHUB_ENV}"
+        safe="$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')"
+        echo "RUNNER_DOCS_DIR=${safe}" >> "${GITHUB_ENV}"
 
     - name: Needs nvidia driver?
       if: ${{ steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false' }}
@@ -116,11 +118,11 @@ runs:
       run: |
         if compgen -G "/dev/nvidia[0-9]" ; then
           echo "Found NVIDIA GPU device in /dev/nvidiaX, exporting GPU_FLAG"
-          # GPU_FLAG is a constant consumed by downstream workflows as an unquoted
-          # ${GPU_FLAG} (word-split into separate docker args). Each token is written
-          # separately; the value written to GITHUB_ENV is unchanged from upstream.
-          gpu_args=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
-          printf 'GPU_FLAG=%s\n' "${gpu_args[*]}" >> "${GITHUB_ENV}"
+          # Each docker argument is kept as a separate array element; the exported
+          # GPU_FLAG string is identical to upstream/setup-nvidia for compatibility
+          # with existing consumers, which word-split it into separate arguments.
+          gpu_flag_args=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
+          printf 'GPU_FLAG=%s\n' "${gpu_flag_args[*]}" >> "${GITHUB_ENV}"
         else
           echo "No NVIDIA GPU device found in /dev/nvidiaX, not exporting GPU_FLAG"
         fi

@@ -86,17 +86,23 @@ runs:
       env:
         BASE_SHA: ${{ inputs.base_sha }}
         NEW_HEAD_SHA: ${{ steps.merge_changes.outputs.new_head_sha }}
-        SUPPRESSED_FLAG: ${{ inputs.suppression == 'true' && '--suppressed' || '' }}
+        SUPPRESSION: ${{ inputs.suppression }}
         CONFIG_DIR: ${{ inputs.config_dir }}
       run: |
         set -eux
+        extra_args=()
+        if [ "$SUPPRESSION" = "true" ]; then
+          extra_args+=(--suppressed)
+        fi
+        if [ -n "$CONFIG_DIR" ]; then
+          extra_args+=("--config-dir=$CONFIG_DIR")
+        fi
         python3 -m pip install -r ../_test-infra/tools/stronghold/requirements.runtime.txt
         ../_test-infra/tools/stronghold/bin/build-check-api-compatibility
         ../_test-infra/tools/stronghold/bin/check-api-compatibility \
-            "--base-commit=${BASE_SHA}" \
-            "--head-commit=${NEW_HEAD_SHA}" \
-            ${SUPPRESSED_FLAG:+"$SUPPRESSED_FLAG"} \
-            ${CONFIG_DIR:+"--config-dir=$CONFIG_DIR"}
+            "--base-commit=$BASE_SHA" \
+            "--head-commit=$NEW_HEAD_SHA" \
+            ${extra_args[@]+"${extra_args[@]}"}
 
     - name: Display documentation link if failed
       if: ${{ failure() && inputs.docs_link }}

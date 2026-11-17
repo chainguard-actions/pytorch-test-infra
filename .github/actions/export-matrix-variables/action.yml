@@ -57,10 +57,10 @@ runs:
           source /c/Jenkins/Miniconda3/etc/profile.d/conda.sh
           conda activate base
           python \
-            test-infra/.github/scripts/export_matrix_variables.py ${ADD_QUOTES_AROUND_VAR:+"$ADD_QUOTES_AROUND_VAR"}  \
+            test-infra/.github/scripts/export_matrix_variables.py ${ADD_QUOTES_AROUND_VAR}  \
             --input-file "${RUNNER_TEMP}"/matrix_to_export.json  >> "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
         else
           python3 \
-            test-infra/.github/scripts/export_matrix_variables.py ${ADD_QUOTES_AROUND_VAR:+"$ADD_QUOTES_AROUND_VAR"} \
+            test-infra/.github/scripts/export_matrix_variables.py ${ADD_QUOTES_AROUND_VAR} \
             --input-file "${RUNNER_TEMP}"/matrix_to_export.json >> "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
         fi

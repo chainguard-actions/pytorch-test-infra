@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--clang-tidy-upload/v20261109-1927
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Check if binaries have changed' step puts ${{ inputs.platform }} and ${{ inputs.version }} straight into its run: script, e.g. `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-tidy"` and `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-format"`. Move them into env: variables (e.g. PLATFORM, VERSION) and use "$PLATFORM/$VERSION/..." with double quotes.
+Rule (a): the 'Check if binaries have changed' run: block puts ${{ inputs.platform }} and ${{ inputs.version }} straight into the shell script, e.g. `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-tidy"` and `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-format"`. Fix: move both inputs into env: variables and use them as "$PLATFORM" and "$VERSION" in double quotes.
 
 Locations:
 
@@ -25,15 +25,15 @@ Locations:
 
 ### unpinned-uses (severity: high)
 
-These composite action steps pin uses: to a mutable tag instead of a 40-character commit SHA: `uses: aws-actions/configure-aws-credentials@v4` (line 36), `uses: seemethere/upload-artifact-s3@v5` (lines 45, 54), `uses: actions/upload-artifact@v6` (lines 64, 72).
+These uses: references point to a mutable tag instead of a full 40-character commit SHA: `uses: aws-actions/configure-aws-credentials@v4` (line 36), `uses: seemethere/upload-artifact-s3@v5` (lines 44, 53) and `uses: actions/upload-artifact@v6` (lines 63, 71).
 
 Locations:
 
 - `action.yml:36`
-- `action.yml:45`
-- `action.yml:54`
-- `action.yml:64`
-- `action.yml:72`
+- `action.yml:44`
+- `action.yml:53`
+- `action.yml:63`
+- `action.yml:71`
 
 ### static-inline-injection (severity: high)
 
@@ -75,5 +75,5 @@ Locations:
 
 **Notes:**
 
-In action.yml, the 'Check if binaries have changed' step no longer puts inputs.platform and inputs.version straight into its script. They now come in through the step's env: block as PLATFORM and VERSION, and the script uses them as "$PLATFORM/$VERSION/...". I also pinned every uses: to a full commit SHA, found with the SHA lookup tool, and kept the tag as a comment: aws-actions/configure-aws-credentials v4 -> 7474bc46..., seemethere/upload-artifact-s3 v5 -> baba72d0... (both steps), actions/upload-artifact v6 -> b7c566a7... (both steps). The expressions in with: inputs are not shell code, so I left them as they were. I haven't run the action or the analysis again to confirm the findings are gone.
+I moved inputs.platform and inputs.version out of the 'Check if binaries have changed' script and into the step's env: block as PLATFORM and VERSION. The script now reads them in double quotes. I also pinned all five uses: lines to full commit SHAs and kept the tag as a trailing comment: configure-aws-credentials v4, upload-artifact-s3 v5 (twice) and upload-artifact v6 (twice). The ${{ }} expressions left in with:/if: fields are not run by a shell, so I didn't change them. Nothing was run to test these edits.
 

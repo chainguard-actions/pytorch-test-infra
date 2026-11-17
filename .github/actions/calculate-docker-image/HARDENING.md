@@ -10,39 +10,48 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--calculate-docker-image/v20261109-192709** was hardened automatically. 3 finding(s) were identified and resolved across 2 iteration(s).
+Action **pytorch--test-infra--.github--actions--calculate-docker-image/v20261109-192709** was hardened automatically. 4 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### github-env-injection (severity: high)
 
-Step 'Calculate docker image' (composite run block) writes input-derived values to $GITHUB_OUTPUT with no `printf '%s' ... | tr -d '\n\r'` sanitization. Examples: `echo "docker-image=${DOCKER_IMAGE_NAME}" >> "${GITHUB_OUTPUT}"` (DOCKER_IMAGE_NAME comes from inputs.docker-image-name), `echo "docker-tag=${DOCKER_TAG}"` (derived from the image name or from inputs.custom-tag-prefix), `echo "docker-image=${DOCKER_REGISTRY}/${REPO_NAME}/${DOCKER_IMAGE_NAME}:${DOCKER_TAG}"` (built from inputs.docker-registry, inputs.repo-name and github.event.repository.name), and `echo "custom-tag-prefix=${CUSTOM_TAG_PREFIX}"`. A newline in any of these values can inject extra step outputs, which later steps use in `if:` conditions and for the docker build/push.
+Step 'Calculate docker image' writes values built from inputs to $GITHUB_OUTPUT without running them through `printf '%s' ... | tr -d '\n\r'` first. The values come from inputs.docker-image-name, inputs.custom-tag-prefix, inputs.docker-registry and inputs.repo-name / github.event.repository.name, passed in as DOCKER_IMAGE_NAME, CUSTOM_TAG_PREFIX, DOCKER_REGISTRY and REPO_NAME, plus DOCKER_TAG, which is derived from them. Example lines: `echo "docker-image=${DOCKER_IMAGE_NAME}" >> "${GITHUB_OUTPUT}"`, `echo "docker-tag=${DOCKER_TAG}" >> "${GITHUB_OUTPUT}"`, `echo "docker-image=${DOCKER_REGISTRY}/${REPO_NAME}/${DOCKER_IMAGE_NAME}:${DOCKER_TAG}" >> "${GITHUB_OUTPUT}"` and `echo "custom-tag-prefix=${CUSTOM_TAG_PREFIX}" >> "${GITHUB_OUTPUT}"`. A value containing a newline can inject extra step outputs.
 
 Locations:
 
-- `action.yml:93`
+- `action.yml:92`
+- `action.yml:102`
 - `action.yml:103`
-- `action.yml:104`
+- `action.yml:115`
 - `action.yml:116`
 - `action.yml:117`
-- `action.yml:118`
 
 ### script-injection (severity: high)
 
-Rule (b): unquoted expansion of workflow-controlled env vars in the shell script that the 'Build docker image' step passes to nick-fields/retry `command:`, which runs it in bash just like a run block. `IMAGE_NAME=$(echo ${DOCKER_IMAGE#"${DOCKER_REGISTRY}/${REPO_NAME}/"} | awk ...)` expands DOCKER_IMAGE (a step output built from inputs) without quotes. `${DOCKER_BUILD_SCRIPT} "${IMAGE_NAME}..." -t "${DOCKER_IMAGE}"` runs the unquoted inputs.docker-build-script value as a command, so the value is split into words and glob-expanded before it runs.
+Rule (b), unquoted expansion of workflow-controlled data. The `retry () { $* || (sleep 1 && $*) || (sleep 2 && $*) }` helper in steps 'Check if image should be built' and 'Login to ECR' expands its arguments unquoted. One of those arguments is "${DOCKER_REGISTRY}" (from inputs.docker-registry), so the value is word-split and glob-expanded again. Use "$@" instead.
 
 Locations:
 
-- `action.yml:247`
-- `action.yml:249`
+- `action.yml:141`
+- `action.yml:212`
+
+### script-injection (severity: high)
+
+Rule (b), unquoted expansion of workflow-controlled data. The shell script passed to nick-fields/retry as `command:` in step 'Build docker image' (run by bash) expands untrusted variables unquoted. `IMAGE_NAME=$(echo ${DOCKER_IMAGE#"${DOCKER_REGISTRY}/${REPO_NAME}/"} | awk ...)` uses a step output and input without quotes. `${DOCKER_BUILD_SCRIPT} "${IMAGE_NAME}..." -t "${DOCKER_IMAGE}"` expands inputs.docker-build-script unquoted in the command position. Quote these expansions, e.g. "${DOCKER_BUILD_SCRIPT}" and "${DOCKER_IMAGE#...}".
+
+Locations:
+
+- `action.yml:246`
+- `action.yml:248`
 
 ### unpinned-uses (severity: high)
 
-A composite action step references an action by tag instead of a full 40-character commit SHA: `uses: nick-fields/retry@v3.0.0`.
+A composite step references an action by a mutable tag instead of a full 40-character commit SHA: `uses: nick-fields/retry@v3.0.0`.
 
 Locations:
 
-- `action.yml:235`
+- `action.yml:234`
 
 ## Iteration Notes
 
@@ -52,21 +61,5 @@ Locations:
 
 **Notes:**
 
-All changes are in action.yml.
-
-1. Output injection: in the 'Calculate docker image' step, every value written to $GITHUB_OUTPUT (docker-image, docker-tag, custom-tag-prefix) is now passed through printf '%s' ... | tr -d '\n\r' first, so a newline can't add extra outputs. Each input is copied into a variable on its own line, so a failing command can't be hidden.
-
-2. Script injection: in the 'Build docker image' retry command, I put double quotes around the DOCKER_IMAGE prefix-strip inside the echo, and around "${DOCKER_BUILD_SCRIPT}" so it runs as one path. Its value is a single script path (default ./build.sh), so quoting doesn't change how a normal value behaves. One side effect: a value containing spaces or glob characters, which upstream would have split or expanded, now runs as one literal path.
-
-3. Pinning: nick-fields/retry is now pinned to 7152eba30c6575329ac0576536151aca5a72780e # v3.0.0, the commit SHA I looked up for that tag.
-
-I haven't run the action or re-run the analysis on these edits.
-
-### Iteration 2
-
-**Fixes applied:** script-injection
-
-**Notes:**
-
-In action.yml, the retry helper in both the 'Check if image should be built' step and the 'Login to ECR' step used an unquoted $*. I changed it to "$@" in both places, so the docker-registry value now reaches login as a single argument, without being split on whitespace or glob-expanded. For the normal registry value, which has no spaces, retry and login behave as before. Nothing was run or tested after the change.
+Added a sanitize() helper (printf '%s' | tr -d '\n\r') in 'Calculate docker image' step; each value is captured into a variable first and the sanitized value is what gets written to $GITHUB_OUTPUT (docker-image, docker-tag, custom-tag-prefix). Changed both retry() helpers from $* to "$@". In the nick-fields/retry command, quoted the DOCKER_IMAGE prefix-strip expansion (printf instead of echo) and quoted "${DOCKER_BUILD_SCRIPT}" in command position (consistent with the existing -f "${DOCKER_BUILD_DIR}/${DOCKER_BUILD_SCRIPT}" check that already treats it as a single path). Pinned nick-fields/retry to 7152eba30c6575329ac0576536151aca5a72780e # v3.0.0.
 

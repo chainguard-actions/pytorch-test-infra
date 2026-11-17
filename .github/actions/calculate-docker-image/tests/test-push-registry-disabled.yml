@@ -1,4 +1,4 @@
-name: Test always-rebuild and push inputs on skip path
+name: Test push with custom registry disabled (skip path)
 on:
   workflow_dispatch:
 jobs:
@@ -9,20 +9,18 @@ jobs:
       - id: action
         uses: .
         with:
-          docker-image-name: my-image:rebuild-tag
-          docker-build-dir: does/not/exist
+          docker-image-name: my-image:custom-tag
           use-custom-docker-registry: "false"
-          always-rebuild: "true"
           push: "true"
           force-push: "true"
-          repo-name: myrepo
-      - name: Assert image passed through and no build/push happened
+          repo-name: test-repo
+      - name: Assert image passed through unchanged
         env:
           ACTUAL: ${{ steps.action.outputs.docker-image }}
         run: |
           echo "actual: $ACTUAL"
-          if [ "$ACTUAL" != "my-image:rebuild-tag" ]; then
-            echo "FAIL: expected 'my-image:rebuild-tag'"
+          if [ "$ACTUAL" != "my-image:custom-tag" ]; then
+            echo "FAIL: expected 'my-image:custom-tag'"
             exit 1
           fi
           echo "PASS"

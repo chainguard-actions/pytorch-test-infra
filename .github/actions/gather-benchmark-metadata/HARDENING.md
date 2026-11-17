@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ### unpinned-uses (severity: high)
 
-action.yml references a composite step by branch, not by a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Pin it to a commit SHA.
+A composite step references an action by a mutable branch instead of a 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a) is violated in the 'Gather the metadata' step: the run: block puts the expression `${{ inputs.venv }}` straight into the shell script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script text before the shell runs, so a crafted input can inject commands. Pass it through an env: variable (e.g. VENV: ${{ inputs.venv }}) and use "$VENV" in double quotes.
+Sub-rule (a) applies: an expression is placed directly in the run: script of the 'Gather the metadata' step. Offending lines: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. A crafted `venv` input can break out of the quotes and run arbitrary commands. Fix: pass the value through env (for example `VENV: ${{ inputs.venv }}`) and reference it as "$VENV".
 
 Locations:
 
@@ -55,5 +55,5 @@ Locations:
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/get-workflow-job-id to commit 0569df511711f70601c984fe3a93dac324afc9ce (the upstream commit, checked with lookup_action_sha; the '# main' comment keeps the original branch name). Moved inputs.venv into an env var VENV in the 'Gather the metadata' step. The script now uses "${VENV}" in double quotes for both the -n test and the source call.
+Pinned the get-workflow-job-id action to 0569df511711f70601c984fe3a93dac324afc9ce. That is the upstream commit this mirror was built from, and I confirmed it exists with lookup_action_sha. The '# main' comment keeps the original ref readable. Moved inputs.venv into the step's env: as VENV and changed the run script to read "${VENV}" in both the -n test and the source line. The step behaves the same when venv is empty. Nothing was tested or run; a fresh analysis pass hasn't been done yet.
 
