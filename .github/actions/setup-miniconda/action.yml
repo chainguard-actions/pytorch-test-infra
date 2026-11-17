@@ -59,9 +59,14 @@ runs:
           DEFAULT_PACKAGES: ${{ inputs.default-packages }}
         run: |
           echo "today=$(/bin/date -u '+%Y%m%d')d" >> "${GITHUB_OUTPUT}"
-          # shellcheck disable=SC2206
-          DEFAULT_PACKAGES_ARR=($DEFAULT_PACKAGES)
-          echo "default_packages_checksum=$(printf '%s' "${DEFAULT_PACKAGES_ARR[*]}" | md5sum | awk '{print $1}' )" >> "${GITHUB_OUTPUT}"
+          pkgs=()
+          if [ -n "$DEFAULT_PACKAGES" ]; then
+            printf '%s' "$DEFAULT_PACKAGES" | xargs -r true >/dev/null   # fails on an unmatched quote
+            while IFS= read -r -d '' t; do pkgs+=("$t"); done \
+              < <(printf '%s' "$DEFAULT_PACKAGES" | xargs -r sh -c 'printf "%s\0" "$@"' sh)
+          fi
+          checksum=$(printf '%s' "${pkgs[*]}" | md5sum | awk '{print $1}')
+          echo "default_packages_checksum=${checksum}" >> "${GITHUB_OUTPUT}"
 
       - name: Setup miniconda cache
         id: miniconda-cache
@@ -148,21 +153,25 @@ runs:
             echo "::warning::Specified env file (${ENV_FILE}) not found, not going to include it"
           fi
 
+          DEFAULT_PKGS=()
+          if [ -n "$DEFAULT_PACKAGES" ]; then
+            printf '%s' "$DEFAULT_PACKAGES" | xargs -r true >/dev/null   # fails on an unmatched quote
+            while IFS= read -r -d '' t; do DEFAULT_PKGS+=("$t"); done \
+              < <(printf '%s' "$DEFAULT_PACKAGES" | xargs -r sh -c 'printf "%s\0" "$@"' sh)
+          fi
+
           CONDA_EXTRA_FLAGS=""
 
           # Print the conda we are using here in case we need debugging information
           CONDA_RUNTIME=$(which conda)
           "${CONDA_RUNTIME}" --version
 
-          # shellcheck disable=SC2206
-          DEFAULT_PACKAGES_ARR=($DEFAULT_PACKAGES)
-
           "${CONDA_RUNTIME}" create \
             --yes --quiet \
             --prefix "${CONDA_BASE_ENV}" \
             "${ENV_FILE_FLAG[@]}" \
             python="${PYTHON_VERSION}" \
-            "${DEFAULT_PACKAGES_ARR[@]}" \
+            "${DEFAULT_PKGS[@]}" \
             ${CONDA_EXTRA_FLAGS}
 
           if [[ -f "${PIP_REQUIREMENTS_FILE}" ]]; then

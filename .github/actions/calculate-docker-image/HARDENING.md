@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--calculate-docker-image/v20261112-155209** was hardened automatically. 5 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--calculate-docker-image/v20261112-155209** was hardened automatically. 3 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### github-env-injection (severity: high)
 
-The 'Calculate docker image' step writes values that come from inputs straight to $GITHUB_OUTPUT. The values are DOCKER_IMAGE_NAME (inputs.docker-image-name), DOCKER_REGISTRY, REPO_NAME (inputs.repo-name / github.event.repository.name), DOCKER_TAG and CUSTOM_TAG_PREFIX, the last two derived from inputs. None of them goes through the required `printf '%s' ... | tr -d '\n\r'` step first. Examples: `echo "docker-image=${DOCKER_IMAGE_NAME}" >> "${GITHUB_OUTPUT}"`, `echo "docker-tag=${DOCKER_TAG}" >> "${GITHUB_OUTPUT}"`, `echo "docker-image=${DOCKER_REGISTRY}/${REPO_NAME}/${DOCKER_IMAGE_NAME}:${DOCKER_TAG}" >> "${GITHUB_OUTPUT}"` and `echo "custom-tag-prefix=${CUSTOM_TAG_PREFIX}" >> "${GITHUB_OUTPUT}"`. A value containing a newline could inject extra outputs.
+Step 'Calculate docker image' writes values taken from inputs to $GITHUB_OUTPUT without first passing them through printf '%s' ... | tr -d '\n\r'. The inputs are docker-image-name, docker-registry, repo-name (or github.event.repository.name) and custom-tag-prefix, read through the env vars DOCKER_IMAGE_NAME, DOCKER_REGISTRY, REPO_NAME and CUSTOM_TAG_PREFIX. The writes are: echo "docker-image=${DOCKER_IMAGE_NAME}" >> "${GITHUB_OUTPUT}"; echo "docker-tag=${DOCKER_TAG}" (DOCKER_TAG comes from the image name or the custom tag prefix); echo "docker-image=${DOCKER_REGISTRY}/${REPO_NAME}/${DOCKER_IMAGE_NAME}:${DOCKER_TAG}"; and echo "custom-tag-prefix=${CUSTOM_TAG_PREFIX}". A value containing a newline can add arbitrary step outputs.
 
 Locations:
 
@@ -29,32 +29,17 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (b), 'Build docker image' step. The shell `command:` passed to nick-fields/retry expands values from inputs and step outputs without double quotes: `IMAGE_NAME=$(echo ${DOCKER_IMAGE#"${DOCKER_REGISTRY}/${REPO_NAME}/"} | awk ...)` expands DOCKER_IMAGE unquoted, and `${DOCKER_BUILD_SCRIPT} "${IMAGE_NAME}..." -t "${DOCKER_IMAGE}"` expands DOCKER_BUILD_SCRIPT (inputs.docker-build-script) unquoted and runs it as a command.
-
-Locations:
-
-- `action.yml:246`
-- `action.yml:248`
-
-### script-injection (severity: high)
-
-Rule (b), 'Check if image should be built' step. The retry helper `retry () { $*  || (sleep 1 && $*) || (sleep 2 && $*) }` re-expands its arguments unquoted. One of those arguments is DOCKER_REGISTRY, which comes from inputs.docker-registry, so that value is word-split and glob-expanded. Use "$@" instead.
+Rule (b): workflow-controlled data is expanded without quotes. In the steps 'Check if image should be built' and 'Login to ECR', the retry helper runs `$*  || (sleep 1 && $*) || (sleep 2 && $*)` with the arguments login "${DOCKER_REGISTRY}". DOCKER_REGISTRY comes from inputs.docker-registry, and the unquoted $* re-splits it and expands globs. Use "$@" instead. In the 'Build docker image' step, the bash command passed to nick-fields/retry contains `IMAGE_NAME=$(echo ${DOCKER_IMAGE#"${DOCKER_REGISTRY}/${REPO_NAME}/"} | awk ...)`, which leaves the input-derived DOCKER_IMAGE expansion unquoted.
 
 Locations:
 
 - `action.yml:141`
-
-### script-injection (severity: high)
-
-Rule (b), 'Login to ECR' step. It has the same problem: `retry () { $*  || (sleep 1 && $*) || (sleep 2 && $*) }` re-expands DOCKER_REGISTRY (inputs.docker-registry) unquoted. Use "$@" instead.
-
-Locations:
-
 - `action.yml:212`
+- `action.yml:246`
 
 ### unpinned-uses (severity: high)
 
-A composite step points to a version tag instead of a full 40-character commit SHA: `uses: nick-fields/retry@v3.0.0`.
+A composite step uses an action by mutable tag instead of a full 40-character commit SHA: `uses: nick-fields/retry@v3.0.0`.
 
 Locations:
 
@@ -68,5 +53,9 @@ Locations:
 
 **Notes:**
 
-action.yml: added a sanitize() helper (printf '%s' | tr -d '\n\r') and now write only sanitized values (docker-image, docker-tag, custom-tag-prefix) to $GITHUB_OUTPUT. The values are captured into variables first and are not nested inside another command substitution. The two retry() helpers now use "$@" in place of $*. In the 'Build docker image' command, DOCKER_IMAGE is quoted (via printf) and DOCKER_BUILD_SCRIPT is invoked quoted. It is a single script path, which the existence check already requires. nick-fields/retry is pinned to 7152eba30c6575329ac0576536151aca5a72780e (v3.0.0).
+I fixed all three findings in action.yml. I haven't run the action, so none of these changes have been tested.
+
+- **Step outputs (github-env-injection):** the 'Calculate docker image' step now has a small `sanitize()` helper that runs `printf '%s' "$1" | tr -d '\n\r'`. Every value written to $GITHUB_OUTPUT that comes from an input (docker-image, docker-tag, custom-tag-prefix) now goes through it first. The helper is only ever given plain variables, never a command's output, so a failing command still stops the step under `set -e`.
+- **Unquoted values (script-injection):** the retry helper in 'Check if image should be built' and 'Login to ECR' now uses `"$@"` instead of `$*`, so the registry value is no longer re-split or treated as a glob pattern. In 'Build docker image', IMAGE_NAME is now built with `printf '%s\n' "${DOCKER_IMAGE#"${DOCKER_REGISTRY}/${REPO_NAME}/"}"`, so DOCKER_IMAGE is quoted. The prefix-stripping logic is the same as before.
+- **Unpinned action:** `nick-fields/retry@v3.0.0` is now pinned to its commit, `7152eba30c6575329ac0576536151aca5a72780e # v3.0.0`.
 

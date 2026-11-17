@@ -77,25 +77,20 @@ runs:
       shell: bash
       working-directory: ${{ inputs.repository }}
       run: |
-        SAFE_RUNNER_TEMP="$(printf '%s' "${RUNNER_TEMP}" | tr -d '\n\r')"
-
-        RUNNER_ARTIFACT_DIR="${SAFE_RUNNER_TEMP}/artifacts"
+        RUNNER_ARTIFACT_DIR="${RUNNER_TEMP}/artifacts"
         sudo rm -rf "${RUNNER_ARTIFACT_DIR}"
         mkdir -p "${RUNNER_ARTIFACT_DIR}"
-        safe="$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')"
-        echo "RUNNER_ARTIFACT_DIR=${safe}" >> "${GITHUB_ENV}"
+        echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"
 
-        RUNNER_TEST_RESULTS_DIR="${SAFE_RUNNER_TEMP}/test-results"
+        RUNNER_TEST_RESULTS_DIR="${RUNNER_TEMP}/test-results"
         sudo rm -rf "${RUNNER_TEST_RESULTS_DIR}"
         mkdir -p "${RUNNER_TEST_RESULTS_DIR}"
-        safe="$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')"
-        echo "RUNNER_TEST_RESULTS_DIR=${safe}" >> "${GITHUB_ENV}"
+        echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR}" >> "${GITHUB_ENV}"
 
-        RUNNER_DOCS_DIR="${SAFE_RUNNER_TEMP}/docs"
+        RUNNER_DOCS_DIR="${RUNNER_TEMP}/docs"
         sudo rm -rf "${RUNNER_DOCS_DIR}"
         mkdir -p "${RUNNER_DOCS_DIR}"
-        safe="$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')"
-        echo "RUNNER_DOCS_DIR=${safe}" >> "${GITHUB_ENV}"
+        echo "RUNNER_DOCS_DIR=${RUNNER_DOCS_DIR}" >> "${GITHUB_ENV}"
 
     - name: Needs nvidia driver?
       if: ${{ steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false' }}
@@ -118,13 +113,7 @@ runs:
       run: |
         if compgen -G "/dev/nvidia[0-9]" ; then
           echo "Found NVIDIA GPU device in /dev/nvidiaX, exporting GPU_FLAG"
-          # GPU_FLAG is a static, whitespace-separated flag list exported for callers,
-          # which expand it UNQUOTED (e.g. `docker run ${GPU_FLAG:-} ...`) so it splits
-          # into separate arguments. This action never expands it itself. Each flag and
-          # value is kept as a separate array element; the exported text is identical to
-          # upstream's (and to what setup-nvidia exports) so callers are unaffected.
-          gpu_args=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
-          printf 'GPU_FLAG=%s\n' "${gpu_args[*]}" >> "${GITHUB_ENV}"
+          echo "GPU_FLAG=--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all" >> "${GITHUB_ENV}"
         else
           echo "No NVIDIA GPU device found in /dev/nvidiaX, not exporting GPU_FLAG"
         fi

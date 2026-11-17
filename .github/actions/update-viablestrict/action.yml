@@ -114,7 +114,7 @@ runs:
           --main-branch "master")
         safe_output=$(printf '%s' "$output" | tr -d '\n\r')
         echo "latest_viable_sha=$safe_output" >> "${GITHUB_OUTPUT}"
-        echo "$output"
+        echo $output
 
     - name: Push SHA to viable/strict branch
       if: steps.get-latest-commit.outputs.latest_viable_sha != 'None'
@@ -133,10 +133,11 @@ runs:
         # Pushing an older green commit here will fail because it's non-fast-forward, which is ok
         # to ignore because we already have the later green commit in visable/strict
         push_result=$(git push origin "${LATEST_VIABLE_SHA}:${STABLE_BRANCH}" 2>&1 || true)
+        safe_push_result=$(printf '%s' "$push_result" | tr -d '\n\r')
         EOF_DELIM="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
         {
           echo "push_result<<${EOF_DELIM}"
-          echo "${push_result}"
+          echo "${safe_push_result}"
           echo "${EOF_DELIM}"
         } >> "${GITHUB_OUTPUT}"
         echo "${push_result}"

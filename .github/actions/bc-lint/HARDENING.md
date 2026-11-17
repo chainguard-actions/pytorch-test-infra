@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--bc-lint/v20261112-155209** was h
 
 ### unpinned-uses (severity: high)
 
-action.yml uses mutable tag refs instead of full 40-character commit SHAs: 'uses: actions/checkout@v4' (line 30) and 'uses: actions/checkout@v4' (line 36).
+action.yml references actions by a mutable tag, not a full commit SHA: line 30 'uses: actions/checkout@v4' and line 36 'uses: actions/checkout@v4'. Pin both to a 40-character commit SHA.
 
 Locations:
 
@@ -25,29 +25,23 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): step 'Merge PR changes onto base' puts expressions straight into the run script: 'git fetch origin "${{ inputs.head_sha }}"', 'git fetch origin "${{ inputs.base_sha }}"', 'git reset --hard "${{ inputs.base_sha }}"', 'git merge "${{ inputs.head_sha }}"'. Quoting does not help because the values are substituted into the script text before the shell parses it.
+Rule (a): the 'Merge PR changes onto base' step puts expressions straight into the run: script, e.g. 'git fetch origin "${{ inputs.head_sha }}"', 'git reset --hard "${{ inputs.base_sha }}"' and 'git merge "${{ inputs.head_sha }}"'. Pass inputs.head_sha and inputs.base_sha through env: and use them as "$HEAD_SHA" and "$BASE_SHA".
 
 Locations:
 
 - `action.yml:51`
-- `action.yml:52`
-- `action.yml:53`
-- `action.yml:54`
 
 ### script-injection (severity: high)
 
-Rule (a): step 'Build and run BC-linter' puts unquoted expressions straight into the run script: '--base-commit=${{ inputs.base_sha }}', '--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}', '${{ inputs.suppression == 'true' && '--suppressed' || '' }}', '${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}'. inputs.config_dir is free text that the caller controls.
+Rule (a): the 'Build and run BC-linter' step puts expressions straight into the run: script, unquoted: '--base-commit=${{ inputs.base_sha }}', '--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}', '${{ inputs.suppression == 'true' && '--suppressed' || '' }}' and '${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}'. inputs.config_dir is free text, so whatever the caller passes runs as shell code. Move these values into env: and quote them, using the guarded ${VAR:+"$VAR"} form for the optional flags.
 
 Locations:
 
 - `action.yml:71`
-- `action.yml:72`
-- `action.yml:73`
-- `action.yml:74`
 
 ### script-injection (severity: high)
 
-Rule (a): step 'Display documentation link if failed' puts an expression straight into the run script: 'echo "${{ inputs.docs_link }}"'.
+Rule (a): the 'Display documentation link if failed' step puts an input straight into the run: script: 'echo "${{ inputs.docs_link }}"'. Pass it through env: and use echo "$DOCS_LINK".
 
 Locations:
 
@@ -117,5 +111,5 @@ Locations:
 
 **Notes:**
 
-Pinned both actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262. Moved every ${{ }} expression out of the run scripts and into env: blocks: head_sha/base_sha in the merge step; base_sha, new_head_sha, suppression and config_dir in the lint step; docs_link in the docs step. The optional --suppressed and --config-dir flags are now built in a bash array, and the expansion still works under set -u when neither flag is set, so the arguments come out the same as upstream's. --config-dir=<dir> stays one argument. Nothing was run to test the change.
+Pinned both actions/checkout@v4 references to 11d5960a326750d5838078e36cf38b85af677262. Moved inputs.head_sha, inputs.base_sha, steps.merge_changes.outputs.new_head_sha, inputs.suppression, inputs.config_dir and inputs.docs_link into step env: blocks. They are now used as quoted shell variables. The optional --suppressed and --config-dir flags are built in the shell and passed with the ${VAR:+"$VAR"} form, so they drop out when empty, as they did upstream. --config-dir=<value> stays one joined argument. I haven't run the action after these changes.
 

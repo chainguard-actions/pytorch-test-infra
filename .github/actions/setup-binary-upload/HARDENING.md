@@ -14,30 +14,30 @@ Action **pytorch--test-infra--.github--actions--setup-binary-upload/v20261112-15
 
 ## Findings Fixed
 
-### github-env-injection (severity: high)
-
-Step 'Set the artifact name' writes a value built from untrusted inputs (inputs.repository, inputs.ref, inputs.python-version, inputs.cuda-version, inputs.arch, passed in through env vars REPOSITORY, REF, PYTHON_VERSION, CU_VERSION, ARCH) to $GITHUB_ENV. The value is not sanitized first: no `printf '%s' ... | tr -d '\n\r'`. Offending line: echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}". A newline in any of these inputs would let a caller add extra environment variables to later steps.
-
-Locations:
-
-- `action.yml:58`
-
 ### unpinned-uses (severity: high)
 
-Two composite action steps use tag refs instead of full 40-character commit SHAs: `uses: actions/setup-python@v5` (line 36) and `uses: actions/checkout@v4` (line 61).
+action.yml has composite steps that reference actions by mutable tag, not by a full commit SHA: 'uses: actions/setup-python@v5' (line 36) and 'uses: actions/checkout@v4' (line 61).
 
 Locations:
 
 - `action.yml:36`
 - `action.yml:61`
 
+### github-env-injection (severity: high)
+
+The 'Set the artifact name' step builds ARTIFACT_NAME from env vars that come from inputs (REPOSITORY, REF, CU_VERSION, ARCH, and SHORT_PYTHON_VERSION derived from inputs.python-version). It writes the value to $GITHUB_ENV with no sanitization: echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}". Nothing like printf '%s' ... | tr -d '\n\r' is applied first, so a value containing a newline can inject extra environment variables.
+
+Locations:
+
+- `action.yml:58`
+
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** github-env-injection, unpinned-uses
+**Fixes applied:** unpinned-uses, github-env-injection
 
 **Notes:**
 
-In action.yml, the 'Set the artifact name' step now builds the artifact name into its own variable, removes any newlines and carriage returns with printf | tr -d '\n\r', and only then writes ARTIFACT_NAME to $GITHUB_ENV. A newline in any of the five inputs can no longer add extra environment variables for later steps. I also pinned the two tagged actions to the commit SHAs that lookup_action_sha returned for those tags: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 (v5) and actions/checkout@11d5960a326750d5838078e36cf38b85af677262 (v4). The tag names are kept as trailing comments. Nothing was run or tested after the edits.
+Pinned actions/setup-python to a26af69be951a213d495a4c3e4e4022e16d87065 (v5) and actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (v4). ARTIFACT_NAME is now built in a variable and passed through printf '%s' | tr -d '\n\r' before it is written to GITHUB_ENV. Nothing was run to test these changes.
 

@@ -24,10 +24,8 @@ runs:
           "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
     - name: Update NVIDIA driver
       shell: cmd
-      env:
-        ACTION_PATH: ${{ github.action_path }}
       run: |
-        "%ACTION_PATH%\..\..\scripts\driver_update.bat"
+        "%GITHUB_ACTION_PATH%\..\..\scripts\driver_update.bat"
     - name: Verify NVIDIA driver
       shell: cmd
       run: nvidia-smi

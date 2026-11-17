@@ -16,12 +16,14 @@ Action **pytorch--test-infra--.github--actions--export-matrix-variables/v2026111
 
 ### script-injection (severity: high)
 
-Rule (b): TARGET_OS comes from the workflow-controlled input `inputs.target-os` and is expanded without double quotes: `if [[ ${TARGET_OS} != "linux" ]]; then` (line 34) and `if [[ ${TARGET_OS} == 'windows' ]]; then` (line 40). Quote it as "${TARGET_OS}".
+Rule (b) violation: TARGET_OS comes from inputs.target-os and is expanded without double quotes in shell tests: `if [[ ${TARGET_OS} != "linux" ]]; then` (line 33) and `if [[ ${TARGET_OS} == 'windows' ]]; then` (line 39). Quote it as "${TARGET_OS}". The output redirection target `>> ${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}` (lines 45 and 49) is also unquoted and should be quoted too.
 
 Locations:
 
-- `action.yml:34`
-- `action.yml:40`
+- `action.yml:33`
+- `action.yml:39`
+- `action.yml:45`
+- `action.yml:49`
 
 ## Iteration Notes
 
@@ -31,5 +33,5 @@ Locations:
 
 **Notes:**
 
-Put double quotes around ${TARGET_OS} in both [[ ]] checks in action.yml (lines 34 and 40). The input was already passed in through env:, so this is all the finding needed. The comparisons still work exactly as before. I didn't run the action after the change. I left ${ADD_QUOTES_AROUND_VAR} unquoted on purpose: the script sets it itself, and it has to disappear when it's empty.
+Quoted ${TARGET_OS} in both [[ ]] tests and quoted the redirection target "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}". ADD_QUOTES_AROUND_VAR (empty or a single flag) now expands as ${VAR:+"$VAR"} so behavior is unchanged.
 

@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--update-commit-hash/v20261112-155
 
 ### unpinned-uses (severity: high)
 
-action.yml has composite steps whose uses: refs are version tags, not full 40-character commit SHAs: 'uses: actions/checkout@v4' (line 45), 'uses: actions/checkout@v4' (line 52), 'uses: actions/setup-python@v5' (line 63).
+action.yml references actions by mutable tags rather than full 40-char commit SHAs: 'uses: actions/checkout@v4' (line 45), 'uses: actions/checkout@v4' (line 52), 'uses: actions/setup-python@v5' (line 63).
 
 Locations:
 
@@ -26,7 +26,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a), direct expression interpolation: the 'Checkout the target repo' step puts inputs straight into the run: script: 'git clone https://github.com/${{ inputs.repo-owner }}/${{ inputs.repo-name }}.git --quiet'. A caller can pass shell metacharacters in repo-owner or repo-name and run any command. Fix: move them into env: (e.g. REPO_OWNER, REPO_NAME) and use "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" in double quotes.
+Rule (a) violated in step 'Checkout the target repo': expressions are interpolated directly into the run script: 'git clone https://github.com/${{ inputs.repo-owner }}/${{ inputs.repo-name }}.git --quiet'. Inputs should be passed via env: variables and referenced double-quoted (e.g. "https://github.com/${REPO_OWNER}/${REPO_NAME}.git").
 
 Locations:
 
@@ -56,5 +56,5 @@ Locations:
 
 **Notes:**
 
-Pinned both actions/checkout@v4 uses to 11d5960a326750d5838078e36cf38b85af677262 and actions/setup-python@v5 to a26af69be951a213d495a4c3e4e4022e16d87065, with the tag kept in a trailing comment. The 'Checkout the target repo' step no longer puts inputs.repo-owner and inputs.repo-name straight into its run: script. They now go in through env: as REPO_OWNER and REPO_NAME, and the git clone uses the double-quoted URL "https://github.com/${REPO_OWNER}/${REPO_NAME}.git". Nothing was run to test these changes.
+I pinned both actions/checkout@v4 references to 11d5960a326750d5838078e36cf38b85af677262 and actions/setup-python@v5 to a26af69be951a213d495a4c3e4e4022e16d87065. I resolved both SHAs with the lookup tool and kept each tag as a trailing comment. In the step 'Checkout the target repo', I moved inputs.repo-owner and inputs.repo-name into the step's env: block as REPO_OWNER and REPO_NAME. The git clone URL now reads them double-quoted. I haven't run the action after these edits.
 

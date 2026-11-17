@@ -1,4 +1,4 @@
-name: Test push input with custom registry disabled
+name: Test push input with skipped build (no build dir)
 on:
   workflow_dispatch:
 jobs:
@@ -9,9 +9,8 @@ jobs:
       - id: action
         uses: .
         with:
-          docker-image-name: pytorch-linux-jammy-push-test
-          docker-build-dir: this-dir-does-not-exist
-          use-custom-docker-registry: "false"
+          docker-image-name: pytorch-linux-jammy-py3-push
+          docker-build-dir: no-such-docker-dir
           repo-name: myrepo
           push: "true"
           force-push: "true"
@@ -20,8 +19,8 @@ jobs:
           ACTUAL: ${{ steps.action.outputs.docker-image }}
         run: |
           echo "actual: $ACTUAL"
-          if [ "$ACTUAL" != "pytorch-linux-jammy-push-test" ]; then
-            echo "FAIL: expected 'pytorch-linux-jammy-push-test'"
+          if [ "$ACTUAL" != "pytorch-linux-jammy-py3-push" ]; then
+            echo "FAIL: expected 'pytorch-linux-jammy-py3-push'"
             exit 1
           fi
           echo "PASS"

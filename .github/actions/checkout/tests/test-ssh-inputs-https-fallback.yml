@@ -1,4 +1,4 @@
-name: Test empty ssh-key falls back to HTTPS token auth
+name: Test ssh inputs with empty ssh-key falls back to HTTPS
 on:
   workflow_dispatch:
 jobs:
@@ -13,14 +13,16 @@ jobs:
           ref: main
           path: ssh-fallback-target
           ssh-key: ''
-          ssh-known-hosts: 'example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl'
+          ssh-known-hosts: |
+            example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
           ssh-strict: 'true'
-      - name: Assert HTTPS checkout succeeded without SSH
+          ssh-user: git
+      - name: Assert HTTPS checkout succeeded without SSH config
         env:
           COMMIT: ${{ steps.action.outputs.commit }}
         run: |
-          DIR="$GITHUB_WORKSPACE/ssh-fallback-target"
           echo "commit: $COMMIT"
+          DIR="$GITHUB_WORKSPACE/ssh-fallback-target"
           if [ ! -f "$DIR/action.yml" ]; then
             echo "FAIL: action.yml not found"
             exit 1
@@ -29,14 +31,16 @@ jobs:
             echo "FAIL: commit output is not a SHA"
             exit 1
           fi
-          URL="$(git -C "$DIR" remote get-url origin)"
+          URL="$(git -C "$DIR" config --get remote.origin.url)"
           echo "origin: $URL"
           case "$URL" in
             https://*) ;;
             *) echo "FAIL: expected HTTPS origin when ssh-key is empty"; exit 1 ;;
           esac
-          if git -C "$DIR" config --local --get core.sshCommand; then
-            echo "FAIL: core.sshCommand should not be configured without an ssh-key"
+          SSHCMD="$(git -C "$DIR" config --local --get core.sshCommand || true)"
+          echo "core.sshCommand: $SSHCMD"
+          if [ -n "$SSHCMD" ]; then
+            echo "FAIL: core.sshCommand should not be set without ssh-key"
             exit 1
           fi
           echo "PASS"

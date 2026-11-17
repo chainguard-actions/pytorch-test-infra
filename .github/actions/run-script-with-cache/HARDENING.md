@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20261112-
 
 ### unpinned-uses (severity: high)
 
-action.yml uses a mutable tag rather than a full commit SHA: `uses: actions/cache@v3`.
+action.yml has a composite step pinned to a mutable tag instead of a full 40-character commit SHA: `uses: actions/cache@v3`.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Step 'Run script': (a) A GitHub expression is placed directly inside the run script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. (b) Variables holding workflow-controlled data are expanded without quotes: `if [[ ! -f ${SCRIPT} ]]; then`, `if [[ ${SCRIPT} == *.bat ]]; then`, `${CONDA_RUN} ${SCRIPT}`, `${CONDA_RUN} bash ${SCRIPT}`. SCRIPT comes from inputs.script. CONDA_RUN is inherited from the calling workflow's environment.
+The 'Run script' step breaks both rules. (a) An expression is put straight into the run: script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. Move it into an env var (e.g. IS_WINDOWS) and quote it as "$IS_WINDOWS". (b) Workflow-controlled env vars are expanded without quotes: SCRIPT comes from inputs.script and CONDA_RUN is inherited from the calling workflow. Offending lines: `if [[ ! -f ${SCRIPT} ]]; then`, `if [[ ${SCRIPT} == *.bat ]]; then`, `${CONDA_RUN} ${SCRIPT}` and `${CONDA_RUN} bash ${SCRIPT}`. Quote each expansion, e.g. "$SCRIPT".
 
 Locations:
 
@@ -50,5 +50,12 @@ Locations:
 
 **Notes:**
 
-I pinned actions/cache@v3 to its full commit SHA 6f8efc29b200d32929f49075959781ed54ec270c, which I looked up rather than guessed. In the 'Run script' step, the inputs.is_windows expression now goes in through the step's env: block as IS_WINDOWS and is compared with quotes. Every use of SCRIPT is now double-quoted. CONDA_RUN is a command prefix (like "conda run -p ..."), so it still has to split into separate words. It is loaded into a bash array with an unquoted assignment, which splits it the same way upstream's unquoted expansion did. The array is then expanded in a form that is still safe under 'set -u' when CONDA_RUN is empty (older bash, such as macOS's 3.2, fails on an empty array otherwise). Nothing was run to test these changes.
+I fixed all three findings in action.yml. I haven't run the action since the changes.
+
+- **Pinned action:** `actions/cache` is now pinned to commit `6f8efc29b200d32929f49075959781ed54ec270c # v3`.
+- **`is_windows` input:** it's now passed in through the step's `env:` block as `IS_WINDOWS` and the script checks `"$IS_WINDOWS"` instead of the inline expression.
+- **Quoting:** every use of `$SCRIPT` is now double-quoted.
+- **`CONDA_RUN`:** I left this one split into separate words on purpose. It holds a command prefix like `conda run -p <env>`, so quoting it as one value would break the call. It's split into an array the same way the original unquoted `${CONDA_RUN}` was, and the script is called through that array.
+
+If `CONDA_RUN` turns out to be empty, the script now just runs `"$SCRIPT"` or `bash "$SCRIPT"`. The array form I used also keeps that working on the older bash that ships on macOS runners. If the variable isn't set at all, the step still stops with an unset-variable error, as it did before.
 

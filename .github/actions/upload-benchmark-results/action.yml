@@ -56,7 +56,7 @@ runs:
 
         export VIRTUAL_ENV="${RUNNER_TEMP}/benchmark-upload-venv"
         safe_venv=$(printf '%s' "${RUNNER_TEMP}/benchmark-upload-venv" | tr -d '\n\r')
-        echo "VIRTUAL_ENV=${safe_venv}" >> "$GITHUB_ENV"
+        echo "VIRTUAL_ENV=$safe_venv" >> "$GITHUB_ENV"
 
         uv pip install boto3==1.35.33 psutil==7.0.0 nvidia-ml-py==13.580.82
 

@@ -17,8 +17,8 @@ jobs:
         env:
           COMMIT: ${{ steps.action.outputs.commit }}
         run: |
-          DIR="$GITHUB_WORKSPACE/server-url-target"
           echo "commit: $COMMIT"
+          DIR="$GITHUB_WORKSPACE/server-url-target"
           if [ ! -f "$DIR/action.yml" ]; then
             echo "FAIL: action.yml not found"
             exit 1
@@ -27,10 +27,10 @@ jobs:
             echo "FAIL: commit output is not a SHA"
             exit 1
           fi
-          URL="$(git -C "$DIR" remote get-url origin)"
+          URL="$(git -C "$DIR" config --get remote.origin.url)"
           echo "origin: $URL"
           case "$URL" in
             https://github.com/actions/checkout*) ;;
-            *) echo "FAIL: origin URL does not use the given server URL"; exit 1 ;;
+            *) echo "FAIL: unexpected origin URL"; exit 1 ;;
           esac
           echo "PASS"

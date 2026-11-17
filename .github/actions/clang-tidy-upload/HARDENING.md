@@ -16,24 +16,24 @@ Action **pytorch--test-infra--.github--actions--clang-tidy-upload/v20261112-1552
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Check if binaries have changed' step puts ${{ inputs.platform }} and ${{ inputs.version }} straight into the run: script, e.g. `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-tidy"` and `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-format"`. Fix: pass these inputs to the step through env: and refer to them as double-quoted shell variables.
+Rule (a): The 'Check if binaries have changed' run block puts ${{ inputs.platform }} and ${{ inputs.version }} straight into the shell script, e.g. `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-tidy"` and `--s3-key "${{ inputs.platform }}/${{ inputs.version }}/clang-format"`. To fix it, pass the inputs through env: variables (e.g. PLATFORM, VERSION) and reference them double-quoted as "$PLATFORM/$VERSION/clang-tidy".
 
 Locations:
 
-- `action.yml:29`
-- `action.yml:32`
+- `action.yml:28`
+- `action.yml:31`
 
 ### unpinned-uses (severity: high)
 
-These uses: references point to version tags, not full commit SHAs: `aws-actions/configure-aws-credentials@v4` (line 37), `seemethere/upload-artifact-s3@v5` (lines 45, 54), `actions/upload-artifact@v6` (lines 64, 72).
+Composite steps reference actions by mutable tag instead of a 40-char commit SHA: `uses: aws-actions/configure-aws-credentials@v4`, `uses: seemethere/upload-artifact-s3@v5` (twice), `uses: actions/upload-artifact@v6` (twice).
 
 Locations:
 
-- `action.yml:37`
-- `action.yml:45`
-- `action.yml:54`
-- `action.yml:64`
-- `action.yml:72`
+- `action.yml:36`
+- `action.yml:44`
+- `action.yml:53`
+- `action.yml:62`
+- `action.yml:70`
 
 ### static-inline-injection (severity: high)
 
@@ -75,13 +75,13 @@ Locations:
 
 **Notes:**
 
-Both findings are fixed in action.yml. I haven't run the action to test it.
+Both findings are fixed in action.yml.
 
-- **Script injection:** The 'Check if binaries have changed' step no longer pastes `inputs.platform` and `inputs.version` into the script. They now go in through the step's `env:` block as `INPUT_PLATFORM` and `INPUT_VERSION`, and the script uses them as double-quoted shell variables. The script runs the same commands as before.
-- **Unpinned actions:** I looked up each version tag and pinned all five `uses:` lines to its full commit SHA, keeping the tag as a comment:
-  - `aws-actions/configure-aws-credentials` v4 → 7474bc4690e29a8392af63c5b98e7449536d5c3a
-  - `seemethere/upload-artifact-s3` v5 (both uses) → baba72d0712b404f646cebe0730933554ebce96a
-  - `actions/upload-artifact` v6 (both uses) → b7c566a772e6b6bfb58ed0dc250532a479d7789f
+- **Script injection:** in the 'Check if binaries have changed' step, `inputs.platform` and `inputs.version` no longer go straight into the shell script. They are passed in through the step's `env:` block as PLATFORM and VERSION, and the script uses them double-quoted as "$PLATFORM/$VERSION/...".
+- **Unpinned actions:** each `uses:` now points to a full commit SHA, with the original tag kept as a trailing comment. I looked up each SHA rather than guessing:
+  - aws-actions/configure-aws-credentials v4: 7474bc4690e29a8392af63c5b98e7449536d5c3a
+  - seemethere/upload-artifact-s3 v5 (both uses): baba72d0712b404f646cebe0730933554ebce96a
+  - actions/upload-artifact v6 (both uses): b7c566a772e6b6bfb58ed0dc250532a479d7789f
 
-The `${{ }}` expressions in the `with:` inputs (`s3-prefix` and the artifact names) are still there. They aren't run by a shell, so they can't inject commands.
+I didn't run anything to test the changes. The remaining `${{ }}` expressions are inputs to other actions (`with:`) or `if:` conditions, not shell code, so I left them as they were.
 
