@@ -1,0 +1,62 @@
+name: Test ssh-key and ssh-known-hosts
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Generate throwaway SSH key
+        id: keygen
+        run: |
+          TMPK="$(mktemp -d)/id_ed25519"
+          ssh-keygen -t ed25519 -N "" -f "$TMPK" -q
+          {
+            echo "key<<SSHKEYEOF"
+            cat "$TMPK"
+            echo "SSHKEYEOF"
+            echo "known=example.invalid $(cut -d' ' -f1,2 "$TMPK.pub")"
+          } >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          repository: actions/checkout
+          ref: main
+          path: ssh-target
+          ssh-key: ${{ steps.keygen.outputs.key }}
+          ssh-known-hosts: ${{ steps.keygen.outputs.known }}
+          persist-credentials: false
+      - name: Assert outcome
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "commit: $COMMIT"
+          DIR="$GITHUB_WORKSPACE/ssh-target"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ ! -f "$DIR/action.yml" ]; then
+              echo "FAIL: action succeeded but action.yml missing"
+              exit 1
+            fi
+            URL="$(git -C "$DIR" config --get remote.origin.url)"
+            echo "origin url: $URL"
+            case "$URL" in
+              git@github.com:*) ;;
+              *) echo "FAIL: expected SSH origin url"; exit 1 ;;
+            esac
+            echo "PASS: checked out over SSH"
+          elif [ "$OUTCOME" = "failure" ]; then
+            # The throwaway key is not registered with GitHub, so SSH auth is rejected.
+            echo "PASS: action failed as expected with an unregistered SSH key"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+          # The private key must never be left behind in the workspace with persist-credentials false
+          if [ -d "$DIR/.git" ] && git -C "$DIR" config --get core.sshCommand >/dev/null 2>&1; then
+            echo "FAIL: core.sshCommand persisted despite persist-credentials=false"
+            exit 1
+          fi
+          echo "PASS: no persisted ssh command"

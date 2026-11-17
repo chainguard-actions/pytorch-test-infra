@@ -135,9 +135,9 @@ runs:
         push_result=$(git push origin "${LATEST_VIABLE_SHA}:${STABLE_BRANCH}" 2>&1 || true)
         EOF_DELIM="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
         {
-          echo "push_result<<${EOF_DELIM}"
+          echo "push_result<<$EOF_DELIM"
           echo "$push_result"
-          echo "${EOF_DELIM}"
+          echo "$EOF_DELIM"
         } >> "${GITHUB_OUTPUT}"
         echo "${push_result}"
         echo "time=$(date +%s)" >> "${GITHUB_OUTPUT}"

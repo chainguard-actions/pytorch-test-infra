@@ -16,20 +16,20 @@ Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v202610
 
 ### unpinned-uses (severity: high)
 
-Two composite action steps point to a mutable branch ref instead of a full 40-character commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' (line 31) and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main' (line 115). Pin both to a commit SHA.
+Composite action steps reference actions by a mutable branch instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-uv@main` and `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
 
 Locations:
 
 - `action.yml:31`
-- `action.yml:115`
+- `action.yml:120`
 
 ### github-env-injection (severity: high)
 
-The 'Install dependencies' step writes 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. RUNNER_TEMP is an inherited process env var that this run script does not set. In a composite action the calling workflow controls inherited env, so this check treats it as untrusted. The value is written to $GITHUB_ENV without the required sanitization step (printf '%s' ... | tr -d '\n\r'). Fix: compute safe=$(printf '%s' "${RUNNER_TEMP}/benchmark-upload-venv" | tr -d '\n\r'), then write "VIRTUAL_ENV=$safe" to "$GITHUB_ENV".
+The 'Install dependencies' step writes `echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV`. RUNNER_TEMP comes from the process environment the step inherits. The script does not set it. The value is not passed through `printf '%s' ... | tr -d '\n\r'` before it is written to GITHUB_ENV.
 
 Locations:
 
-- `action.yml:41`
+- `action.yml:42`
 
 ## Iteration Notes
 
@@ -39,5 +39,5 @@ Locations:
 
 **Notes:**
 
-Pinned setup-uv and get-workflow-job-id to the upstream commit f2f972bd8f3eab11aa0094897a81879653c6f141 (# main), the commit this mirror version was built from. In the Install dependencies step, the VIRTUAL_ENV value now goes through printf '%s' | tr -d '\n\r' before it is written to the quoted "$GITHUB_ENV".
+Pinned both pytorch/test-infra sub-action uses (setup-uv, get-workflow-job-id) to the upstream commit f2f972bd8f3eab11aa0094897a81879653c6f141 (verified), with a '# main' comment. Sanitized the VIRTUAL_ENV value with printf | tr -d '\n\r' before writing to $GITHUB_ENV (quoted $GITHUB_ENV), and did the same for DEVICE_TYPE, which comes from command output.
 

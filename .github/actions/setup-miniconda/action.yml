@@ -65,8 +65,7 @@ runs:
             while IFS= read -r -d '' t; do pkgs+=("$t"); done \
               < <(printf '%s' "$DEFAULT_PACKAGES" | xargs -r sh -c 'printf "%s\0" "$@"' sh)
           fi
-          checksum="$(echo -n "${pkgs[@]}" | md5sum | awk '{print $1}' | tr -d '\n\r')" || true
-          echo "default_packages_checksum=${checksum}" >> "${GITHUB_OUTPUT}"
+          echo "default_packages_checksum=$(printf '%s' "${pkgs[*]}" | md5sum | awk '{print $1}' )" >> "${GITHUB_OUTPUT}"
 
       - name: Setup miniconda cache
         id: miniconda-cache
@@ -112,7 +111,7 @@ runs:
           echo "${MINICONDA_INSTALL_PATH}/bin" >> "$GITHUB_PATH"
           # NB: GITHUB_PATH has a lower priority than PATH, so also set the path
           # here to make sure that the correct conda is used
-          SAFE_PATH="$(printf '%s' "$PATH" | tr -d '\n\r')"
+          SAFE_PATH=$(printf '%s' "$PATH" | tr -d '\n\r')
           {
             echo "PATH=${MINICONDA_INSTALL_PATH}/bin:${SAFE_PATH}"
             echo "CONDA_EXE=${MINICONDA_INSTALL_PATH}/bin/conda";
@@ -153,12 +152,10 @@ runs:
             echo "::warning::Specified env file (${ENV_FILE}) not found, not going to include it"
           fi
 
-          CONDA_EXTRA_FLAGS=()
-
-          PKGS=()
+          DEFAULT_PKGS=()
           if [ -n "$DEFAULT_PACKAGES" ]; then
             printf '%s' "$DEFAULT_PACKAGES" | xargs -r true >/dev/null   # fails on an unmatched quote
-            while IFS= read -r -d '' t; do PKGS+=("$t"); done \
+            while IFS= read -r -d '' t; do DEFAULT_PKGS+=("$t"); done \
               < <(printf '%s' "$DEFAULT_PACKAGES" | xargs -r sh -c 'printf "%s\0" "$@"' sh)
           fi
 
@@ -171,8 +168,7 @@ runs:
             --prefix "${CONDA_BASE_ENV}" \
             "${ENV_FILE_FLAG[@]}" \
             python="${PYTHON_VERSION}" \
-            "${PKGS[@]}" \
-            "${CONDA_EXTRA_FLAGS[@]}"
+            "${DEFAULT_PKGS[@]}"
 
           if [[ -f "${PIP_REQUIREMENTS_FILE}" ]]; then
             "${CONDA_RUNTIME}" run -p "${CONDA_BASE_ENV}" --no-capture-output python3 -mpip install -r "${PIP_REQUIREMENTS_FILE}"

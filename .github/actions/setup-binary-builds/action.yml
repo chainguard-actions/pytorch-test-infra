@@ -109,8 +109,8 @@ runs:
           # (e.g. 3.10), while preserving special suffixes like "t" (e.g. 3.13t, 3.14t)
           SHORT_PYTHON_VERSION=$(echo "${PYTHON_VERSION}" | sed -E 's/^([0-9]+\.[0-9]+[a-z]?).*/\1/')
           ARTIFACT_NAME_RAW="${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}"
-          SAFE_ARTIFACT_NAME=$(printf '%s' "${ARTIFACT_NAME_RAW}" | tr -d '\n\r')
-          echo "ARTIFACT_NAME=${SAFE_ARTIFACT_NAME}" >> "${GITHUB_ENV}"
+          ARTIFACT_NAME_SAFE=$(printf '%s' "${ARTIFACT_NAME_RAW}" | tr -d '\n\r')
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME_SAFE}" >> "${GITHUB_ENV}"
       - name: Setup miniconda (for pytorch_pkg_helpers)
         if: ${{ inputs.setup-miniconda == 'true' }}
         uses: chainguard-actions/conda-incubator-setup-miniconda@b5f012d1f15cb72b8cf888ece1640fff51d4678c # v3.1.1

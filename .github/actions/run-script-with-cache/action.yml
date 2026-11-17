@@ -72,7 +72,7 @@ runs:
         source "${BUILD_ENV_FILE}"
 
         # CONDA_RUN is a command prefix (e.g. "conda run -p ..."); split it on
-        # whitespace exactly like upstream's unquoted ${CONDA_RUN}.
+        # whitespace exactly as upstream's unquoted ${CONDA_RUN} did.
         # shellcheck disable=SC2206
         conda_run=(${CONDA_RUN})
 
@@ -81,8 +81,8 @@ runs:
           exit 1
         else
           if [[ "${SCRIPT}" == *.bat ]]; then
-            ${conda_run[@]+"${conda_run[@]}"} "${SCRIPT}"
+            "${conda_run[@]}" "${SCRIPT}"
           else
-            ${conda_run[@]+"${conda_run[@]}"} bash "${SCRIPT}"
+            "${conda_run[@]}" bash "${SCRIPT}"
           fi
         fi

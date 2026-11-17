@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--pull-docker-image/v20261029-1634
 
 ### script-injection (severity: high)
 
-Rule (b): in action.yml, the retry helper expands its arguments unquoted: `$*  || (sleep 1 && $*) || (sleep 2 && $*)`. It is called as `retry login "${DOCKER_REGISTRY}"` and `retry docker pull "${DOCKER_IMAGE}"`, so the input values (inputs.docker-registry / inputs.docker-image) are passed to the helper quoted but then expanded unquoted. The shell then splits them on whitespace and expands globs. A crafted value can add extra arguments or options to `docker pull` and `docker login`. Fix: use "$@" instead of $*.
+Rule (b): unquoted expansion of workflow-controlled data. The retry helper runs `$*  || (sleep 1 && $*) || (sleep 2 && $*)`, which re-expands its arguments without quotes. Those arguments come from the inputs docker-registry (via DOCKER_REGISTRY) and docker-image (via DOCKER_IMAGE), e.g. `retry docker pull "${DOCKER_IMAGE}"`. So even though the env vars are quoted at the call site, the shell splits the values on whitespace and expands globs again inside retry. Fix: use "$@" instead of $*.
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-In the retry helper in action.yml, I changed the unquoted $* to "$@" in all three attempts. Before this, a value containing spaces or glob characters could add extra arguments to `docker login` or `docker pull`; now each argument passes through as a single word. Both callers already passed single quoted values, so a normal registry or image name behaves the same as before. No other changes were needed. The inputs were already passed through env:. Nothing was run to test the change.
+Replaced unquoted $* with "$@" in the retry helper in action.yml, so arguments keep their boundaries and aren't split or glob-expanded again.
 

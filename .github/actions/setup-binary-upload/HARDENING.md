@@ -10,7 +10,7 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--setup-binary-upload/v20261029-163400** was hardened automatically. 2 finding(s) were identified and resolved across 2 iteration(s).
+Action **pytorch--test-infra--.github--actions--setup-binary-upload/v20261029-163400** was hardened automatically. 4 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
@@ -25,27 +25,35 @@ Locations:
 
 ### github-env-injection (severity: high)
 
-The 'Set the artifact name' step writes values built from inputs.repository, inputs.ref, inputs.python-version, inputs.cuda-version and inputs.arch to $GITHUB_ENV. These arrive through the env vars REPOSITORY, REF, PYTHON_VERSION, CU_VERSION and ARCH, and nothing strips newlines first: echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}". A newline in any of these values can inject extra environment variables. Clean the composed value with printf '%s' ... | tr -d '\n\r' before writing it.
+Step 'Set the artifact name' writes a value built from inputs.repository, inputs.ref, inputs.python-version, inputs.cuda-version and inputs.arch (passed in through the env vars REPOSITORY, REF, PYTHON_VERSION, CU_VERSION, ARCH) to $GITHUB_ENV without sanitising it first: echo "ARTIFACT_NAME=${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}" >> "${GITHUB_ENV}". The '/' replacement does not remove newlines, so an input containing a newline can add arbitrary environment variables. Fix: clean the value with printf '%s' ... | tr -d '\n\r' before writing it.
 
 Locations:
 
 - `action.yml:58`
 
+### github-env-injection (severity: high)
+
+Step 'Generate env variables from pytorch_pkg_helpers' writes BUILD_ENV_FILE to $GITHUB_ENV without sanitising it first: echo "BUILD_ENV_FILE=${BUILD_ENV_FILE}" >> "${GITHUB_ENV}". BUILD_ENV_FILE is built from RUNNER_TEMP, a process env var the composite action inherits and does not set in this script, so the check counts it as workflow-controlled. Fix: run it through printf '%s' "$BUILD_ENV_FILE" | tr -d '\n\r' before the write.
+
+Locations:
+
+- `action.yml:85`
+
+### script-injection (severity: high)
+
+Rule (b): an env var expansion is not quoted in the composite step 'Generate env variables from pytorch_pkg_helpers': 'python -m pip install ${GITHUB_WORKSPACE}/test-infra/tools/pkg-helpers'. Quote it as "${GITHUB_WORKSPACE}/test-infra/tools/pkg-helpers".
+
+Locations:
+
+- `action.yml:79`
+
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses, github-env-injection
+**Fixes applied:** unpinned-uses, github-env-injection, script-injection
 
 **Notes:**
 
-Pinned actions/setup-python@v5 to a26af69be951a213d495a4c3e4e4022e16d87065 and actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262, each with its tag kept in a trailing comment. In the 'Set the artifact name' step, the ARTIFACT_NAME value is now built first, then cleaned with printf '%s' | tr -d '\n\r' before it's written to GITHUB_ENV. Not tested. Not touched: BUILD_ENV_FILE in the last step is also written to GITHUB_ENV, but it's built only from runner variables, not inputs, so it wasn't flagged.
-
-### Iteration 2
-
-**Fixes applied:** github-env-injection
-
-**Notes:**
-
-Sanitized BUILD_ENV_FILE with printf '%s' | tr -d '\n\r' before writing to $GITHUB_ENV in the 'Generate env variables from pytorch_pkg_helpers' step.
+Pinned actions/setup-python@v5 to a26af69be951a213d495a4c3e4e4022e16d87065 and actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262, keeping the tag in a comment after each SHA. Before ARTIFACT_NAME and BUILD_ENV_FILE are written to $GITHUB_ENV, each value now goes through printf '%s' | tr -d '\n\r' to remove newlines. Both values are built from plain variables, not command output, so the sanitising can't hide a failed command. Quoted the ${GITHUB_WORKSPACE} path in the pip install command. I haven't run the action to test these changes.
 

@@ -10,33 +10,33 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--setup-build-test/v20261029-163400** was hardened automatically. 2 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--setup-build-test/v20261029-163400** was hardened automatically. 1 finding(s) were identified and resolved across 2 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-action.yml uses a mutable tag instead of a full 40-character commit SHA: `uses: actions/checkout@v4`.
+Composite action step references a mutable tag rather than a full 40-character commit SHA: `uses: actions/checkout@v4`. Pin it to a commit SHA (e.g. actions/checkout@<40-hex-sha> # v4).
 
 Locations:
 
-- `action.yml:37`
-
-### github-env-injection (severity: high)
-
-The 'Setup useful environment variables' step writes `echo "RUNNER_ARTIFACT_DIR=${RUNNER_TEMP}/artifacts" >> "${GITHUB_ENV}"`. RUNNER_TEMP comes in from the process environment; this script does not set it. The value is written to GITHUB_ENV without first being cleaned with `printf '%s' "$RUNNER_TEMP" | tr -d '\n\r'`. A composite action inherits its environment from the calling workflow, so this check treats the value as untrusted.
-
-Locations:
-
-- `action.yml:46`
+- `action.yml:36`
 
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses, github-env-injection
+**Fixes applied:** unpinned-uses
 
 **Notes:**
 
-Pinned actions/checkout to 11d5960a326750d5838078e36cf38b85af677262 (# v4). RUNNER_TEMP now has newlines and carriage returns stripped (printf | tr -d '\n\r') before it is written to GITHUB_ENV.
+Pinned actions/checkout@v4 to 11d5960a326750d5838078e36cf38b85af677262 # v4 in action.yml.
+
+### Iteration 2
+
+**Fixes applied:** github-env-injection
+
+**Notes:**
+
+Sanitized RUNNER_TEMP (stripped CR/LF via tr) before writing RUNNER_ARTIFACT_DIR to $GITHUB_ENV in action.yml.
 

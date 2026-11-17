@@ -124,7 +124,7 @@ runs:
           echo "::error::no image tag was provided" >&2
           exit 1
         fi
-        safe_first_tag=$(printf '%s' "${first_tag}" | tr -d '\n\r')
+        safe_first_tag=$(printf '%s' "$first_tag" | tr -d '\n\r')
         echo "image=${safe_first_tag}" >> "${GITHUB_OUTPUT}"
 
         # Remote BuildKit is per-arch, so the only buildable platform is the

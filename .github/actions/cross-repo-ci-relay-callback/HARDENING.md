@@ -16,19 +16,19 @@ Action **pytorch--test-infra--.github--actions--cross-repo-ci-relay-callback/v20
 
 ### unpinned-uses (severity: high)
 
-The composite step uses a mutable tag instead of a full 40-character commit SHA: `uses: actions/github-script@v9`. Pin it to a commit SHA, for example `actions/github-script@<sha> # v9`.
+The composite action step pins its action to a version tag, not a full 40-character commit SHA: `uses: actions/github-script@v9`.
 
 Locations:
 
-- `action.yml:154`
+- `action.yml:134`
 
 ### script-injection (severity: high)
 
-Sub-rule (a): an expression is placed directly inside a run: script. The offending line is `run: python3 "${{ github.action_path }}/report_callback.py"`. Use the shell env var instead: `python3 "$GITHUB_ACTION_PATH/report_callback.py"`.
+Rule (a), direct expression interpolation: the 'Send callback to relay server' step puts a GitHub Actions expression straight into a run: command: `run: python3 "${{ github.action_path }}/report_callback.py"`. Use the GITHUB_ACTION_PATH env var instead ("$GITHUB_ACTION_PATH/report_callback.py").
 
 Locations:
 
-- `action.yml:198`
+- `action.yml:188`
 
 ## Iteration Notes
 
@@ -38,5 +38,5 @@ Locations:
 
 **Notes:**
 
-Pinned actions/github-script@v9 to 3a2844b7e9c422d3c10d287c895573f7108da1b3 (# v9). Replaced inline ${{ github.action_path }} in the bash run step with "$GITHUB_ACTION_PATH".
+Pinned actions/github-script@v9 to 3a2844b7e9c422d3c10d287c895573f7108da1b3 (# v9). Replaced ${{ github.action_path }} in the bash run: with "$GITHUB_ACTION_PATH/report_callback.py".
 

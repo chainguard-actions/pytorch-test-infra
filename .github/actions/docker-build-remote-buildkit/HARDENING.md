@@ -16,11 +16,11 @@ Action **pytorch--test-infra--.github--actions--docker-build-remote-buildkit/v20
 
 ### github-env-injection (severity: high)
 
-The composite step writes `echo "image=${first_tag}" >> "${GITHUB_OUTPUT}"`, and first_tag comes from the untrusted input inputs.tags (through env TAGS). The value is already cleaned earlier in the loop: it is read line by line with `read -r` and passed through `echo "${tag}" | tr -d '[:space:]'`. So in practice it can't contain a newline, and this is a strict-pattern finding. It is reported because the required pipeline, `printf '%s' ... | tr -d '\n\r'`, is not applied right before the write. Fix: `safe=$(printf '%s' "$first_tag" | tr -d '\n\r'); echo "image=$safe" >> "$GITHUB_OUTPUT"`.
+The composite step 'Build and push with remote BuildKit' writes `echo "image=${first_tag}" >> "${GITHUB_OUTPUT}"`. `first_tag` comes from the untrusted `inputs.tags` (passed in as env TAGS). The value is read one line at a time and stripped with `tr -d '[:space:]'` higher up in the loop, so in practice it cannot hold newlines and the real risk is low. Still, the required sanitization pipeline (`printf '%s' "$first_tag" | tr -d '\n\r'`) does not run immediately before the write, so this fails the check as written. Fix: `safe=$(printf '%s' "$first_tag" | tr -d '\n\r'); echo "image=$safe" >> "$GITHUB_OUTPUT"`.
 
 Locations:
 
-- `action.yml:118`
+- `action.yml:111`
 
 ## Iteration Notes
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-Fixed in action.yml: `first_tag` now goes through `printf '%s' "$first_tag" | tr -d '\n\r'` right before it is written as `image=` to $GITHUB_OUTPUT. The output value is unchanged, because the loop already removed all whitespace from each tag. The step uses `set -euo pipefail` and `tr` cannot fail on this input, so the change cannot hide an error. Nothing else was edited.
+action.yml: first_tag now goes through printf '%s' | tr -d '\n\r' right before it is written to GITHUB_OUTPUT. Nothing else in the action changed.
 

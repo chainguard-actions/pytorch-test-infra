@@ -16,29 +16,23 @@ Action **pytorch--test-infra--.github--actions--bc-lint/v20261029-163400** was h
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Merge PR changes onto base' step puts ${{ inputs.head_sha }} and ${{ inputs.base_sha }} straight into the run script. Offending lines include: git fetch origin "${{ inputs.head_sha }}", git reset --hard "${{ inputs.base_sha }}" and git merge "${{ inputs.head_sha }}". The double quotes in the script don't help: the expression is filled in before the shell runs, so a value containing a quote character can run commands. Fix: map the inputs to env vars (e.g. HEAD_SHA, BASE_SHA) and use "$HEAD_SHA" / "$BASE_SHA" in the script.
+Rule (a): step 'Merge PR changes onto base' puts inputs directly into its run: script, e.g. `git fetch origin "${{ inputs.head_sha }}"`, `git reset --hard "${{ inputs.base_sha }}"` and `git merge "${{ inputs.head_sha }}"`. Move inputs.head_sha and inputs.base_sha into env: variables and use them double-quoted.
 
 Locations:
 
 - `action.yml:51`
-- `action.yml:52`
-- `action.yml:53`
-- `action.yml:54`
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Build and run BC-linter' step puts expressions straight into the run script, unquoted: --base-commit=${{ inputs.base_sha }}, --head-commit=${{ steps.merge_changes.outputs.new_head_sha }}, ${{ inputs.suppression == 'true' && '--suppressed' || '' }} and ${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}. Whoever calls the action controls inputs.base_sha and inputs.config_dir, so either one can inject shell commands. Fix: pass these values through env vars and quote each expansion. For the optional config_dir, the guarded form ${CONFIG_DIR:+"--config-dir=$CONFIG_DIR"} keeps the argument out when it is empty.
+Rule (a): step 'Build and run BC-linter' puts expressions directly into its run: script: `--base-commit=${{ inputs.base_sha }}`, `--head-commit=${{ steps.merge_changes.outputs.new_head_sha }}`, `${{ inputs.suppression == 'true' && '--suppressed' || '' }}` and `${{ inputs.config_dir != '' && format('--config-dir={0}', inputs.config_dir) || '' }}`. inputs.config_dir is a free-form string, so it can inject commands. Move these into env: variables and use them double-quoted (the guarded form for optional arguments).
 
 Locations:
 
 - `action.yml:71`
-- `action.yml:72`
-- `action.yml:73`
-- `action.yml:74`
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Display documentation link if failed' step puts ${{ inputs.docs_link }} straight into the run script: echo "${{ inputs.docs_link }}". Fix: map it to an env var such as DOCS_LINK and use echo "$DOCS_LINK".
+Rule (a): step 'Display documentation link if failed' puts an input directly into its run: script: `echo "${{ inputs.docs_link }}"`. Move it into an env: variable and use "$DOCS_LINK".
 
 Locations:
 
@@ -46,7 +40,7 @@ Locations:
 
 ### unpinned-uses (severity: high)
 
-Two composite steps reference an action by tag instead of a full 40-character commit SHA: line 30 'uses: actions/checkout@v4' and line 36 'uses: actions/checkout@v4'. Pin both to a commit SHA.
+Two composite steps use a version tag instead of a commit SHA: `uses: actions/checkout@v4` on line 30 and `uses: actions/checkout@v4` on line 36.
 
 Locations:
 
@@ -113,17 +107,14 @@ Locations:
 
 ### Iteration 1
 
-**Fixes applied:** script-injection, static-inline-injection, unpinned-uses
+**Fixes applied:** script-injection, unpinned-uses, static-inline-injection
 
 **Notes:**
 
-I edited action.yml to fix all three finding types.
+I fixed all the findings in action.yml. I haven't run the action to test these changes.
 
-Script injection: every ${{ }} expression in the 'Merge PR changes onto base', 'Build and run BC-linter' and 'Display documentation link if failed' steps now goes through the step's env: block. The env vars are HEAD_SHA, BASE_SHA, NEW_HEAD_SHA, SUPPRESSION, CONFIG_DIR and DOCS_LINK, and each one is double-quoted wherever the script uses it.
-
-Optional flags: '--suppressed' is now set inside the script, only when SUPPRESSION is 'true'. '--config-dir' uses the form ${CONFIG_DIR:+"--config-dir=$CONFIG_DIR"}. Both drop out completely when they're unset, the same as the original expressions did.
-
-Pinning: both actions/checkout@v4 references now point to commit 11d5960a326750d5838078e36cf38b85af677262, with a '# v4' comment kept for readability.
-
-I haven't run the action to test these changes.
+- **Pinned checkout:** both `actions/checkout@v4` steps now point to commit 11d5960a326750d5838078e36cf38b85af677262, with `# v4` kept as a comment.
+- **Merge PR changes onto base:** `inputs.head_sha` and `inputs.base_sha` are now passed in through `env:` as `HEAD_SHA` and `BASE_SHA`, and the script uses them double-quoted.
+- **Build and run BC-linter:** the base SHA, the new head SHA, `suppression` and `config_dir` are now passed in through `env:`. The optional `--suppressed` and `--config-dir=` flags are collected in a bash array, so each one reaches the command as a separate argument. If neither applies, nothing extra is passed, the same as before. The array is expanded with the `${arr[@]+...}` form so `set -u` doesn't stop the script when it's empty.
+- **Display documentation link:** `docs_link` is now passed through `env:` and printed with `echo "$DOCS_LINK"`.
 

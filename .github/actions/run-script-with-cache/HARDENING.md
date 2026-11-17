@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20261029-163400** was hardened automatically. 3 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--run-script-with-cache/v20261029-163400** was hardened automatically. 4 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-action.yml composite step references an action by mutable tag instead of a full commit SHA: `uses: actions/cache@v3`.
+action.yml composite step pins its action to a mutable tag, not a 40-character commit SHA: `uses: actions/cache@v3`.
 
 Locations:
 
@@ -24,11 +24,18 @@ Locations:
 
 ### script-injection (severity: high)
 
-Step 'Run script' breaks rule (a), direct expression interpolation. Its run: block puts an input expression straight into the shell script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. Move it into an env: variable and expand it double-quoted. The same step also breaks rule (b): workflow-controlled env vars are expanded without quotes. These are `if [[ ! -f ${SCRIPT} ]]` (line 56), `if [[ ${SCRIPT} == *.bat ]]` (line 60), `${CONDA_RUN} ${SCRIPT}` (line 61) and `${CONDA_RUN} bash ${SCRIPT}` (line 63). SCRIPT comes from inputs.script. CONDA_RUN is inherited from the calling workflow's environment.
+Rule (a) is violated in the 'Run script' step. An expression is put straight into the run script: `if [[ ${{ inputs.is_windows }} == 'disabled' ]]; then`. Whoever calls the action controls inputs.is_windows, so they can inject shell code. Move it into an env: variable and quote it, e.g. "$IS_WINDOWS".
 
 Locations:
 
 - `action.yml:51`
+
+### script-injection (severity: high)
+
+Rule (b) is violated in the 'Run script' step. The env var SCRIPT (from inputs.script) is expanded without double quotes in several places: `if [[ ! -f ${SCRIPT} ]]`, `echo "...(${SCRIPT})..."` (this one is inside quotes), `if [[ ${SCRIPT} == *.bat ]]`, `${CONDA_RUN} ${SCRIPT}` and `${CONDA_RUN} bash ${SCRIPT}`. The command-argument uses are split on whitespace and glob-expanded, so they need double quotes ("$SCRIPT"). CONDA_RUN is also inherited from the calling workflow and expanded without quotes.
+
+Locations:
+
 - `action.yml:56`
 - `action.yml:60`
 - `action.yml:61`
@@ -50,11 +57,10 @@ Locations:
 
 **Notes:**
 
-I fixed all three findings in action.yml.
+I fixed all three findings in action.yml. Nothing was run or tested.
 
-- **unpinned-uses:** `actions/cache@v3` now points to the full commit SHA I looked up: `@6f8efc29b200d32929f49075959781ed54ec270c # v3`.
-- **script-injection / static-inline-injection:** `inputs.is_windows` no longer appears inline in the script. It is passed in through a new `IS_WINDOWS` env variable and compared with double quotes. `SCRIPT` is now double-quoted everywhere it is used.
-- **CONDA_RUN:** this is a command prefix (e.g. `conda run -p ...`), so it has to split into separate words the way upstream's unquoted `${CONDA_RUN}` did. It is now split into an array with `conda_run=(${CONDA_RUN})` (same whitespace split and globbing as upstream). The array is expanded as `${conda_run[@]+"${conda_run[@]}"}`, so an empty `CONDA_RUN` adds nothing to the command and doesn't trip `set -u` on older bash. As before, an unset `CONDA_RUN` still stops the step when `set -u` is on.
-
-I didn't run the action or any tests after these changes.
+- **Pinned the cache action:** `actions/cache` now points to commit `6f8efc29b200d32929f49075959781ed54ec270c` instead of the `v3` tag. I looked the SHA up for `v3` and kept the tag name as a comment.
+- **Removed the inline expression:** `inputs.is_windows` is now passed in through the step's `env:` block as `IS_WINDOWS` and compared quoted, so it is no longer written straight into the script.
+- **Quoted `SCRIPT`:** every place `SCRIPT` is used as a command argument or tested is now in double quotes.
+- **Changed how `CONDA_RUN` is used:** it is a command prefix (like `conda run -p ...`) that can hold several words. Wrapping it in quotes would turn it into one word, so instead I split it into a list (`conda_run=(${CONDA_RUN})`) and run `"${conda_run[@]}"`. This splits it on spaces exactly as upstream did, and nothing inside it is executed as code.
 

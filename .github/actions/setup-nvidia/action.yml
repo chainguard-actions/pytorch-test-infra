@@ -83,12 +83,18 @@ runs:
       run: |
         if [ "${HAS_NVIDIA}" = "true" ]; then
           echo "HAS_NVIDIA_GPU=true" >> "${GITHUB_ENV}"
-          # GPU_FLAG is a constant, whitespace-separated docker argument LIST that
-          # consumers expand unquoted (docker run ${GPU_FLAG} ...), so every token
-          # stays a separate argument. Build it from an array so each token is
-          # explicit; the exported value is identical to upstream's.
+          # GPU_FLAG is consumed by downstream workflows as an unquoted env var
+          # (e.g. docker run ${GPU_FLAG} ...), so it must remain a single
+          # space-separated string. Build the tokens as an array (each a
+          # constant, no workflow-controlled data) and join them for export.
           gpu_args=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
-          printf 'GPU_FLAG=%s\n' "${gpu_args[*]}" >> "${GITHUB_ENV}"
+          gpu_flag_value="${gpu_args[*]}"
+          EOF_DELIM="EOF_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "GPU_FLAG<<${EOF_DELIM}"
+            printf '%s\n' "${gpu_flag_value}"
+            echo "${EOF_DELIM}"
+          } >> "${GITHUB_ENV}"
         else
           echo "HAS_NVIDIA_GPU=false" >> "${GITHUB_ENV}"
         fi

@@ -110,7 +110,8 @@ runs:
           echo "skip=false" >> "${GITHUB_OUTPUT}"
         else
           echo "skip=true" >> "${GITHUB_OUTPUT}"
-          echo "docker-image=$(sanitize "${DOCKER_IMAGE_NAME}")" >> "${GITHUB_OUTPUT}"
+          SAFE_DOCKER_IMAGE_NAME="$(sanitize "${DOCKER_IMAGE_NAME}")"
+          echo "docker-image=${SAFE_DOCKER_IMAGE_NAME}" >> "${GITHUB_OUTPUT}"
 
           echo "Not using custom ECR registry.  Either it was not requested or there is no Docker build script in the ${REPO_NAME} repo..."
           exit 0
@@ -120,8 +121,10 @@ runs:
           # The docker image name already includes the ECR prefix and tag, so we can just
           # use it as it is, but first let's extract the tag
           DOCKER_TAG=$(echo "${DOCKER_IMAGE_NAME}" | awk -F '[:,]' '{print $2}')
-          echo "docker-tag=$(sanitize "${DOCKER_TAG}")" >> "${GITHUB_OUTPUT}"
-          echo "docker-image=$(sanitize "${DOCKER_IMAGE_NAME}")" >> "${GITHUB_OUTPUT}"
+          SAFE_DOCKER_TAG="$(sanitize "${DOCKER_TAG}")"
+          SAFE_DOCKER_IMAGE_NAME="$(sanitize "${DOCKER_IMAGE_NAME}")"
+          echo "docker-tag=${SAFE_DOCKER_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "docker-image=${SAFE_DOCKER_IMAGE_NAME}" >> "${GITHUB_OUTPUT}"
         else
           if [[ "${DOCKER_IMAGE_NAME}" == *:* ]]; then
             CUSTOM_TAG_PREFIX=${DOCKER_IMAGE_NAME#*:}
@@ -133,9 +136,12 @@ runs:
             exit 1
           fi
           DOCKER_TAG=${CUSTOM_TAG_PREFIX:+${CUSTOM_TAG_PREFIX}-}${COMPUTED_CI_DOCKER_HASH}
-          echo "docker-tag=$(sanitize "${DOCKER_TAG}")" >> "${GITHUB_OUTPUT}"
-          echo "docker-image=$(sanitize "${DOCKER_REGISTRY}/${REPO_NAME}/${DOCKER_IMAGE_NAME}:${DOCKER_TAG}")" >> "${GITHUB_OUTPUT}"
-          echo "custom-tag-prefix=$(sanitize "${CUSTOM_TAG_PREFIX}")" >> "${GITHUB_OUTPUT}"
+          SAFE_DOCKER_TAG="$(sanitize "${DOCKER_TAG}")"
+          SAFE_DOCKER_IMAGE="$(sanitize "${DOCKER_REGISTRY}/${REPO_NAME}/${DOCKER_IMAGE_NAME}:${DOCKER_TAG}")"
+          SAFE_CUSTOM_TAG_PREFIX="$(sanitize "${CUSTOM_TAG_PREFIX}")"
+          echo "docker-tag=${SAFE_DOCKER_TAG}" >> "${GITHUB_OUTPUT}"
+          echo "docker-image=${SAFE_DOCKER_IMAGE}" >> "${GITHUB_OUTPUT}"
+          echo "custom-tag-prefix=${SAFE_CUSTOM_TAG_PREFIX}" >> "${GITHUB_OUTPUT}"
         fi
 
     - name: Check if image should be built
@@ -159,7 +165,7 @@ runs:
         }
 
         retry () {
-          $*  || (sleep 1 && $*) || (sleep 2 && $*)
+          "$@" || (sleep 1 && "$@") || (sleep 2 && "$@")
         }
 
         retry login "${DOCKER_REGISTRY}"
@@ -230,7 +236,7 @@ runs:
         }
 
         retry () {
-          $*  || (sleep 1 && $*) || (sleep 2 && $*)
+          "$@" || (sleep 1 && "$@") || (sleep 2 && "$@")
         }
 
         retry login "${DOCKER_REGISTRY}"
@@ -266,9 +272,7 @@ runs:
 
           IMAGE_NAME=$(printf '%s\n' "${DOCKER_IMAGE#"${DOCKER_REGISTRY}/${REPO_NAME}/"}" | awk -F '[:,]' '{print $1}')
           # Build new image
-          # shellcheck disable=SC2206
-          BUILD_CMD=(${DOCKER_BUILD_SCRIPT})   # same split and glob as upstream's unquoted expansion
-          "${BUILD_CMD[@]}" "${IMAGE_NAME}${CUSTOM_TAG_PREFIX:+:${CUSTOM_TAG_PREFIX}}" -t "${DOCKER_IMAGE}"
+          ${DOCKER_BUILD_SCRIPT} "${IMAGE_NAME}${CUSTOM_TAG_PREFIX:+:${CUSTOM_TAG_PREFIX}}" -t "${DOCKER_IMAGE}"
 
           popd
 

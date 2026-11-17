@@ -20,17 +20,18 @@ jobs:
           echo "commit: $COMMIT"
           DIR="$GITHUB_WORKSPACE/server-url-target"
           if [ ! -f "$DIR/action.yml" ]; then
-            echo "FAIL: action.yml not found"
+            echo "FAIL: action.yml not found in server-url-target"
             exit 1
           fi
-          URL="$(git -C "$DIR" remote get-url origin)"
-          echo "origin: $URL"
-          if ! echo "$URL" | grep -q '^https://github.com/actions/checkout'; then
-            echo "FAIL: origin URL does not use the given server URL"
-            exit 1
-          fi
-          if [ "$COMMIT" != "$(git -C "$DIR" rev-parse HEAD)" ]; then
-            echo "FAIL: commit output does not match HEAD"
+          URL="$(git -C "$DIR" config --get remote.origin.url)"
+          echo "origin url: $URL"
+          case "$URL" in
+            https://github.com/actions/checkout*) ;;
+            *) echo "FAIL: origin url does not use https://github.com"; exit 1 ;;
+          esac
+          HEAD_SHA="$(git -C "$DIR" rev-parse HEAD)"
+          if [ "$COMMIT" != "$HEAD_SHA" ]; then
+            echo "FAIL: commit output '$COMMIT' does not match HEAD '$HEAD_SHA'"
             exit 1
           fi
           echo "PASS"

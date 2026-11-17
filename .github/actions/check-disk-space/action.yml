@@ -36,22 +36,19 @@ runs:
       env:
         MINIMUM_AVAILABLE_SPACE_IN_GB: ${{ inputs.minimum-available-space-in-gb }}
       run: |
-        echo "Print the available disk space for manual inspection"
-        df -h
-
-        if [[ -z "${MINIMUM_AVAILABLE_SPACE_IN_GB}" ]]; then
-          MINIMUM_AVAILABLE_SPACE_IN_GB=0
-        fi
-        if ! [[ "${MINIMUM_AVAILABLE_SPACE_IN_GB}" =~ ^[0-9]+$ ]]; then
-          echo "minimum-available-space-in-gb must be a non-negative integer" >&2
+        if ! [[ "$MINIMUM_AVAILABLE_SPACE_IN_GB" =~ ^[0-9]+$ ]]; then
+          echo "Error: minimum-available-space-in-gb must be a non-negative integer" >&2
           exit 1
         fi
+
+        echo "Print the available disk space for manual inspection"
+        df -h
 
         function check_disk_space() {
           set +e
 
           # Set the minimum requirement space to 6GB
-          MINIMUM_AVAILABLE_SPACE_IN_KB=$((MINIMUM_AVAILABLE_SPACE_IN_GB * 1024 * 1024))
+          MINIMUM_AVAILABLE_SPACE_IN_KB=$(( 10#${MINIMUM_AVAILABLE_SPACE_IN_GB} * 1024 * 1024 ))
 
           # Use KB to avoid floating point warning like 3.1GB
           df -k | tr -s ' ' | cut -d' ' -f 4,9 | while read -r LINE;

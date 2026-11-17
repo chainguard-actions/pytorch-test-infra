@@ -10,45 +10,60 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--calculate-docker-image/v20261029-163400** was hardened automatically. 3 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--calculate-docker-image/v20261029-163400** was hardened automatically. 4 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### github-env-injection (severity: high)
 
-Step 'Calculate docker image' (id: calculate-image) writes values that come from workflow-controlled sources to $GITHUB_OUTPUT without the `printf '%s' ... | tr -d '\n\r'` sanitization step. The sources are inputs.docker-image-name, inputs.repo-name or github.event.repository.name, inputs.docker-registry and inputs.custom-tag-prefix. The writes are: `echo "docker-image=${DOCKER_IMAGE_NAME}" >> "${GITHUB_OUTPUT}"` (lines 95 and 106), `echo "docker-tag=${DOCKER_TAG}" >> "${GITHUB_OUTPUT}"`, where DOCKER_TAG is taken from DOCKER_IMAGE_NAME or CUSTOM_TAG_PREFIX (lines 105 and 118), `echo "docker-image=${DOCKER_REGISTRY}/${REPO_NAME}/${DOCKER_IMAGE_NAME}:${DOCKER_TAG}" >> "${GITHUB_OUTPUT}"` (line 119) and `echo "custom-tag-prefix=${CUSTOM_TAG_PREFIX}" >> "${GITHUB_OUTPUT}"` (line 120). A value containing a newline could inject extra step outputs.
+Step 'Calculate docker image' writes values taken from inputs to $GITHUB_OUTPUT without first running them through printf '%s' ... | tr -d '\n\r'. The inputs are inputs.docker-image-name, inputs.docker-registry, inputs.repo-name / github.event.repository.name and inputs.custom-tag-prefix. The writes are: echo "docker-image=${DOCKER_IMAGE_NAME}" (lines 92 and 103), echo "docker-tag=${DOCKER_TAG}" (lines 102 and 115; DOCKER_TAG comes from DOCKER_IMAGE_NAME or CUSTOM_TAG_PREFIX), echo "docker-image=${DOCKER_REGISTRY}/${REPO_NAME}/${DOCKER_IMAGE_NAME}:${DOCKER_TAG}" (line 116) and echo "custom-tag-prefix=${CUSTOM_TAG_PREFIX}" (line 117). A newline inside any of these values lets a caller inject extra step outputs.
 
 Locations:
 
-- `action.yml:95`
-- `action.yml:106`
-- `action.yml:119`
-- `action.yml:120`
-
-### unpinned-uses (severity: high)
-
-A composite step pins an action to a version tag instead of a full commit SHA: `uses: nick-fields/retry@v3.0.0`.
-
-Locations:
-
-- `action.yml:237`
+- `action.yml:92`
+- `action.yml:102`
+- `action.yml:103`
+- `action.yml:115`
+- `action.yml:116`
+- `action.yml:117`
 
 ### script-injection (severity: high)
 
-Rule (b), unquoted expansion of workflow-controlled data. Step 'Build docker image' passes a bash script to nick-fields/retry as `command:`, and that script expands env vars without quotes. DOCKER_IMAGE comes from steps.calculate-image.outputs.docker-image, which is built from inputs. Line 249: `IMAGE_NAME=$(echo ${DOCKER_IMAGE#"${DOCKER_REGISTRY}/${REPO_NAME}/"} | awk -F '[:,]' '{print $1}')`. DOCKER_BUILD_SCRIPT comes from inputs.docker-build-script and is expanded unquoted as a command on line 251: `${DOCKER_BUILD_SCRIPT} "${IMAGE_NAME}${CUSTOM_TAG_PREFIX:+:${CUSTOM_TAG_PREFIX}}" -t "${DOCKER_IMAGE}"`.
+Rule (b): the helper `retry () { $*  || (sleep 1 && $*) || (sleep 2 && $*) }` expands its arguments unquoted with $*. It is called as `retry login "${DOCKER_REGISTRY}"`, and DOCKER_REGISTRY comes from inputs.docker-registry, so the value is word-split and glob-expanded again. The same code appears in the 'Check if image should be built' step (line 141) and the 'Login to ECR' step (line 212). Use "$@" instead.
 
 Locations:
 
-- `action.yml:249`
-- `action.yml:251`
+- `action.yml:141`
+- `action.yml:212`
+
+### script-injection (severity: high)
+
+Rule (b): in the 'Build docker image' step, nick-fields/retry runs a bash script from its `command` input. That script contains `IMAGE_NAME=$(echo ${DOCKER_IMAGE#"${DOCKER_REGISTRY}/${REPO_NAME}/"} | awk ...)`. DOCKER_IMAGE comes from step outputs built out of inputs, and it is expanded without double quotes.
+
+Locations:
+
+- `action.yml:246`
+
+### unpinned-uses (severity: high)
+
+A composite step references an action by tag instead of a full commit SHA: `uses: nick-fields/retry@v3.0.0`.
+
+Locations:
+
+- `action.yml:234`
 
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** github-env-injection, unpinned-uses, script-injection
+**Fixes applied:** github-env-injection, script-injection, unpinned-uses
 
 **Notes:**
 
-Pinned nick-fields/retry to 7152eba30c6575329ac0576536151aca5a72780e (v3.0.0). Added a sanitize() helper (printf '%s' | tr -d '\n\r') in the calculate-image step and used it for every write of docker-image, docker-tag and custom-tag-prefix to $GITHUB_OUTPUT. The helper only wraps plain variables, never a command that can fail, so no error gets hidden. In the Build docker image retry command, the DOCKER_IMAGE prefix-strip expansion is now quoted (printf '%s\n' replaces echo). DOCKER_BUILD_SCRIPT is now assigned unquoted into a bash array, which splits and globs it exactly as upstream's unquoted expansion did, and the array is run as "${BUILD_CMD[@]}". I haven't run or tested the edited action.
+I fixed all four findings in action.yml. I haven't run the action to test the changes.
+
+- **Output injection (github-env-injection):** I added a `sanitize()` helper (`printf '%s' | tr -d '\n\r'`) to the 'Calculate docker image' step. Every value it writes to $GITHUB_OUTPUT (docker-image, docker-tag, custom-tag-prefix) now goes through it first. Each value is cleaned from a plain variable, not by wrapping a command, so if a command fails the step still stops as before.
+- **Retry helper (script-injection):** In the 'Check if image should be built' and 'Login to ECR' steps, `retry()` now uses "$@" instead of $*. The registry value is no longer split into words or glob-expanded.
+- **Image name in the build step (script-injection):** The unquoted `echo ${DOCKER_IMAGE#...}` is now `printf '%s\n' "${DOCKER_IMAGE#...}"`. The text passed to awk is the same as before.
+- **Unpinned action (unpinned-uses):** `nick-fields/retry` is now pinned to `7152eba30c6575329ac0576536151aca5a72780e # v3.0.0`. I looked the SHA up with lookup_action_sha rather than guessing it.
 
