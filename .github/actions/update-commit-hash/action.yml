@@ -59,14 +59,14 @@ runs:
           -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
           "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
     - name: Checkout the source repo with the pinned commit file
-      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      uses: chainguard-actions/actions-checkout@31bbccf724702f8a0dc7a3ed7db8fcca2066babc # v4
       with:
         ref: 'main'
         submodules: true
         token: ${{ inputs.updatebot-token }}
 
     - name: Checkout test-infra for the update_commit_hashes scripts
-      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      uses: chainguard-actions/actions-checkout@31bbccf724702f8a0dc7a3ed7db8fcca2066babc # v4
       with:
         repository: ${{ inputs.test-infra-repository }}
         ref: ${{ inputs.test-infra-ref }}
@@ -80,7 +80,7 @@ runs:
       run: |
         git clone "https://github.com/${REPO_OWNER}/${REPO_NAME}.git" --quiet
 
-    - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+    - uses: chainguard-actions/actions-setup-python@ace3254bb5011efbd0650a7120a0441ebd1f9400 # v5
       with:
         python-version: '3.11'
         cache: pip

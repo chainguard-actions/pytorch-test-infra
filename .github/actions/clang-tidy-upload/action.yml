@@ -54,7 +54,7 @@ runs:
 
     - name: configure aws credentials
       id: aws-credentials
-      uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+      uses: chainguard-actions/aws-actions-configure-aws-credentials@05c5161294fac31f72449e5671350b7bf823c91f # v4
       if: ${{ fromJSON(inputs.upload-to-s3) }}
       with:
         role-to-assume: arn:aws:iam::308535385114:role/gha_workflow_clang_tidy_upload
@@ -80,7 +80,7 @@ runs:
         path: clang-format
 
     - name: Upload clang-tidy to GHA
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      uses: chainguard-actions/actions-upload-artifact@58b2f77fde711fbc8c271d0e5877c5d7d9a19733 # v6
       with:
         name: ${{ inputs.platform }}-${{ inputs.version }}-clang-tidy
         retention-days: 14
@@ -88,7 +88,7 @@ runs:
         path: clang-tidy
 
     - name: Upload clang-format to GHA
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      uses: chainguard-actions/actions-upload-artifact@58b2f77fde711fbc8c271d0e5877c5d7d9a19733 # v6
       with:
         name: ${{ inputs.platform }}-${{ inputs.version }}-clang-format
         retention-days: 14
