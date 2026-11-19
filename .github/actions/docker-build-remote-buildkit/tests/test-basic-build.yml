@@ -1,0 +1,89 @@
+name: Test basic buildx build with all inputs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker on PATH
+        run: |
+          rm -rf /tmp/fake-docker && mkdir -p /tmp/fake-docker/bin
+          cat > /tmp/fake-docker/bin/docker <<'EOF'
+          #!/bin/bash
+          echo "$*" >> /tmp/fake-docker/calls.log
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            shift 2
+            printf '%s\n' "$@" > /tmp/fake-docker/build-args.txt
+            n=$(cat /tmp/fake-docker/count 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > /tmp/fake-docker/count
+            echo "#1 fake build ok"
+            exit 0
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fake-docker/bin/docker
+          echo "/tmp/fake-docker/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: "ghcr.io/example/img:abc123, ghcr.io/example/img:latest"
+          context: ./ctx
+          file: ./ctx/Dockerfile.custom
+          target: final
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.title=demo
+          cache-from: type=registry,ref=ghcr.io/example/cache
+          cache-to: type=registry,ref=ghcr.io/example/cache,mode=max
+          connect-attempts: '2'
+          connect-delay: '0'
+      - name: Assert image output is first tag
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/img:abc123" ]; then
+            echo "FAIL: expected ghcr.io/example/img:abc123"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert builder registered and build args assembled
+        run: |
+          echo "--- calls ---"; cat /tmp/fake-docker/calls.log
+          echo "--- build args ---"; cat /tmp/fake-docker/build-args.txt
+          grep -q "buildx create --name remote-buildkit --driver remote --use tcp://buildkitd-" /tmp/fake-docker/calls.log || { echo "FAIL: builder not created"; exit 1; }
+          case "$(uname -m)" in
+            aarch64|arm64) plat=linux/arm64 ;;
+            *) plat=linux/amd64 ;;
+          esac
+          joined="|$(paste -sd'|' /tmp/fake-docker/build-args.txt)|"
+          echo "joined: $joined"
+          for want in \
+            "|--tag|ghcr.io/example/img:abc123|" \
+            "|--tag|ghcr.io/example/img:latest|" \
+            "|--platform|${plat}|" \
+            "|--file|./ctx/Dockerfile.custom|" \
+            "|--target|final|" \
+            "|--build-arg|FOO=bar|" \
+            "|--build-arg|BAZ=qux|" \
+            "|--label|org.opencontainers.image.title=demo|" \
+            "|--cache-from|type=registry,ref=ghcr.io/example/cache|" \
+            "|--cache-to|type=registry,ref=ghcr.io/example/cache,mode=max|" \
+            "|--push|"; do
+            if ! printf '%s' "$joined" | grep -qF -- "$want"; then
+              echo "FAIL: missing $want"
+              exit 1
+            fi
+          done
+          last="$(tail -n1 /tmp/fake-docker/build-args.txt)"
+          if [ "$last" != "./ctx" ]; then
+            echo "FAIL: expected context ./ctx as last arg, got '$last'"
+            exit 1
+          fi
+          if [ "$(cat /tmp/fake-docker/count)" != "1" ]; then
+            echo "FAIL: expected exactly one build invocation"
+            exit 1
+          fi
+          echo "PASS"

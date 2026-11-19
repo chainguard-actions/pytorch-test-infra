@@ -1,0 +1,72 @@
+name: Test basic usage (cpu)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Windows-tool shims (powershell, cygpath, EC2 metadata curl)
+        run: |
+          set -euo pipefail
+          SHIM="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIM"
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          cat > "$SHIM/powershell" <<'EOF'
+          #!/bin/sh
+          echo "powershell $*" >> "$RUNNER_TEMP/powershell-calls.log"
+          exit 0
+          EOF
+          cat > "$SHIM/cygpath" <<'EOF'
+          #!/bin/sh
+          echo "$1"
+          EOF
+          cat > "$SHIM/curl" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *169.254.169.254*api/token*) echo "fake-token"; exit 0 ;;
+            *169.254.169.254*meta-data/ami-id*) echo "ami-fake"; exit 0 ;;
+            *169.254.169.254*meta-data/instance-id*) echo "i-fake"; exit 0 ;;
+            *169.254.169.254*meta-data/instance-type*) echo "t3.fake"; exit 0 ;;
+            *169.254.169.254*) echo "unknown"; exit 0 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+          chmod +x "$SHIM"/*
+          echo "$SHIM" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: cpu
+      - name: Assert environment variables and directories
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "$RUNNER_TEMP/artifacts" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR unexpected"; exit 1
+          fi
+          if [ "$RUNNER_TEST_RESULTS_DIR" != "$RUNNER_TEMP/test-results" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR unexpected"; exit 1
+          fi
+          [ -d "$RUNNER_ARTIFACT_DIR" ] || { echo "FAIL: artifact dir missing"; exit 1; }
+          [ -d "$RUNNER_TEST_RESULTS_DIR" ] || { echo "FAIL: test results dir missing"; exit 1; }
+          echo "PASS"
+      - name: Assert git global config
+        run: |
+          for kv in core.longpaths=true core.symlinks=true core.fsmonitor=false; do
+            k="${kv%%=*}"; v="${kv#*=}"
+            actual="$(git config --global --get "$k" || true)"
+            echo "$k=$actual"
+            if [ "$actual" != "$v" ]; then
+              echo "FAIL: expected $k=$v"; exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert powershell steps were invoked
+        run: |
+          cat "$RUNNER_TEMP/powershell-calls.log" || true
+          n="$(wc -l < "$RUNNER_TEMP/powershell-calls.log" 2>/dev/null || echo 0)"
+          if [ "$n" -lt 2 ]; then
+            echo "FAIL: expected 2 powershell step invocations, got $n"; exit 1
+          fi
+          echo "PASS"

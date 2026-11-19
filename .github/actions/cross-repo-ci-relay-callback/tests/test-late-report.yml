@@ -1,0 +1,63 @@
+name: Test late report from file
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local OIDC + relay server
+        run: |
+          rm -rf /tmp/relay && mkdir -p /tmp/relay
+          nohup python3 tests/fixtures/mock_relay.py 8765 /tmp/relay > /tmp/relay-server.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8765/health && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8765/health || { cat /tmp/relay-server.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:8765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+      - name: Write verdict list file
+        run: |
+          cat > /tmp/verdicts.json <<'EOF'
+          [
+            {"delivery_id": "d1", "workflow_name": "wf", "job_name": "build-npu", "check_run_id": 123,
+             "triage_verdict": {"schema_version": 1, "category": "upstream", "confidence": "high", "summary": "s1"}},
+            {"delivery_id": "d2", "workflow_name": "wf", "job_name": "test-npu",
+             "triage_verdict": {"schema_version": 1, "category": "infra", "confidence": "medium", "summary": "s2"}}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          event-type: late-report
+          triage-verdict-list: '@/tmp/verdicts.json'
+          callback-url: http://127.0.0.1:8765/github/callback/
+      - name: Assert late report payload
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          [ "$OUTCOME" = "success" ] || { echo "FAIL: expected success"; exit 1; }
+          test -f /tmp/relay/requests.jsonl || { echo "FAIL: no callback received"; exit 1; }
+          cat /tmp/relay/requests.jsonl
+          python3 - <<'EOF'
+          import json, sys
+          lines = [json.loads(l) for l in open("/tmp/relay/requests.jsonl") if l.strip()]
+          def fail(msg):
+              print("FAIL:", msg); sys.exit(1)
+          if len(lines) != 1: fail(f"expected 1 request, got {len(lines)}")
+          r = lines[0]
+          if r["auth"] != "Bearer mock-oidc-token-123": fail("auth")
+          b = r["body"]
+          if b["event_type"] != "late-report": fail("event_type")
+          if "workflow" in b: fail("late report must not carry a workflow block")
+          reps = b["reports"]
+          if len(reps) != 2: fail(f"reports {len(reps)}")
+          if reps[0]["job_name"] != "build-npu" or reps[0]["check_run_id"] != 123: fail("report 0")
+          if reps[1]["triage_verdict"]["category"] != "infra": fail("report 1")
+          print("PASS")
+          EOF

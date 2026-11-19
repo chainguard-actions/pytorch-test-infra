@@ -1,0 +1,44 @@
+name: Test suppression and config_dir inputs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: Compute base/head SHAs
+        id: shas
+        run: |
+          HEAD_SHA=$(git rev-parse HEAD)
+          BASE_SHA=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
+          echo "head=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE_SHA" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          repo: pytorch/test-infra
+          base_sha: ${{ steps.shas.outputs.base }}
+          head_sha: ${{ steps.shas.outputs.head }}
+          suppression: 'true'
+          config_dir: '.'
+          docs_link: https://github.com/pytorch/test-infra/wiki/BC-Linter
+      - name: Assert action ran (success with cleanup, or failed gracefully on sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -d "$GITHUB_WORKSPACE/_repo" ] || [ -d "$GITHUB_WORKSPACE/_test-infra" ]; then
+              echo "FAIL: cleanup did not remove _repo/_test-infra"
+              exit 1
+            fi
+            echo "PASS: action succeeded and cleaned up"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

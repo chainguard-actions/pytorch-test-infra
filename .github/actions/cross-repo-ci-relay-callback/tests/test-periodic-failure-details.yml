@@ -1,0 +1,57 @@
+name: Test periodic failure with failed tests detail
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local OIDC + relay server
+        run: |
+          rm -rf /tmp/relay && mkdir -p /tmp/relay
+          nohup python3 tests/fixtures/mock_relay.py 8765 /tmp/relay > /tmp/relay-server.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8765/health && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8765/health || { cat /tmp/relay-server.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:8765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: failure
+          delivery-id: fedcba9876543210fedcba9876543210fedcba98
+          event-type: periodic
+          failed-tests-detail: '[{"name":"test_foo","classname":"TestBar","message":"AssertionError"},{"name":"test_baz"}]'
+          triage-verdict: '[1, 2, 3]'
+          callback-url: http://127.0.0.1:8765/github/callback
+      - name: Assert callback payload
+        run: |
+          test -f /tmp/relay/requests.jsonl || { cat /tmp/relay-server.log; echo "FAIL: no callback received"; exit 1; }
+          cat /tmp/relay/requests.jsonl
+          python3 - <<'EOF'
+          import json, sys
+          lines = [json.loads(l) for l in open("/tmp/relay/requests.jsonl") if l.strip()]
+          def fail(msg):
+              print("FAIL:", msg); sys.exit(1)
+          if len(lines) != 1: fail(f"expected 1 request, got {len(lines)}")
+          b = lines[0]["body"]
+          if b["event_type"] != "periodic": fail("event_type")
+          w = b["workflow"]
+          if w["status"] != "completed": fail("status")
+          if w["conclusion"] != "failure": fail("conclusion")
+          d = w.get("failed_tests_detail")
+          if not isinstance(d, list) or len(d) != 2: fail(f"failed_tests_detail {d!r}")
+          if d[0]["name"] != "test_foo" or d[0]["classname"] != "TestBar": fail("detail[0]")
+          if "triage_verdict" in w: fail("invalid (non-object) triage verdict should be dropped")
+          if "test_results" in w: fail("test_results should be absent")
+          if "artifact_url" in w: fail("artifact_url should be absent")
+          # job-name defaults to github.job
+          if w["job_name"] != "test": fail(f"job_name default {w['job_name']!r}")
+          print("PASS")
+          EOF

@@ -1,0 +1,24 @@
+name: Test basic pull (image not present locally)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: bash tests/fixtures/setup-mocks.sh
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/myorg/myimage:1.0
+      - name: Assert login and pull happened
+        run: |
+          cat /tmp/fake-calls.log
+          grep -q "^aws ecr get-login-password --region us-east-1$" /tmp/fake-calls.log || { echo "FAIL: aws not called"; exit 1; }
+          grep -q "^docker login -u AWS --password-stdin 308535385114.dkr.ecr.us-east-1.amazonaws.com$" /tmp/fake-calls.log || { echo "FAIL: login to default registry missing"; exit 1; }
+          grep -q "^docker manifest inspect example.com/myorg/myimage:1.0$" /tmp/fake-calls.log || { echo "FAIL: manifest inspect missing"; exit 1; }
+          grep -q "^docker inspect --type=image example.com/myorg/myimage:1.0$" /tmp/fake-calls.log || { echo "FAIL: local inspect missing"; exit 1; }
+          n=$(grep -c "^docker pull example.com/myorg/myimage:1.0$" /tmp/fake-calls.log || true)
+          if [ "$n" != "1" ]; then echo "FAIL: expected 1 pull, got $n"; exit 1; fi
+          echo "PASS"

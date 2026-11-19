@@ -1,0 +1,45 @@
+name: Test with venv input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create virtual environment
+        run: |
+          set -eux
+          if ! python3 -m venv /tmp/test-venv; then
+            sudo apt-get update || apt-get update
+            PYV=$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
+            (sudo apt-get install -y "python${PYV}-venv" || apt-get install -y "python${PYV}-venv" || sudo apt-get install -y python3-venv || apt-get install -y python3-venv)
+            rm -rf /tmp/test-venv
+            python3 -m venv /tmp/test-venv
+          fi
+          test -f /tmp/test-venv/bin/activate
+      - id: action
+        uses: .
+        with:
+          venv: /tmp/test-venv/bin/activate
+      - name: Assert psutil was installed into the venv
+        run: |
+          /tmp/test-venv/bin/python -c 'import psutil; print(psutil.__version__)' | tee /tmp/psutil-version
+          if [ "$(cat /tmp/psutil-version)" != "7.0.0" ]; then
+            echo "FAIL: expected psutil 7.0.0 in venv"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert runners-info output is non-empty JSON
+        env:
+          ACTUAL: ${{ steps.action.outputs.runners-info }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "FAIL: runners-info output is empty"
+            exit 1
+          fi
+          if ! printf '%s' "$ACTUAL" | python3 -c 'import json,sys; json.load(sys.stdin)'; then
+            echo "FAIL: runners-info is not valid JSON"
+            exit 1
+          fi
+          echo "PASS"

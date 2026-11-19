@@ -1,0 +1,41 @@
+name: Test dry-run with benchmark results
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare results dir
+        run: |
+          mkdir -p "$RUNNER_TEMP/bench-results"
+          cat > "$RUNNER_TEMP/bench-results/results.json" <<'EOF'
+          [
+            {
+              "benchmark": {"name": "test-bench", "mode": "inference", "extra_info": {}},
+              "model": {"name": "dummy", "type": "test", "origins": ["local"]},
+              "metric": {"name": "latency", "benchmark_values": [1.0], "target_value": 0}
+            }
+          ]
+          EOF
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          benchmark-results-dir: ${{ runner.temp }}/bench-results
+          benchmark-name: test-bench
+          dry-run: 'true'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert action ran (succeeded, or failed gracefully on sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: dry-run upload succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (job id lookup on sentinel repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

@@ -1,0 +1,46 @@
+name: Test teardown with extra-delete-dir input (fake powershell)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake powershell shim (Windows-only action under Linux act)
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/powershell" <<'EOF'
+          #!/bin/bash
+          LOG=/tmp/fake-powershell.log
+          echo "x" >> /tmp/fake-powershell.count
+          printf '\n=== INVOCATION: %s ===\n' "$*" >> "$LOG"
+          file=$(echo "$*" | grep -oE "[^' \"]+\.ps1" | head -1)
+          if [ -n "$file" ] && [ -f "$file" ]; then
+            cat "$file" >> "$LOG"
+            printf '\n' >> "$LOG"
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/powershell"
+          rm -f /tmp/fake-powershell.log /tmp/fake-powershell.count
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/extra-dir"
+          echo data > "$RUNNER_TEMP/extra-dir/file.txt"
+      - id: action
+        uses: .
+        with:
+          extra-delete-dir: ${{ runner.temp }}/extra-dir
+      - name: Assert action completed and steps ran
+        run: |
+          cat /tmp/fake-powershell.log || { echo "FAIL: powershell never invoked"; exit 1; }
+          COUNT=$(wc -l < /tmp/fake-powershell.count | tr -d ' ')
+          echo "invocations: $COUNT"
+          if [ "$COUNT" -ne 2 ]; then
+            echo "FAIL: expected 2 powershell invocations"
+            exit 1
+          fi
+          if ! grep -q 'Stop-Process' /tmp/fake-powershell.log; then
+            echo "FAIL: kill-sessions script not run"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,38 @@
+name: Test hidden files are excluded by default
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create a directory containing only hidden files
+        run: |
+          mkdir -p "$RUNNER_TEMP/hidden-only/.secret-dir"
+          echo "hidden" > "$RUNNER_TEMP/hidden-only/.hidden-file"
+          echo "hidden" > "$RUNNER_TEMP/hidden-only/.secret-dir/data.txt"
+          ls -la "$RUNNER_TEMP/hidden-only"
+      # With include-hidden-files=false (default), no files are found, so the
+      # action must short-circuit to the ignore path without contacting S3.
+      - id: action
+        uses: .
+        with:
+          path: ${{ runner.temp }}/hidden-only
+          if-no-files-found: ignore
+      - name: Assert action succeeded without uploading anything
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          ACTUAL: ${{ steps.action.outputs.uploaded-objects }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "uploaded-objects: '$ACTUAL'"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success (hidden files should be excluded)"
+            exit 1
+          fi
+          NORM="$(echo "$ACTUAL" | tr -d '[:space:]')"
+          if [ -n "$NORM" ] && [ "$NORM" != "{}" ]; then
+            echo "FAIL: expected no uploaded objects"
+            exit 1
+          fi
+          echo "PASS"

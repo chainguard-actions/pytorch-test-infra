@@ -1,0 +1,52 @@
+name: Test late report split into chunks
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local OIDC + relay server
+        run: |
+          rm -rf /tmp/relay && mkdir -p /tmp/relay
+          nohup python3 tests/fixtures/mock_relay.py 8765 /tmp/relay > /tmp/relay-server.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8765/health && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8765/health || { cat /tmp/relay-server.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:8765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+      - name: Build a 120-entry verdict list
+        run: |
+          python3 -c '
+          import json
+          reps = [{"delivery_id": f"d{i}", "workflow_name": "wf", "job_name": f"job-{i}",
+                   "triage_verdict": {"schema_version": 1, "category": "flake", "confidence": "low", "summary": "x"}}
+                  for i in range(120)]
+          json.dump(reps, open("/tmp/verdicts.json", "w"))
+          '
+      - id: action
+        uses: .
+        with:
+          event-type: late-report
+          triage-verdict-list: '@/tmp/verdicts.json'
+          callback-url: http://127.0.0.1:8765/github/callback
+      - name: Assert three chunked requests (50/50/20)
+        run: |
+          test -f /tmp/relay/requests.jsonl || { echo "FAIL: no callback received"; exit 1; }
+          python3 - <<'EOF'
+          import json, sys
+          lines = [json.loads(l) for l in open("/tmp/relay/requests.jsonl") if l.strip()]
+          sizes = [len(l["body"]["reports"]) for l in lines]
+          print("chunk sizes:", sizes)
+          if sizes != [50, 50, 20]:
+              print("FAIL: expected [50, 50, 20]"); sys.exit(1)
+          names = [r["job_name"] for l in lines for r in l["body"]["reports"]]
+          if names != [f"job-{i}" for i in range(120)]:
+              print("FAIL: reports out of order or missing"); sys.exit(1)
+          print("PASS")
+          EOF

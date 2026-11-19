@@ -1,0 +1,87 @@
+name: Test always-rebuild with custom tag and matching hash
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs (ECR login cannot work under act)
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$FAKEBIN"
+          cat > "$FAKEBIN/aws" <<'EOF'
+          #!/bin/sh
+          # Fake aws: return a dummy ECR password; fail other calls (handled by the action)
+          if [ "$1" = "ecr" ] && [ "$2" = "get-login-password" ]; then
+            echo "fake-ecr-password"
+            exit 0
+          fi
+          echo "fake aws: unsupported command: $*" >&2
+          exit 1
+          EOF
+          cat > "$FAKEBIN/docker" <<'EOF'
+          #!/bin/sh
+          # Fake docker: accept login (consume stdin), log all other invocations
+          echo "fake docker: $*" >&2
+          if [ "$1" = "login" ]; then
+            cat > /dev/null
+            echo "Login Succeeded"
+            exit 0
+          fi
+          exit 0
+          EOF
+          chmod +x "$FAKEBIN/aws" "$FAKEBIN/docker"
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - name: Compute expected hash
+        id: hash
+        run: |
+          chmod +x tests/fixtures/docker/build.sh
+          rm -f "$GITHUB_WORKSPACE/fake-build-args.txt"
+          echo "hash=$(git rev-parse HEAD:tests/fixtures/docker)" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: my-image:mytag
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: example.registry.local
+          repo-name: myrepo
+          always-rebuild: "true"
+          docker-build-timeout-minutes: "5"
+          ci-docker-hash: ${{ steps.hash.outputs.hash }}
+      - name: Assert docker-image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          EXPECTED="example.registry.local/myrepo/my-image:mytag-${HASH}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: docker-image mismatch"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert build script was invoked
+        env:
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          F="$GITHUB_WORKSPACE/fake-build-args.txt"
+          if [ ! -f "$F" ]; then
+            echo "FAIL: build script was not invoked"
+            exit 1
+          fi
+          cat "$F"
+          if ! grep -qx -- "-t" "$F"; then
+            echo "FAIL: missing -t argument"
+            exit 1
+          fi
+          if ! grep -qx "example.registry.local/myrepo/my-image:mytag-${HASH}" "$F"; then
+            echo "FAIL: missing full image tag argument"
+            exit 1
+          fi
+          if ! grep -q "my-image" "$F"; then
+            echo "FAIL: missing image name argument"
+            exit 1
+          fi
+          echo "PASS"

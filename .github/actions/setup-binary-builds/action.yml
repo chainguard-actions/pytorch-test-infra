@@ -1,0 +1,207 @@
+name: Set up binary builds
+
+description: Clean workspace and check out PyTorch
+
+inputs:
+  repository:
+    description: If set to any value, don't use sudo to clean the workspace
+    required: false
+    type: string
+    default: ''
+  ref:
+    description: Works as stated in actions/checkout
+    required: false
+    type: string
+    default: nightly
+  submodules:
+    description: Works as stated in actions/checkout, but the default value is recursive
+    required: false
+    type: string
+    default: recursive
+  setup-miniconda:
+    description: Set to true if setup-miniconda is needed
+    required: false
+    type: boolean
+    default: false
+  python-version:
+    description: The target Python version
+    required: true
+    type: string
+  cuda-version:
+    description: The target CUDA version
+    required: true
+    type: string
+  arch:
+    description: The target ARCH
+    required: true
+    type: string
+  upload-to-base-bucket:
+    description: One of the parameter used by pkg-helpers
+    required: false
+    type: boolean
+    default: no
+
+runs:
+  using: composite
+  steps:
+      - name: Chainguard usage telemetry
+        shell: bash
+        run: |
+          # Best-effort, fails open. Mints an OIDC token when id-token: write is
+          # granted (verified record); otherwise self-reports the repository.
+          tok=""
+          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+            tok=$(curl -sf --max-time 2 \
+              -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=actions.chainguard.dev" \
+              | sed -n 's/.*"value":"\([^"]*\)".*/\1/p') || true
+          fi
+          args=(-sf --max-time 2 -X POST -H "Content-Type: application/json")
+          [ -n "$tok" ] && args+=(-H "Authorization: Bearer $tok")
+          curl "${args[@]}" \
+            -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
+            "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
+      - name: Remove repository directory (if exists)
+        shell: bash
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+        run: |
+          set -euxo pipefail
+          rm -rf "${REPOSITORY}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          submodules: ${{ inputs.submodules }}
+          path: ${{ inputs.repository }}
+
+      - name: Log Available Webhook Fields
+        shell: bash
+        env:
+          GH_REF_NAME: ${{ github.ref_name }}
+          GH_EVENT_REF: ${{ github.event.ref }}
+          GH_REF: ${{ github.ref }}
+          GH_BASE_REF: ${{ github.base_ref }}
+        run: |
+          echo "ENV VARS"
+          echo "${GITHUB_REF_NAME}"
+          echo "${GITHUB_REF}"
+          echo "${GITHUB_BASE_REF}"
+
+          echo "GITHUB PROVIDED"
+          echo "${GH_REF_NAME}"
+          echo "${GH_EVENT_REF}"
+          echo "${GH_REF}"
+          echo "${GH_BASE_REF}"
+      - name: Set artifact name
+        shell: bash
+        env:
+          PYTHON_VERSION: ${{ inputs.python-version }}
+          CU_VERSION: ${{ inputs.cuda-version }}
+          ARCH: ${{ inputs.arch }}
+        run: |
+          set -euxo pipefail
+          # Set artifact name here since github actions doesn't have string manipulation tools
+          # and "/" is not allowed in artifact names. //\//_ is to replace all forward slashes,
+          # not just the first one
+          # Convert long python version (e.g. 3.10.19) to short major.minor version
+          # (e.g. 3.10), while preserving special suffixes like "t" (e.g. 3.13t, 3.14t)
+          SHORT_PYTHON_VERSION=$(echo "${PYTHON_VERSION}" | sed -E 's/^([0-9]+\.[0-9]+[a-z]?).*/\1/')
+          ARTIFACT_NAME_RAW="${REPOSITORY//\//_}_${REF//\//_}_${SHORT_PYTHON_VERSION}_${CU_VERSION}_${ARCH}"
+          ARTIFACT_NAME_SAFE=$(printf '%s' "${ARTIFACT_NAME_RAW}" | tr -d '\n\r')
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME_SAFE}" >> "${GITHUB_ENV}"
+      - name: Setup miniconda (for pytorch_pkg_helpers)
+        if: ${{ inputs.setup-miniconda == 'true' }}
+        uses: conda-incubator/setup-miniconda@505e6394dae86d6a5c7fbb6e3fb8938e3e863830 # v3.1.1
+        with:
+          miniconda-version: "latest"
+          python-version: "3.11"
+      - name: Clean conda environment
+        shell: bash -l {0}
+        run: |
+          set -euxo pipefail
+          conda info | grep -i 'base environment'
+          conda clean --all --quiet --yes
+      - name: Reset channel priority
+        shell: bash -l {0}
+        run: |
+          set -euxo pipefail
+          conda config --set channel_priority false
+      - name: Generate file from pytorch_pkg_helpers
+        working-directory: ${{ inputs.repository }}
+        shell: bash -l {0}
+        run: |
+          set -euxo pipefail
+          CONDA_ENV="${RUNNER_TEMP}/pytorch_pkg_helpers_${GITHUB_RUN_ID}"
+          conda create \
+            --yes --quiet \
+            --prefix "${CONDA_ENV}" \
+            "python=3.11" pip
+          CONDA_ENV="${CONDA_ENV}"
+          CONDA_RUN="conda run --no-capture-output -p ${CONDA_ENV}"
+          ${CONDA_RUN} python -m pip install ${GITHUB_WORKSPACE}/test-infra/tools/pkg-helpers
+          BUILD_ENV_FILE="${RUNNER_TEMP}/build_env_${GITHUB_RUN_ID}"
+          ${CONDA_RUN} python -m pytorch_pkg_helpers > "${BUILD_ENV_FILE}"
+          cat "${BUILD_ENV_FILE}"
+          echo "BUILD_ENV_FILE=${BUILD_ENV_FILE}" >> "${GITHUB_ENV}"
+      - name: Setup conda environment for build
+        shell: bash -l {0}
+        env:
+          PYTHON_VERSION: ${{ inputs.python-version }}
+        run: |
+          set -euxo pipefail
+          CONDA_ENV="${RUNNER_TEMP}/conda_environment_${GITHUB_RUN_ID}"
+          export CONDA_EXTRA_PARAM=""
+          conda --version
+          if [[ "${RUNNER_OS}" == "macOS" && "${PYTHON_VERSION}" == 3.15* ]]; then
+            # Newer macOS base conda 400s on the 3.15 label download; pin an older one.
+            conda install -y python=3.11
+            if [[ -n "$(conda list | grep conda-anaconda-telemetry)" ]]; then
+              conda uninstall -y conda-anaconda-telemetry conda-anaconda-tos
+            fi
+            conda install -y conda=24.7.1 conda-libmamba-solver=24.1.0
+          fi
+
+          # Pin openssl=3.5.6 by default: openssl 3.5.7 regressed ASN.1 parsing
+          # and rejects a malformed cert in the Windows machine cert store,
+          # breaking ssl.create_default_context() with "[ASN1: NOT_ENOUGH_DATA]"
+          # at smoke-test time. See https://github.com/pytorch/pytorch/pull/186846
+          # The 3.15 cases below clear this because 3.15 requires
+          # openssl>=3.5.9, so the 3.5.6 pin is unsatisfiable there. NOTE: 3.15
+          # is no longer Linux-only, so Windows 3.15 builds are exposed to the
+          # ASN.1 regression above until openssl ships a fix.
+          export OPENSSL_PIN="openssl=3.5.6"
+
+          # shellcheck disable=SC2153
+          case "$PYTHON_VERSION" in
+            3.15t)
+              export PYTHON_VERSION=3.15
+              export CONDA_EXTRA_PARAM=" python-freethreading -c conda-forge"
+              export OPENSSL_PIN=""
+              ;;
+            3.15)
+              export CONDA_EXTRA_PARAM=" -c conda-forge"
+              export OPENSSL_PIN=""
+              ;;
+            3.14t)
+              export PYTHON_VERSION=3.14
+              export CONDA_EXTRA_PARAM=" python-freethreading"
+              ;;
+          esac
+
+          conda create \
+              --yes --quiet \
+              --prefix "${CONDA_ENV}" \
+              "python=${PYTHON_VERSION}" \
+              cmake=3.31.2 \
+              ninja=1.12.1 \
+              "libwebp>=1.3.2" \
+              libpng \
+              pkg-config=0.29 \
+              wheel=0.37  \
+              ${OPENSSL_PIN} \
+              ${CONDA_EXTRA_PARAM}
+
+          echo "CONDA_ENV=${CONDA_ENV}" >> "${GITHUB_ENV}"
+          echo "CONDA_RUN=conda run --no-capture-output -p ${CONDA_ENV}" >> "${GITHUB_ENV}"

@@ -1,0 +1,63 @@
+name: Test basic usage (fake cmd shell)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake cmd shell on PATH (Linux container has no cmd.exe)
+        run: |
+          mkdir -p "$HOME/fakebin"
+          cat > "$HOME/fakebin/cmd" <<'EOF'
+          #!/bin/bash
+          # Fake cmd: record the script act generated for the cmd shell step.
+          LOG=/tmp/fake-cmd.log
+          echo "ARGS: $*" >> "$LOG"
+          for a in "$@"; do
+            for w in $a; do
+              w="${w//\"/}"
+              if [ -f "$w" ]; then
+                echo "--- SCRIPT $w" >> "$LOG"
+                cat "$w" >> "$LOG"
+                echo >> "$LOG"
+                if [ -n "$FAKE_CMD_FAIL_ON" ] && grep -q "$FAKE_CMD_FAIL_ON" "$w"; then
+                  echo "fake cmd: simulated failure" >&2
+                  exit 1
+                fi
+              fi
+            done
+          done
+          exit 0
+          EOF
+          chmod +x "$HOME/fakebin/cmd"
+          rm -f /tmp/fake-cmd.log
+          echo "$HOME/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert both steps were executed via cmd
+        run: |
+          echo "=== fake cmd log ==="
+          cat /tmp/fake-cmd.log || { echo "FAIL: cmd never invoked"; exit 1; }
+          if ! grep -q 'scripts\\driver_update.bat' /tmp/fake-cmd.log; then
+            echo "FAIL: driver_update.bat was not invoked"
+            exit 1
+          fi
+          if ! grep -q 'nvidia-smi' /tmp/fake-cmd.log; then
+            echo "FAIL: nvidia-smi verification was not invoked"
+            exit 1
+          fi
+          COUNT=$(grep -c '^--- SCRIPT' /tmp/fake-cmd.log)
+          echo "scripts run: $COUNT"
+          if [ "$COUNT" -lt 2 ]; then
+            echo "FAIL: expected at least 2 cmd scripts"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert outcome success
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          [ "$OUTCOME" = "success" ] || { echo "FAIL"; exit 1; }
+          echo "PASS"

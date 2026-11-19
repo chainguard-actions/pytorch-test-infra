@@ -1,0 +1,46 @@
+name: Test free-threaded python suffix and ref with slashes
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_TYPE: wheel
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide test-infra checkout at $GITHUB_WORKSPACE/test-infra
+        run: |
+          set -ex
+          rm -rf "$GITHUB_WORKSPACE/test-infra"
+          if [ -d "$GITHUB_WORKSPACE/tools/pkg-helpers" ]; then
+            mkdir -p "$GITHUB_WORKSPACE/test-infra/tools"
+            cp -r "$GITHUB_WORKSPACE/tools/pkg-helpers" "$GITHUB_WORKSPACE/test-infra/tools/"
+          else
+            git clone --depth 1 https://github.com/pytorch/test-infra "$GITHUB_WORKSPACE/test-infra"
+          fi
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/vision
+          ref: refs/heads/main
+          python-version: '3.13t'
+          cuda-version: cpu
+          arch: x86_64
+      - name: Assert slashes replaced and 't' suffix preserved
+        run: |
+          echo "ARTIFACT_NAME: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_vision_refs_heads_main_3.13t_cpu_x86_64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          case "$ARTIFACT_NAME" in
+            */*) echo "FAIL: artifact name contains '/'"; exit 1 ;;
+          esac
+          echo "PASS"
+      - name: Assert build env file generated
+        run: |
+          if [ -z "$BUILD_ENV_FILE" ] || [ ! -s "$BUILD_ENV_FILE" ]; then
+            echo "FAIL: BUILD_ENV_FILE missing or empty"
+            exit 1
+          fi
+          echo "PASS"

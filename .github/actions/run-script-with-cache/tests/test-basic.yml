@@ -1,0 +1,38 @@
+name: Test basic script run without cache
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: /tmp/build_env_basic.sh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare build env and script
+        run: |
+          rm -f /tmp/marker-basic.txt
+          cat > /tmp/build_env_basic.sh <<'EOF'
+          export CONDA_RUN=""
+          export MY_BUILD_VAR="from-build-env"
+          EOF
+          cat > act-test-script-basic.sh <<'EOF'
+          echo "script running with MY_BUILD_VAR=${MY_BUILD_VAR}"
+          echo "${MY_BUILD_VAR}" > /tmp/marker-basic.txt
+          EOF
+      - id: action
+        uses: .
+        with:
+          script: act-test-script-basic.sh
+      - name: Assert script ran and build env was sourced
+        run: |
+          if [ ! -f /tmp/marker-basic.txt ]; then
+            echo "FAIL: marker file not created; script did not run"
+            exit 1
+          fi
+          ACTUAL="$(cat /tmp/marker-basic.txt)"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "from-build-env" ]; then
+            echo "FAIL: expected 'from-build-env'"
+            exit 1
+          fi
+          echo "PASS"

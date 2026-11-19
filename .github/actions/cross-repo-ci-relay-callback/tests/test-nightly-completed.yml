@@ -1,0 +1,76 @@
+name: Test nightly completed callback
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local OIDC + relay server
+        run: |
+          rm -rf /tmp/relay && mkdir -p /tmp/relay
+          nohup python3 tests/fixtures/mock_relay.py 8765 /tmp/relay > /tmp/relay-server.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8765/health && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8765/health || { cat /tmp/relay-server.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:8765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0123456789abcdef0123456789abcdef01234567
+          event-type: nightly
+          job-name: build-cpu
+          test-results: '{"passed": 10, "failed": 0, "skipped": 2}'
+          artifact-url: https://example.com/artifacts/42
+          triage-verdict: '{"schema_version": 1, "category": "flake", "confidence": "low", "summary": "flaky"}'
+          callback-url: http://127.0.0.1:8765/github/callback/
+      - name: Assert callback payload
+        run: |
+          cat /tmp/relay-server.log || true
+          test -f /tmp/relay/requests.jsonl || { echo "FAIL: no callback received"; exit 1; }
+          cat /tmp/relay/requests.jsonl
+          python3 - <<'EOF'
+          import json, sys
+          lines = [json.loads(l) for l in open("/tmp/relay/requests.jsonl") if l.strip()]
+          def fail(msg):
+              print("FAIL:", msg); sys.exit(1)
+          if len(lines) != 1: fail(f"expected 1 request, got {len(lines)}")
+          r = lines[0]
+          if r["path"] != "/github/callback": fail(f"path {r['path']!r}")
+          if r["auth"] != "Bearer mock-oidc-token-123": fail("wrong auth header")
+          if "application/json" not in r["content_type"]: fail("wrong content type")
+          b = r["body"]
+          if b["event_type"] != "nightly": fail("event_type")
+          sha = "0123456789abcdef0123456789abcdef01234567"
+          if b["delivery_id"] != sha: fail("delivery_id")
+          if b["payload"]["head_sha"] != sha: fail("head_sha")
+          if b["payload"]["repository"]["full_name"] != "pytorch/pytorch": fail("repo")
+          w = b["workflow"]
+          if w["schema_version"] != "1": fail("schema_version")
+          if w["status"] != "completed": fail("status")
+          if w["conclusion"] != "success": fail("conclusion")
+          if w["job_name"] != "build-cpu": fail("job_name")
+          if w["name"] != "Test nightly completed callback": fail(f"name {w['name']!r}")
+          if not w["started_at"] or not w["completed_at"]: fail("timestamps")
+          if w["test_results"] != {"passed": 10, "failed": 0, "skipped": 2}: fail("test_results")
+          if w["artifact_url"] != "https://example.com/artifacts/42": fail("artifact_url")
+          if w["triage_verdict"]["category"] != "flake": fail("triage_verdict")
+          if not w["check_run_id"] or not w["run_id"]: fail("ids")
+          print("PASS")
+          EOF
+      - name: Assert OIDC token was requested with correct audience
+        run: |
+          cat /tmp/relay/token_requests.jsonl
+          if ! grep -q 'audience=pytorch-cross-repo-ci-relay' /tmp/relay/token_requests.jsonl; then
+            echo "FAIL: OIDC audience not requested"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,43 @@
+name: Test runner holds until ssh sessions drain
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who (session present for first 2 calls)
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/docker.log /tmp/who.log
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/docker.log
+          exit 0
+          EOF
+          cat > /tmp/fakebin/who <<'EOF'
+          #!/bin/sh
+          echo "called" >> /tmp/who.log
+          n=$(wc -l < /tmp/who.log)
+          if [ "$n" -le 2 ]; then
+            echo "user     pts/0        2024-01-01 00:00 (10.0.0.1)"
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker /tmp/fakebin/who
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert wait looped until drained, then cleanup ran
+        run: |
+          echo "--- who.log ---"; cat /tmp/who.log 2>/dev/null || true
+          echo "--- docker.log ---"; cat /tmp/docker.log 2>/dev/null || true
+          CALLS="$(wc -l < /tmp/who.log)"
+          echo "who calls: $CALLS"
+          if [ "$CALLS" -ne 3 ]; then
+            echo "FAIL: expected 3 who calls (2 with session, 1 drained)"
+            exit 1
+          fi
+          grep -qx "system prune -af" /tmp/docker.log || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,37 @@
+name: Test unparseable metrics file is skipped
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/aws-calls.log
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/aws-calls.log
+      - name: Create truncated metrics file
+        run: |
+          printf '[{"type": "result", "duration_ms": 12' > "$RUNNER_TEMP/bad.json"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/bad.json
+      - name: Assert step succeeded and aws was not called
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: expected success"; exit 1; fi
+          if [ -f /tmp/aws-calls.log ]; then
+            cat /tmp/aws-calls.log
+            echo "FAIL: aws should not be called"; exit 1
+          fi
+          echo "PASS"

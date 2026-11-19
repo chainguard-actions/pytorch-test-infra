@@ -1,0 +1,37 @@
+name: Test script run in repository subdirectory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: /tmp/build_env_repo.sh
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare build env and script in subdirectory
+        run: |
+          rm -f /tmp/marker-repo.txt
+          cat > /tmp/build_env_repo.sh <<'EOF'
+          export CONDA_RUN=""
+          EOF
+          mkdir -p act-subrepo
+          cat > act-subrepo/run.sh <<'EOF'
+          pwd > /tmp/marker-repo.txt
+          EOF
+      - id: action
+        uses: .
+        with:
+          repository: act-subrepo
+          script: run.sh
+      - name: Assert script ran in subdirectory
+        run: |
+          if [ ! -f /tmp/marker-repo.txt ]; then
+            echo "FAIL: marker file not created; script did not run"
+            exit 1
+          fi
+          ACTUAL="$(cat /tmp/marker-repo.txt)"
+          echo "actual: $ACTUAL"
+          case "$ACTUAL" in
+            */act-subrepo) echo "PASS" ;;
+            *) echo "FAIL: expected working dir ending in /act-subrepo"; exit 1 ;;
+          esac

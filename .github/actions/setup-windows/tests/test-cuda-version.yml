@@ -1,0 +1,46 @@
+name: Test with cuda version
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Windows-tool shims (powershell, cygpath, EC2 metadata curl)
+        run: |
+          set -euo pipefail
+          SHIM="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIM"
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+          cat > "$SHIM/powershell" <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+          cat > "$SHIM/cygpath" <<'EOF'
+          #!/bin/sh
+          echo "$1"
+          EOF
+          cat > "$SHIM/curl" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *169.254.169.254*) echo "fake"; exit 0 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+          chmod +x "$SHIM"/*
+          echo "$SHIM" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: "12.4"
+      - name: Assert outcome and environment
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          [ "$OUTCOME" = "success" ] || { echo "FAIL: action did not succeed"; exit 1; }
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          [ -n "$RUNNER_ARTIFACT_DIR" ] && [ -d "$RUNNER_ARTIFACT_DIR" ] || { echo "FAIL: artifact dir"; exit 1; }
+          [ -n "$RUNNER_TEST_RESULTS_DIR" ] && [ -d "$RUNNER_TEST_RESULTS_DIR" ] || { echo "FAIL: test results dir"; exit 1; }
+          echo "PASS"

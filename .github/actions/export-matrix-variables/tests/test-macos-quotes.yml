@@ -1,0 +1,26 @@
+name: Test non-linux matrix export (quoted values)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Stage export script where the action expects it
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/test-infra/.github/scripts"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/export_matrix_variables.py" \
+            "$GITHUB_WORKSPACE/test-infra/.github/scripts/export_matrix_variables.py"
+          rm -f "$RUNNER_TEMP/github_env_$GITHUB_RUN_ID"
+      - id: action
+        uses: .
+        with:
+          binary-matrix: '{"python_version": "3.11", "desired_cuda": "cu121"}'
+          target-os: macos
+      - name: Assert env file written with quotes
+        run: |
+          F="$RUNNER_TEMP/github_env_$GITHUB_RUN_ID"
+          echo "--- $F"; cat "$F" || { echo "FAIL: env file missing"; exit 1; }
+          grep -qiE '^python_version="3\.11"$' "$F" || { echo "FAIL: quoted python_version missing"; exit 1; }
+          grep -qiE '^desired_cuda="cu121"$' "$F" || { echo "FAIL: quoted desired_cuda missing"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,142 @@
+name: Test basic usage (host runner, no GPU)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake curl/aws/docker/sudo/systemctl/lspci on PATH
+        run: |
+          set -eu
+          rm -f /.inarc /.incontainer 2>/dev/null || true
+          FAKE=/tmp/fake-bin
+          mkdir -p "$FAKE"
+          : > /tmp/docker-calls.log
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+
+          cat > "$FAKE/curl" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *169.254.169.254/latest/api/token*) echo "fake-imds-token"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/ami-id*) echo "ami-0123456789"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/instance-id*) echo "i-0abcdef"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/instance-type*) echo "m5.large"; exit 0 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+
+          cat > "$FAKE/aws" <<'EOF'
+          #!/bin/sh
+          echo "aws $*" >> /tmp/aws-calls.log
+          case "$*" in
+            "sts get-caller-identity"*)
+              printf '{\n    "UserId": "AIDFAKE",\n    "Account": "123456789012",\n    "Arn": "arn:aws:iam::123456789012:user/fake"\n}\n'
+              ;;
+            "ecr get-login-password"*)
+              echo "fake-ecr-password"
+              ;;
+          esac
+          exit 0
+          EOF
+
+          cat > "$FAKE/docker" <<'EOF'
+          #!/bin/sh
+          if [ "$1" = "login" ]; then
+            pw="$(cat)"
+            echo "docker $* PASSWORD=$pw" >> /tmp/docker-calls.log
+            exit 0
+          fi
+          echo "docker $*" >> /tmp/docker-calls.log
+          exit 0
+          EOF
+
+          cat > "$FAKE/sudo" <<'EOF'
+          #!/bin/sh
+          exec "$@"
+          EOF
+
+          cat > "$FAKE/systemctl" <<'EOF'
+          #!/bin/sh
+          echo "systemctl $*" >> /tmp/systemctl-calls.log
+          exit 0
+          EOF
+
+          cat > "$FAKE/lspci" <<'EOF'
+          #!/bin/sh
+          echo "00:00.0 Host bridge: Intel Corporation 440FX"
+          exit 0
+          EOF
+
+          chmod +x "$FAKE"/*
+          echo "$FAKE" >> "$GITHUB_PATH"
+
+      - id: action
+        uses: .
+
+      - name: Assert ECR login used account from STS
+        run: |
+          echo "--- docker calls ---"
+          cat /tmp/docker-calls.log
+          if ! grep -q "docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com PASSWORD=fake-ecr-password" /tmp/docker-calls.log; then
+            echo "FAIL: expected docker login to ECR registry with fake password"
+            exit 1
+          fi
+          echo "PASS: ECR login"
+
+      - name: Assert docker cleanup ran on host runner
+        run: |
+          if ! grep -q "docker system prune -af" /tmp/docker-calls.log; then
+            echo "FAIL: expected docker system prune -af"
+            exit 1
+          fi
+          if ! grep -q "docker version" /tmp/docker-calls.log; then
+            echo "FAIL: expected docker version check"
+            exit 1
+          fi
+          echo "PASS: docker cleanup"
+
+      - name: Assert runner env dirs exported and created
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          echo "RUNNER_DOCS_DIR=$RUNNER_DOCS_DIR"
+          for pair in "artifacts:$RUNNER_ARTIFACT_DIR" "test-results:$RUNNER_TEST_RESULTS_DIR" "docs:$RUNNER_DOCS_DIR"; do
+            name="${pair%%:*}"; dir="${pair#*:}"
+            if [ "$dir" != "${RUNNER_TEMP}/${name}" ]; then
+              echo "FAIL: expected ${RUNNER_TEMP}/${name}, got '$dir'"
+              exit 1
+            fi
+            if [ ! -d "$dir" ]; then
+              echo "FAIL: directory $dir does not exist"
+              exit 1
+            fi
+          done
+          echo "PASS: runner dirs"
+
+      - name: Assert github env file preserved
+        run: |
+          f="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          echo "file: $f"
+          if [ ! -f "$f" ]; then
+            echo "FAIL: $f not found"
+            exit 1
+          fi
+          for prefix in GITHUB CI RUNNER; do
+            if ! grep -q "^${prefix}" "$f"; then
+              echo "FAIL: no ${prefix}* variables in $f"
+              exit 1
+            fi
+          done
+          echo "PASS: env file preserved"
+
+      - name: Assert GPU_FLAG not set (no NVIDIA GPU)
+        run: |
+          echo "GPU_FLAG='${GPU_FLAG:-}'"
+          if [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG should not be set"
+            exit 1
+          fi
+          echo "PASS"

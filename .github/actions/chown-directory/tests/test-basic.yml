@@ -1,0 +1,40 @@
+name: Test basic chown with public alpine image
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check docker availability
+        run: |
+          docker version
+      - name: Create directory to chown
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/chown-target/nested"
+          echo "hello" > "$GITHUB_WORKSPACE/chown-target/file.txt"
+          echo "world" > "$GITHUB_WORKSPACE/chown-target/nested/inner.txt"
+      - id: action
+        uses: .
+        with:
+          directory: ${{ github.workspace }}/chown-target
+          ALPINE_IMAGE: alpine:3.20
+      - name: Assert files are owned by the current user
+        run: |
+          UID_NOW="$(id -u)"
+          GID_NOW="$(id -g)"
+          echo "current uid:gid = $UID_NOW:$GID_NOW"
+          ls -lnR "$GITHUB_WORKSPACE/chown-target"
+          for f in "$GITHUB_WORKSPACE/chown-target/file.txt" "$GITHUB_WORKSPACE/chown-target/nested/inner.txt"; do
+            OWNER="$(stat -c '%u:%g' "$f")"
+            echo "$f -> $OWNER"
+            if [ "$OWNER" != "$UID_NOW:$GID_NOW" ]; then
+              echo "FAIL: $f owned by $OWNER"
+              exit 1
+            fi
+          done
+          if [ "$(cat "$GITHUB_WORKSPACE/chown-target/file.txt")" != "hello" ]; then
+            echo "FAIL: file content changed"
+            exit 1
+          fi
+          echo "PASS"

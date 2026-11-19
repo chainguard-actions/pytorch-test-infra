@@ -1,0 +1,99 @@
+name: Test container runner (skips docker management)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Mark as container runner and install fakes
+        run: |
+          set -eu
+          touch /.incontainer 2>/dev/null || sudo touch /.incontainer
+          FAKE=/tmp/fake-bin
+          mkdir -p "$FAKE"
+          : > /tmp/docker-calls.log
+          REAL_CURL="$(command -v curl || echo /usr/bin/curl)"
+
+          cat > "$FAKE/curl" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *169.254.169.254*api/token*) echo "fake-imds-token"; exit 0 ;;
+            *169.254.169.254*) echo "fake-meta"; exit 0 ;;
+          esac
+          exec "$REAL_CURL" "\$@"
+          EOF
+
+          cat > "$FAKE/aws" <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            "sts get-caller-identity"*)
+              printf '{\n    "Account": "999988887777",\n}\n' ;;
+            "ecr get-login-password"*)
+              echo "pw" ;;
+          esac
+          exit 0
+          EOF
+
+          cat > "$FAKE/docker" <<'EOF'
+          #!/bin/sh
+          [ "$1" = "login" ] && cat >/dev/null
+          echo "docker $*" >> /tmp/docker-calls.log
+          exit 0
+          EOF
+
+          cat > "$FAKE/sudo" <<'EOF'
+          #!/bin/sh
+          exec "$@"
+          EOF
+
+          cat > "$FAKE/lspci" <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+
+          chmod +x "$FAKE"/*
+          echo "$FAKE" >> "$GITHUB_PATH"
+
+      - id: action
+        uses: .
+
+      - name: Cleanup marker
+        if: always()
+        run: rm -f /.incontainer 2>/dev/null || sudo rm -f /.incontainer || true
+
+      - name: Assert ECR login happened but docker cleanup was skipped
+        run: |
+          cat /tmp/docker-calls.log
+          if ! grep -q "docker login --username AWS --password-stdin 999988887777.dkr.ecr.us-east-1.amazonaws.com" /tmp/docker-calls.log; then
+            echo "FAIL: expected docker login"
+            exit 1
+          fi
+          if grep -q "docker system prune" /tmp/docker-calls.log; then
+            echo "FAIL: docker prune should be skipped in container runner"
+            exit 1
+          fi
+          if grep -q "docker version" /tmp/docker-calls.log; then
+            echo "FAIL: docker daemon check should be skipped in container runner"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert runner dirs exported
+        run: |
+          if [ "$RUNNER_ARTIFACT_DIR" != "${RUNNER_TEMP}/artifacts" ] || [ ! -d "$RUNNER_ARTIFACT_DIR" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR='$RUNNER_ARTIFACT_DIR'"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert GPU_FLAG not set (no /dev/nvidiaX)
+        run: |
+          echo "GPU_FLAG='${GPU_FLAG:-}'"
+          if [ -n "${GPU_FLAG:-}" ] && ! compgen -G "/dev/nvidia[0-9]" >/dev/null; then
+            echo "FAIL: GPU_FLAG set without NVIDIA device"
+            exit 1
+          fi
+          echo "PASS"

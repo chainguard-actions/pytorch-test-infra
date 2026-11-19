@@ -1,0 +1,321 @@
+import {
+  buildCriteriaRows,
+  buildDemotionRows,
+  buildOperationalBaselineRows,
+  getL3ProtectionStatus,
+  L3SummaryRow,
+  mergeCriteriaRows,
+  RepoTenure,
+  summarizeReadiness,
+  TenureInfo,
+  tenureInfoFromL2Since,
+  tenureInfoFromRow,
+} from "../lib/crcr/l3Readiness";
+import { evaluateL3Threshold, L3_THRESHOLDS } from "../lib/crcr/l3Thresholds";
+
+// Matches the real shape ClickHouse's DateTime64(9) + date_time_output_format
+// "iso" returns for an unmatched minIf/maxIf.
+const EPOCH = "1970-01-01T00:00:00.000000000Z";
+
+function repoTenure(overrides: Partial<RepoTenure>): RepoTenure {
+  return {
+    current_level: "L2",
+    level_since: "2026-01-01T00:00:00Z",
+    l2_since: "2026-01-01T00:00:00Z",
+    first_seen: "2026-01-01T00:00:00Z",
+    last_seen: "2026-08-30T00:00:00Z",
+    ...overrides,
+  };
+}
+
+describe("tenureInfoFromRow", () => {
+  it("returns null when there is no row", () => {
+    expect(tenureInfoFromRow(undefined)).toBeNull();
+    expect(tenureInfoFromRow(null)).toBeNull();
+  });
+
+  it("returns null when the repo was never seen at L2", () => {
+    expect(tenureInfoFromRow(repoTenure({ l2_since: EPOCH }))).toBeNull();
+  });
+
+  it("uses the same l2_since calculation for all-repository summaries", () => {
+    const l2Since = new Date(
+      Date.now() - 60 * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+    expect(tenureInfoFromL2Since(l2Since)?.tenureDays).toBeCloseTo(60, 0);
+  });
+
+  it("computes tenure from l2_since regardless of current level", () => {
+    const tenure = tenureInfoFromRow(
+      repoTenure({
+        current_level: "L2",
+        l2_since: new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString(),
+      })
+    );
+    expect(tenure?.tenureDays).toBeCloseTo(60, 0);
+  });
+
+  it("keeps counting up through later promotions instead of resetting", () => {
+    // 14 days at L2, then 10 at L3, then 10 at L4 should read as 34 days —
+    // cumulative since first reaching L2, not reset by each promotion.
+    const tenure = tenureInfoFromRow(
+      repoTenure({
+        current_level: "L4",
+        l2_since: new Date(Date.now() - 34 * 24 * 60 * 60 * 1000).toISOString(),
+      })
+    );
+    expect(tenure?.tenureDays).toBeCloseTo(34, 0);
+  });
+});
+
+describe("evaluateL3Threshold", () => {
+  it("returns null when there is no data", () => {
+    expect(evaluateL3Threshold(L3_THRESHOLDS.passRate, null)).toBeNull();
+    expect(evaluateL3Threshold(L3_THRESHOLDS.passRate, undefined)).toBeNull();
+  });
+
+  it("passes a repo at 93% pass rate", () => {
+    // A prior version of the stat-card coloring flagged 93% pass rate as a
+    // warning even though the target (>90%) says it passes. The shared
+    // threshold must not repeat that drift.
+    expect(evaluateL3Threshold(L3_THRESHOLDS.passRate, 0.93)).toBe(true);
+    expect(evaluateL3Threshold(L3_THRESHOLDS.passRate, 0.89)).toBe(false);
+  });
+
+  it("evaluates a 'below' criterion correctly at the boundary", () => {
+    const t = L3_THRESHOLDS.timeoutRate; // < 1%
+    expect(evaluateL3Threshold(t, 0.009)).toBe(true);
+    expect(evaluateL3Threshold(t, 0.01)).toBe(false);
+    expect(evaluateL3Threshold(t, 0.011)).toBe(false);
+  });
+});
+
+function summaryRow(overrides: Partial<L3SummaryRow>): L3SummaryRow {
+  return {
+    repo: "pytorch/example",
+    successes: 100,
+    timed_out: 0,
+    total_jobs: 100,
+    pass_rate: 1.0,
+    avg_queue_time_s: 60,
+    max_exec_time_s: 3600,
+    overrun_rate: 0,
+    median_e2e_time_s: 3600,
+    timeout_rate: 0,
+    ...overrides,
+  };
+}
+
+const goodTenure: TenureInfo = {
+  tenureDays: 60,
+};
+
+describe("buildCriteriaRows / summarizeReadiness", () => {
+  it("has one row per L3 threshold, in a stable order — six criteria, not seven", () => {
+    // L3 Promotion's prerequisites list tenure + five metrics.
+    const rows = buildCriteriaRows(summaryRow({}), null);
+    expect(rows.map((r) => r.key)).toEqual([
+      "tenureAtL2Days",
+      "e2eTimeS",
+      "overrunRate",
+      "avgQueueTimeS",
+      "timeoutRate",
+      "passRate",
+    ]);
+  });
+
+  it("marks tenure as unjudged (not failed) when tenure is null — e.g. a repo crcr_repo_tenure has no rows for", () => {
+    const rows = buildCriteriaRows(summaryRow({}), null);
+    const tenureRow = rows.find((r) => r.key === "tenureAtL2Days");
+    expect(tenureRow?.verdict).toBeNull();
+  });
+
+  it("is ready only when every criterion is judged and met", () => {
+    const goodSummary = summaryRow({
+      avg_queue_time_s: 60,
+      max_exec_time_s: 1000,
+      median_e2e_time_s: 1000,
+      timeout_rate: 0,
+      pass_rate: 1.0,
+    });
+
+    const readyRows = buildCriteriaRows(goodSummary, goodTenure);
+    expect(summarizeReadiness(readyRows).ready).toBe(true);
+
+    const notReadyRows = buildCriteriaRows(
+      summaryRow({ pass_rate: 0.5 }),
+      goodTenure
+    );
+    const notReady = summarizeReadiness(notReadyRows);
+    expect(notReady.ready).toBe(false);
+    expect(notReady.metCount).toBe(notReady.totalCount - 1);
+  });
+
+  it("is never ready while tenure is null, even with a perfect summary", () => {
+    // A repo with no tenure data at all (crcr_repo_tenure returns no row)
+    // should never read "Ready" outright — only "N/M criteria met".
+    const rows = buildCriteriaRows(summaryRow({}), null);
+    const result = summarizeReadiness(rows);
+    expect(result.judgedCount).toBe(5);
+    expect(result.metCount).toBe(5);
+    expect(result.ready).toBe(false);
+  });
+
+  it("is not ready when data is missing entirely", () => {
+    const rows = buildCriteriaRows(null, null);
+    const result = summarizeReadiness(rows);
+    expect(result.judgedCount).toBe(0);
+    expect(result.ready).toBe(false);
+  });
+});
+
+describe("buildOperationalBaselineRows", () => {
+  it("contains the five operational metrics but never the L2-tenure prerequisite", () => {
+    const rows = buildOperationalBaselineRows(summaryRow({}));
+
+    expect(rows.map((r) => r.key)).toEqual([
+      "e2eTimeS",
+      "overrunRate",
+      "avgQueueTimeS",
+      "timeoutRate",
+      "passRate",
+    ]);
+    expect(rows).toHaveLength(5);
+  });
+});
+
+describe("overrunRate — rate of long-running jobs, not the raw max", () => {
+  it("passes when a rare job runs over 3h, as long as the rate stays under 1%", () => {
+    // A single slow job out of 200 (0.5%) used to fail this outright via
+    // the old max-based check; the rate-based check should let it through.
+    const rows = buildCriteriaRows(
+      summaryRow({ max_exec_time_s: 5 * 3600, overrun_rate: 0.005 }),
+      goodTenure
+    );
+    const row = rows.find((r) => r.key === "overrunRate");
+    expect(row?.verdict).toBe(true);
+  });
+
+  it("fails once the rate of over-3h jobs reaches 1%", () => {
+    const rows = buildCriteriaRows(
+      summaryRow({ max_exec_time_s: 5 * 3600, overrun_rate: 0.01 }),
+      goodTenure
+    );
+    const row = rows.find((r) => r.key === "overrunRate");
+    expect(row?.verdict).toBe(false);
+  });
+
+  it("is unjudged (not failed) when summary data is missing", () => {
+    const rows = buildCriteriaRows(null, goodTenure);
+    const row = rows.find((r) => r.key === "overrunRate");
+    expect(row?.verdict).toBeNull();
+  });
+});
+
+describe("buildDemotionRows", () => {
+  it("returns exactly the demotionRelevant subset, in threshold order", () => {
+    // e2e time, timeout rate, pass rate — no tenure, no max exec/avg queue.
+    const rows = buildDemotionRows(summaryRow({}));
+    expect(rows.map((r) => r.key)).toEqual([
+      "e2eTimeS",
+      "timeoutRate",
+      "passRate",
+    ]);
+  });
+
+  it("tracks whichever thresholds are flagged demotionRelevant, not a hardcoded list", () => {
+    // Derives the expected set from L3_THRESHOLDS itself, so this keeps
+    // passing if a future criterion's demotionRelevant flag changes —
+    // it only fails if buildDemotionRows stops honoring the flag.
+    const expectedKeys = Object.values(L3_THRESHOLDS)
+      .filter((t) => t.demotionRelevant)
+      .map((t) => t.key);
+    const rows = buildDemotionRows(summaryRow({}));
+    expect(rows.map((r) => r.key).sort()).toEqual(expectedKeys.sort());
+  });
+
+  it("judges each row against the same thresholds as promotion", () => {
+    const rows = buildDemotionRows(
+      summaryRow({
+        pass_rate: 0.5,
+        timeout_rate: 0.02,
+        median_e2e_time_s: 4 * 3600,
+      })
+    );
+    expect(rows.every((r) => r.verdict === false)).toBe(true);
+  });
+
+  it("leaves every row unjudged when there is no summary data", () => {
+    const rows = buildDemotionRows(null);
+    expect(rows.every((r) => r.verdict === null)).toBe(true);
+  });
+});
+
+describe("getL3ProtectionStatus", () => {
+  const passingRows = buildDemotionRows(summaryRow({}));
+
+  it("does not assign a temporary-protection status outside L3", () => {
+    expect(
+      getL3ProtectionStatus("L2", passingRows, true, undefined)
+    ).toBeNull();
+  });
+
+  it("marks an L3 backend for protection when a demotion criterion fails", () => {
+    const failingRows = buildDemotionRows(summaryRow({ pass_rate: 0.5 }));
+    expect(getL3ProtectionStatus("L3", failingRows, true, undefined)).toBe(
+      "active"
+    );
+  });
+
+  it("marks an L3 backend for protection when it reported no jobs", () => {
+    expect(getL3ProtectionStatus("L3", [], false, undefined)).toBe("active");
+  });
+
+  it("does not confuse a failed query with a temporary-protection decision", () => {
+    expect(
+      getL3ProtectionStatus("L3", passingRows, false, new Error("unavailable"))
+    ).toBe("unavailable");
+  });
+
+  it("clears protection only for a successful, passing L3 evaluation", () => {
+    expect(getL3ProtectionStatus("L3", passingRows, true, undefined)).toBe(
+      "clear"
+    );
+  });
+});
+
+describe("mergeCriteriaRows", () => {
+  it("is null for demotion on rows outside the demotionRelevant set, and populated on the rest", () => {
+    const promotionRows = buildCriteriaRows(summaryRow({}), goodTenure);
+    const demotionRows = buildDemotionRows(summaryRow({}));
+    const merged = mergeCriteriaRows(promotionRows, demotionRows);
+
+    expect(merged).toHaveLength(promotionRows.length);
+    for (const row of merged) {
+      const shouldHaveDemotion = demotionRows.some((d) => d.key === row.key);
+      if (shouldHaveDemotion) {
+        expect(row.demotion?.key).toBe(row.key);
+      } else {
+        expect(row.demotion).toBeNull();
+      }
+    }
+    // Tenure and the two demotion-irrelevant metrics never get a demotion verdict.
+    expect(merged.find((r) => r.key === "tenureAtL2Days")?.demotion).toBeNull();
+    expect(merged.find((r) => r.key === "overrunRate")?.demotion).toBeNull();
+    expect(merged.find((r) => r.key === "avgQueueTimeS")?.demotion).toBeNull();
+  });
+
+  it("pairs each demotion-relevant row with its own measurement, not just any row sharing a verdict", () => {
+    const promotionRows = buildCriteriaRows(
+      summaryRow({ pass_rate: 1.0 }),
+      goodTenure
+    );
+    const demotionRows = buildDemotionRows(summaryRow({ pass_rate: 0.5 }));
+    const merged = mergeCriteriaRows(promotionRows, demotionRows);
+
+    const passRateRow = merged.find((r) => r.key === "passRate");
+    expect(passRateRow?.promotion.verdict).toBe(true);
+    expect(passRateRow?.demotion?.verdict).toBe(false);
+  });
+});

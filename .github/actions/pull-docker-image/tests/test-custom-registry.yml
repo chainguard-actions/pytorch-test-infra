@@ -1,0 +1,22 @@
+name: Test custom docker-registry
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: bash tests/fixtures/setup-mocks.sh
+      - id: action
+        uses: .
+        with:
+          docker-image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:tag
+          docker-registry: 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      - name: Assert login used custom registry
+        run: |
+          cat /tmp/fake-calls.log
+          grep -q "^docker login -u AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com$" /tmp/fake-calls.log || { echo "FAIL: custom registry login missing"; exit 1; }
+          if grep -q "308535385114" /tmp/fake-calls.log; then echo "FAIL: default registry used"; exit 1; fi
+          grep -q "^docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/repo:tag$" /tmp/fake-calls.log || { echo "FAIL: pull missing"; exit 1; }
+          echo "PASS"

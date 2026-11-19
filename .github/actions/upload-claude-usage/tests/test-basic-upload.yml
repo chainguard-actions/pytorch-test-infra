@@ -1,0 +1,69 @@
+name: Test basic upload with valid metrics
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/aws-calls.log
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-uploaded.json
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/aws-calls.log /tmp/aws-uploaded.json
+      - name: Create metrics file
+        run: |
+          cat > "$RUNNER_TEMP/metrics.json" <<'EOF'
+          [
+            {"type": "system", "subtype": "init"},
+            {"type": "assistant", "message": {"content": "hi"}},
+            {"type": "result", "duration_ms": 12345, "num_turns": 7, "total_cost_usd": 0.42,
+             "usage": {"input_tokens": 100, "output_tokens": 200, "cache_read_input_tokens": 300, "cache_creation_input_tokens": 400},
+             "modelUsage": {"claude-sonnet-4": {"inputTokens": 100}},
+             "result": "some long text"}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+      - name: Assert upload happened with correct payload
+        run: |
+          echo "aws calls:"; cat /tmp/aws-calls.log || true
+          echo "payload:"; cat /tmp/aws-uploaded.json || true
+          if [ ! -f /tmp/aws-calls.log ]; then echo "FAIL: aws not called"; exit 1; fi
+          if ! grep -q "^s3 cp /tmp/claude_usage.json s3://ossci-raw-job-status/claude_code_usage/" /tmp/aws-calls.log; then
+            echo "FAIL: unexpected aws invocation"; exit 1
+          fi
+          if ! grep -qE "_[0-9]+\.json$" /tmp/aws-calls.log; then
+            echo "FAIL: destination does not end with _<attempt>.json"; exit 1
+          fi
+          P=/tmp/aws-uploaded.json
+          check() {
+            actual="$(jq -r "$1" "$P")"
+            if [ "$actual" != "$2" ]; then echo "FAIL: $1 = '$actual', expected '$2'"; exit 1; fi
+            echo "ok: $1 = $actual"
+          }
+          check '.duration_ms' 12345
+          check '.num_turns' 7
+          check '.total_cost_usd' 0.42
+          check '.input_tokens' 100
+          check '.output_tokens' 200
+          check '.cache_read_input_tokens' 300
+          check '.cache_creation_input_tokens' 400
+          check '.model' claude-sonnet-4
+          check '.pr_number' 0
+          check '.event_name' workflow_dispatch
+          check 'has("result")' false
+          check '.run_id | type' number
+          check '.timestamp | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.000$")' true
+          echo "PASS"

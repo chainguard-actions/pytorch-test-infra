@@ -1,0 +1,53 @@
+name: Test basic TD scorer setup
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide tools/torchci if not present in the repo
+        id: prep
+        run: |
+          if [ -f tools/torchci/requirements.txt ]; then
+            echo "Using real tools/torchci"
+            echo "fixture=false" >> "$GITHUB_OUTPUT"
+          else
+            mkdir -p tools
+            rm -rf tools/torchci
+            cp -r tests/fixtures/torchci tools/torchci
+            echo "fixture=true" >> "$GITHUB_OUTPUT"
+          fi
+      - id: action
+        uses: .
+      - name: Assert python 3.11 is active
+        run: |
+          V="$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          echo "python version: $V"
+          if [ "$V" != "3.11" ]; then
+            echo "FAIL: expected python 3.11"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert tools/torchci installed in editable mode
+        env:
+          FIXTURE: ${{ steps.prep.outputs.fixture }}
+        run: |
+          if [ "$FIXTURE" = "true" ]; then
+            python -m pip show torchci-fixture || { echo "FAIL: torchci-fixture not installed"; exit 1; }
+            OUT="$(cd /tmp && python -c 'import torchci_fixture; print(torchci_fixture.MARKER)')"
+            echo "marker: $OUT"
+            if [ "$OUT" != "td-scorer-fixture" ]; then
+              echo "FAIL: package not importable"
+              exit 1
+            fi
+            LOC="$(cd /tmp && python -c 'import torchci_fixture, os; print(os.path.realpath(torchci_fixture.__file__))')"
+            echo "location: $LOC"
+            case "$LOC" in
+              *tools/torchci/torchci_fixture/*) echo "PASS: editable install" ;;
+              *) echo "FAIL: not an editable install from tools/torchci"; exit 1 ;;
+            esac
+          else
+            python -m pip list 2>/dev/null | grep -i torchci || { echo "FAIL: torchci package not installed"; exit 1; }
+            echo "PASS"
+          fi

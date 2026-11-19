@@ -1,0 +1,56 @@
+name: Test custom bucket and prefix, defaults for missing fields
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/aws-calls.log
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" /tmp/aws-uploaded.json
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/aws-calls.log /tmp/aws-uploaded.json
+      - name: Create sparse metrics file with two results
+        run: |
+          cat > "$RUNNER_TEMP/metrics.json" <<'EOF'
+          [
+            {"type": "result", "duration_ms": 1, "num_turns": 1},
+            {"type": "result", "duration_ms": "999", "num_turns": "abc"}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+          s3-bucket: my-test-bucket
+          s3-prefix: my/prefix
+      - name: Assert custom destination and defaulted fields
+        run: |
+          echo "aws calls:"; cat /tmp/aws-calls.log || true
+          echo "payload:"; cat /tmp/aws-uploaded.json || true
+          if ! grep -q "^s3 cp /tmp/claude_usage.json s3://my-test-bucket/my/prefix/" /tmp/aws-calls.log; then
+            echo "FAIL: custom bucket/prefix not used"; exit 1
+          fi
+          P=/tmp/aws-uploaded.json
+          check() {
+            actual="$(jq -r "$1" "$P")"
+            if [ "$actual" != "$2" ]; then echo "FAIL: $1 = '$actual', expected '$2'"; exit 1; fi
+            echo "ok: $1 = $actual"
+          }
+          check '.duration_ms' 999
+          check '.num_turns' 0
+          check '.total_cost_usd' 0
+          check '.input_tokens' 0
+          check '.output_tokens' 0
+          check '.model' ''
+          echo "PASS"

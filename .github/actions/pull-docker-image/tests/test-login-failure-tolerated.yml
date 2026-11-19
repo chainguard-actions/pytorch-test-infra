@@ -1,0 +1,23 @@
+name: Test login failure is retried and tolerated
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FAKE_AWS_RC: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mocks
+        run: bash tests/fixtures/setup-mocks.sh
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/myorg/myimage:2.0
+      - name: Assert login retried 3 times and pull still happened
+        run: |
+          cat /tmp/fake-calls.log
+          n=$(grep -c "^aws ecr get-login-password" /tmp/fake-calls.log || true)
+          if [ "$n" != "3" ]; then echo "FAIL: expected 3 login attempts, got $n"; exit 1; fi
+          grep -q "^docker pull example.com/myorg/myimage:2.0$" /tmp/fake-calls.log || { echo "FAIL: pull missing"; exit 1; }
+          echo "PASS"

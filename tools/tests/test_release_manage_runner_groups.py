@@ -1,0 +1,704 @@
+"""Unit tests for the pure logic in tools/scripts/release_manage_runner_groups.
+
+Run from the repo root with either:
+    python3 -m unittest discover -vs tools/tests -p 'test_*.py'
+    pytest tools/tests/test_release_manage_runner_groups.py
+"""
+
+from typing import Any, List, Tuple
+from unittest import main, TestCase
+
+import requests
+
+import tools.scripts.release_manage_runner_groups as m
+
+
+class TestSelectTargetRefs(TestCase):
+    def test_anchor_plus_preceding_release(self) -> None:
+        names = [
+            "main",
+            "nightly",
+            "release/2.9",
+            "release/2.13",
+            "release/2.12",
+            "release/2.10",
+            "gh/user/1/head",
+        ]
+        self.assertEqual(
+            m.select_target_refs(names, (2, 13)),
+            [
+                "refs/heads/main",
+                "refs/heads/nightly",
+                "refs/heads/release/2.13",
+                "refs/heads/release/2.12",
+            ],
+        )
+
+    def test_excludes_release_branches_above_anchor(self) -> None:
+        # A prematurely-cut release/2.14 must not be pinned before it is the
+        # test-channel version.
+        names = ["main", "nightly", "release/2.14", "release/2.13", "release/2.12"]
+        self.assertEqual(
+            m.select_target_refs(names, (2, 13)),
+            [
+                "refs/heads/main",
+                "refs/heads/nightly",
+                "refs/heads/release/2.13",
+                "refs/heads/release/2.12",
+            ],
+        )
+
+    def test_anchor_included_even_if_branch_not_in_scan(self) -> None:
+        # Anchor comes from the test version, so it is pinned even if the branch
+        # scan does not list it yet; preceding comes from the scan.
+        names = ["main", "nightly", "release/2.12", "release/2.11"]
+        self.assertEqual(
+            m.select_target_refs(names, (2, 13)),
+            [
+                "refs/heads/main",
+                "refs/heads/nightly",
+                "refs/heads/release/2.13",
+                "refs/heads/release/2.12",
+            ],
+        )
+
+    def test_handles_missing_fixed_branches(self) -> None:
+        self.assertEqual(
+            m.select_target_refs(["release/2.12"], (2, 13)),
+            ["refs/heads/release/2.13", "refs/heads/release/2.12"],
+        )
+
+    def test_ignores_ephemeral_nightly_branches(self) -> None:
+        names = ["nightly", "nightly_20260224", "nightlykickoff", "release/2.13"]
+        self.assertEqual(
+            m.select_target_refs(names, (2, 13)),
+            ["refs/heads/nightly", "refs/heads/release/2.13"],
+        )
+
+    def test_sorts_release_numerically_not_lexically(self) -> None:
+        # 2.9 must rank below 2.10 despite string ordering.
+        names = ["release/2.9", "release/2.10"]
+        self.assertEqual(
+            m.select_target_refs(names, (2, 10)),
+            ["refs/heads/release/2.10", "refs/heads/release/2.9"],
+        )
+
+
+class TestReleaseLines(TestCase):
+    def test_only_release_branches(self) -> None:
+        refs = [
+            "refs/heads/main",
+            "refs/heads/nightly",
+            "refs/heads/release/2.14",
+            "refs/heads/release/2.13",
+        ]
+        self.assertEqual(m.release_lines(refs), [(2, 14), (2, 13)])
+
+
+class TestSelectTargetTags(TestCase):
+    def test_ga_and_newest_candidate(self) -> None:
+        names = ["v2.14.0-rc1", "v2.14.0-rc2", "v2.14.0"]
+        self.assertEqual(
+            m.select_target_tags(names, (2, 14)),
+            ["refs/tags/v2.14.0", "refs/tags/v2.14.0-rc2"],
+        )
+
+    def test_candidate_only_before_ga(self) -> None:
+        self.assertEqual(
+            m.select_target_tags(["v2.14.0-rc1"], (2, 14)),
+            ["refs/tags/v2.14.0-rc1"],
+        )
+
+    def test_patch_release_supersedes_shipped_tags(self) -> None:
+        # The preceding line is still patchable: v2.13.1-rc1 must win over the
+        # rc15 that shipped as v2.13.0.
+        names = ["v2.13.0-rc15", "v2.13.0", "v2.13.1-rc1"]
+        self.assertEqual(
+            m.select_target_tags(names, (2, 13)),
+            ["refs/tags/v2.13.0", "refs/tags/v2.13.1-rc1"],
+        )
+
+    def test_sorts_candidates_numerically_not_lexically(self) -> None:
+        # rc9 must rank below rc10 despite string ordering.
+        names = ["v2.13.0-rc9", "v2.13.0-rc10"]
+        self.assertEqual(
+            m.select_target_tags(names, (2, 13)),
+            ["refs/tags/v2.13.0-rc10"],
+        )
+
+    def test_ignores_other_release_lines(self) -> None:
+        names = ["v2.1.0", "v2.1.0-rc1", "v2.14.0-rc1", "v3.1.0-rc1"]
+        self.assertEqual(
+            m.select_target_tags(names, (2, 1)),
+            ["refs/tags/v2.1.0", "refs/tags/v2.1.0-rc1"],
+        )
+
+    def test_ignores_unconventional_tags(self) -> None:
+        names = ["v2.14.0-rc1-test", "v2.14.0rc1", "2.14.0-rc1", "v2.14.0-rc", "v2.14"]
+        self.assertEqual(m.select_target_tags(names, (2, 14)), [])
+
+    def test_no_tags_yet(self) -> None:
+        self.assertEqual(m.select_target_tags([], (2, 14)), [])
+
+
+class TestUsesReleaseLabel(TestCase):
+    def test_matches_release_labels(self) -> None:
+        self.assertTrue(m.uses_release_label("runs-on: rel-l-x86iavx512-44-340"))
+        self.assertTrue(m.uses_release_label('runner: "mt-rel-l-arm64g3-44-340"'))
+        self.assertTrue(
+            m.uses_release_label("'rel-l-x86iavx512-44-340' || 'l-x86iavx512-48-384'")
+        )
+
+    def test_rejects_non_release_text(self) -> None:
+        self.assertFalse(m.uses_release_label("runs-on: l-x86iavx512-48-384"))
+        self.assertFalse(m.uses_release_label("this is a prerelease build, unrelated"))
+
+
+class TestCollectReleaseWorkflowPaths(TestCase):
+    def test_follows_only_release_build_reusable(self) -> None:
+        # A linux binary workflow whose build job runs on a release label and
+        # calls the build reusable, but whose test/upload jobs run elsewhere.
+        files = {
+            ".github/workflows/gen-linux.yml": m.WorkflowFile(
+                doc={
+                    "jobs": {
+                        "build": {
+                            "uses": "./.github/workflows/_binary-build-linux.yml",
+                            "with": {"runs_on": "lf.rel-l-x86iavx512-44-340"},
+                        },
+                        "test": {
+                            "uses": "./.github/workflows/_binary-test-linux.yml",
+                            "with": {"runs_on": "l-x86iavx512-16-128"},
+                        },
+                        "upload": {"uses": "./.github/workflows/_binary-upload.yml"},
+                    }
+                },
+                raw="runs_on: rel-l-x86iavx512-44-340",
+            ),
+            ".github/workflows/_binary-build-linux.yml": m.WorkflowFile(
+                doc={"jobs": {}}, raw="runs-on: ${{ inputs.runs_on }}"
+            ),
+            ".github/workflows/_binary-test-linux.yml": m.WorkflowFile(
+                doc={"jobs": {}}, raw="runs-on: ${{ inputs.runs_on }}"
+            ),
+            ".github/workflows/_binary-upload.yml": m.WorkflowFile(
+                doc={"jobs": {}}, raw="runs-on: ubuntu-24.04"
+            ),
+            ".github/workflows/unrelated.yml": m.WorkflowFile(
+                doc={"jobs": {}}, raw="runs-on: ubuntu-24.04"
+            ),
+        }
+        self.assertEqual(
+            m.collect_release_workflow_paths(files),
+            {
+                ".github/workflows/gen-linux.yml",
+                ".github/workflows/_binary-build-linux.yml",
+            },
+        )
+
+    def test_entry_without_reusable_returns_just_itself(self) -> None:
+        # The vLLM case: uses a release label inline, calls no local reusable.
+        files = {
+            ".github/workflows/build-vllm-wheel.yml": m.WorkflowFile(
+                doc={"jobs": {"build": {"runs-on": "mt-rel-l-x86iavx512-44-340"}}},
+                raw="runner: mt-rel-l-x86iavx512-44-340",
+            ),
+            ".github/workflows/docker-release.yml": m.WorkflowFile(
+                doc={"jobs": {"build": {"runs-on": "linux.large"}}},
+                raw="runs-on: linux.large",
+            ),
+        }
+        self.assertEqual(
+            m.collect_release_workflow_paths(files),
+            {".github/workflows/build-vllm-wheel.yml"},
+        )
+
+    def test_discovers_callers_of_select_release_runner(self) -> None:
+        # pytorch/pytorch#190619 moved the rel- labels into
+        # _select-release-runner.yml, which emits them as outputs. Callers carry
+        # no rel- label of their own (runs-on references needs.<job>.outputs.*),
+        # so they must be discovered via their use of the select-runner reusable.
+        files = {
+            ".github/workflows/docker-release.yml": m.WorkflowFile(
+                doc={
+                    "jobs": {
+                        "select-runner": {
+                            "uses": "./.github/workflows/_select-release-runner.yml"
+                        },
+                        "build": {"runs-on": "${{ matrix.runner }}"},
+                    }
+                },
+                raw="uses: ./.github/workflows/_select-release-runner.yml\n"
+                "runs-on: ${{ matrix.runner }}",
+            ),
+            ".github/workflows/_select-release-runner.yml": m.WorkflowFile(
+                doc={"jobs": {"select": {"runs-on": "ubuntu-24.04"}}},
+                raw="echo x86=mt-rel-l-x86iavx512-44-340",
+            ),
+            ".github/workflows/unrelated.yml": m.WorkflowFile(
+                doc={"jobs": {"build": {"runs-on": "ubuntu-24.04"}}},
+                raw="runs-on: ubuntu-24.04",
+            ),
+        }
+        self.assertEqual(
+            m.collect_release_workflow_paths(files),
+            {
+                ".github/workflows/docker-release.yml",
+                ".github/workflows/_select-release-runner.yml",
+            },
+        )
+
+    def test_paths_filter_mention_is_not_a_caller(self) -> None:
+        # Even when the release-label reusable is present, a workflow that only
+        # names it in a triggers paths: filter (not an actual job `uses:`) must
+        # not be pulled in -- entry detection is by job `uses:`, not raw text.
+        files = {
+            ".github/workflows/_select-release-runner.yml": m.WorkflowFile(
+                doc={"jobs": {"select": {"runs-on": "ubuntu-24.04"}}},
+                raw="echo x86=mt-rel-l-x86iavx512-44-340",
+            ),
+            ".github/workflows/lint.yml": m.WorkflowFile(
+                doc={"jobs": {"lint": {"runs-on": "ubuntu-24.04"}}},
+                raw="on:\n  pull_request:\n    paths:\n"
+                "      - .github/workflows/_select-release-runner.yml",
+            ),
+        }
+        self.assertEqual(
+            m.collect_release_workflow_paths(files),
+            {".github/workflows/_select-release-runner.yml"},
+        )
+
+    def test_follows_reusable_whose_runner_comes_from_selector_outputs(self) -> None:
+        # pytorch/pytorch#193378 split the triton build into
+        # _build-triton-wheel-linux.yml. Its callers pass the runner through from
+        # the select-runner job's outputs, so the calling job carries no rel-
+        # label -- the reusable that actually consumes the release runner must
+        # still be followed. Upload jobs depend on the build jobs rather than the
+        # selector, so they stay out.
+        files = {
+            ".github/workflows/build-triton-wheel.yml": m.WorkflowFile(
+                doc={
+                    "jobs": {
+                        "select-runner": {
+                            "uses": "./.github/workflows/_select-release-runner.yml"
+                        },
+                        "build-wheel-cuda": {
+                            "needs": "select-runner",
+                            "uses": "./.github/workflows/_build-triton-wheel-linux.yml",
+                            "with": {
+                                "runs_on": "${{ needs.select-runner.outputs.x86 }}"
+                            },
+                        },
+                        "build-wheel-win": {"runs-on": "windows.4xlarge"},
+                        "upload-wheel-triton": {
+                            "needs": ["build-wheel-cuda"],
+                            "uses": "./.github/workflows/_upload-triton-wheel.yml",
+                        },
+                    }
+                },
+                raw="uses: ./.github/workflows/_select-release-runner.yml\n"
+                "runs_on: ${{ needs.select-runner.outputs.x86 }}",
+            ),
+            ".github/workflows/_select-release-runner.yml": m.WorkflowFile(
+                doc={"jobs": {"select": {"runs-on": "ubuntu-24.04"}}},
+                raw="echo x86=mt-rel-l-x86iavx512-44-340",
+            ),
+            ".github/workflows/_build-triton-wheel-linux.yml": m.WorkflowFile(
+                doc={"jobs": {"build": {"runs-on": "${{ inputs.runs_on }}"}}},
+                raw="runs-on: ${{ inputs.runs_on }}",
+            ),
+            ".github/workflows/_upload-triton-wheel.yml": m.WorkflowFile(
+                doc={"jobs": {"upload": {"runs-on": "ubuntu-24.04"}}},
+                raw="runs-on: ubuntu-24.04",
+            ),
+        }
+        self.assertEqual(
+            m.collect_release_workflow_paths(files),
+            {
+                ".github/workflows/build-triton-wheel.yml",
+                ".github/workflows/_select-release-runner.yml",
+                ".github/workflows/_build-triton-wheel-linux.yml",
+            },
+        )
+
+    def test_selector_outputs_of_a_non_release_job_are_not_a_signal(self) -> None:
+        # needs.<job>.outputs.* only propagates the release signal when that job
+        # is a caller of the release-label reusable. A plain matrix-computing job
+        # must not pull its consumers' reusables in.
+        files = {
+            ".github/workflows/gen.yml": m.WorkflowFile(
+                doc={
+                    "jobs": {
+                        "build": {"runs-on": "rel-l-x86iavx512-44-340"},
+                        "matrix": {"runs-on": "ubuntu-24.04"},
+                        "test": {
+                            "needs": "matrix",
+                            "uses": "./.github/workflows/_test.yml",
+                            "with": {"runs_on": "${{ needs.matrix.outputs.runner }}"},
+                        },
+                    }
+                },
+                raw="runs-on: rel-l-x86iavx512-44-340",
+            ),
+            ".github/workflows/_test.yml": m.WorkflowFile(
+                doc={"jobs": {}}, raw="runs-on: ${{ inputs.runs_on }}"
+            ),
+        }
+        self.assertEqual(
+            m.collect_release_workflow_paths(files), {".github/workflows/gen.yml"}
+        )
+
+    def test_ignores_remote_uses(self) -> None:
+        files = {
+            ".github/workflows/gen.yml": m.WorkflowFile(
+                doc={
+                    "jobs": {
+                        "x": {
+                            "uses": "pytorch/test-infra/.github/workflows/x.yml@main",
+                            "with": {"runs_on": "rel-l-x86iavx512-44-340"},
+                        }
+                    }
+                },
+                raw="runs_on: rel-l-x86iavx512-44-340",
+            )
+        }
+        self.assertEqual(
+            m.collect_release_workflow_paths(files), {".github/workflows/gen.yml"}
+        )
+
+
+class TestBuildDesiredWorkflows(TestCase):
+    def test_flattens_per_ref_paths(self) -> None:
+        # Per-ref discovery: each ref carries only the workflows that exist there,
+        # so a ref (release/2.12) can legitimately omit a workflow (b.yml) that
+        # main has. The allow-list must not fabricate the missing combination.
+        desired = m.build_desired_workflows(
+            {
+                "refs/heads/main": {
+                    ".github/workflows/a.yml",
+                    ".github/workflows/b.yml",
+                },
+                "refs/heads/release/2.12": {".github/workflows/a.yml"},
+            },
+            "pytorch/pytorch",
+        )
+        self.assertEqual(
+            desired,
+            {
+                "pytorch/pytorch/.github/workflows/a.yml@refs/heads/main",
+                "pytorch/pytorch/.github/workflows/b.yml@refs/heads/main",
+                "pytorch/pytorch/.github/workflows/a.yml@refs/heads/release/2.12",
+            },
+        )
+
+
+class FakeClient(m.GitHubClient):
+    """Records the PATCH bodies reconcile_workflows would send.
+
+    Subclasses the real client rather than duck-typing it so the calls below
+    type-check, and skips its __init__ because no HTTP session is needed.
+    """
+
+    def __init__(self) -> None:
+        self.patches: List[Tuple[str, str, Any]] = []
+
+    def request(self, method: str, path: str, **kwargs: Any) -> Any:
+        self.patches.append((method, path, kwargs.get("json")))
+        return None
+
+
+class TestReconcileWorkflowsIsScopedToRepo(TestCase):
+    """The release runner groups are org-level and shared, so a run for one repo
+    must not touch another repo's entries."""
+
+    def _group(self, selected):
+        return {
+            "id": 1,
+            "name": "meta-prod-aws-ue1-release-runners",
+            "selected_workflows": selected,
+            "restricted_to_workflows": True,
+        }
+
+    def test_other_repos_entries_are_preserved(self) -> None:
+        client = FakeClient()
+        group = self._group(
+            [
+                "pytorch/pytorch/.github/workflows/keep.yml@refs/heads/main",
+                "pytorch/executorch/.github/workflows/old.yml@refs/heads/nightly",
+            ]
+        )
+        desired = {"pytorch/executorch/.github/workflows/new.yml@refs/heads/nightly"}
+        changed = m.reconcile_workflows(
+            client, group, desired, "pytorch/executorch", apply=True
+        )
+        self.assertTrue(changed)
+        self.assertEqual(len(client.patches), 1)
+        sent = set(client.patches[0][2]["selected_workflows"])
+        # pytorch/pytorch survives; executorch's stale entry is replaced.
+        self.assertIn(
+            "pytorch/pytorch/.github/workflows/keep.yml@refs/heads/main", sent
+        )
+        self.assertNotIn(
+            "pytorch/executorch/.github/workflows/old.yml@refs/heads/nightly", sent
+        )
+        self.assertIn(
+            "pytorch/executorch/.github/workflows/new.yml@refs/heads/nightly", sent
+        )
+
+    def test_no_write_when_only_other_repos_entries_differ(self) -> None:
+        client = FakeClient()
+        group = self._group(
+            [
+                "pytorch/pytorch/.github/workflows/a.yml@refs/heads/main",
+                "pytorch/executorch/.github/workflows/b.yml@refs/heads/nightly",
+            ]
+        )
+        desired = {"pytorch/executorch/.github/workflows/b.yml@refs/heads/nightly"}
+        changed = m.reconcile_workflows(
+            client, group, desired, "pytorch/executorch", apply=True
+        )
+        self.assertFalse(changed)
+        self.assertEqual(client.patches, [])
+
+    def test_prefix_match_does_not_catch_a_similarly_named_repo(self) -> None:
+        # pytorch/executorch-examples must not be mistaken for pytorch/executorch.
+        client = FakeClient()
+        group = self._group(
+            ["pytorch/executorch-examples/.github/workflows/x.yml@refs/heads/main"]
+        )
+        desired = {"pytorch/executorch/.github/workflows/y.yml@refs/heads/main"}
+        m.reconcile_workflows(client, group, desired, "pytorch/executorch", apply=True)
+        sent = set(client.patches[0][2]["selected_workflows"])
+        self.assertIn(
+            "pytorch/executorch-examples/.github/workflows/x.yml@refs/heads/main",
+            sent,
+        )
+
+
+class TestVersionAnchor(TestCase):
+    def test_non_pytorch_repo_anchors_on_newest_release_branch(self) -> None:
+        anchor = m.get_test_version_anchor(
+            "pytorch/executorch",
+            ["main", "release/1.4", "release/1.5", "release/1.4-full-wheel"],
+        )
+        self.assertEqual(anchor, (1, 5))
+
+    def test_anchor_sorts_numerically_not_lexically(self) -> None:
+        anchor = m.get_test_version_anchor(
+            "pytorch/executorch", ["release/1.9", "release/1.10"]
+        )
+        self.assertEqual(anchor, (1, 10))
+
+    def test_no_release_branch_is_a_clear_error(self) -> None:
+        with self.assertRaises(SystemExit):
+            m.get_test_version_anchor("pytorch/executorch", ["main", "nightly"])
+
+
+class BranchClient(m.GitHubClient):
+    """Serves matching-refs and per-branch protection from a fixed fixture."""
+
+    def __init__(self, release_branches, protected) -> None:
+        self.release_branches = release_branches
+        self.protected = set(protected)
+        self.branch_calls: List[str] = []
+
+    def request(self, method: str, path: str, **kwargs: Any) -> Any:
+        class R:
+            def __init__(self, payload):
+                self._p = payload
+
+            def json(self):
+                return self._p
+
+        if "matching-refs/heads/release/" in path:
+            return R([{"ref": f"refs/heads/{n}"} for n in self.release_branches])
+        name = path.split("/branches/", 1)[1]
+        self.branch_calls.append(name)
+        if name not in self.protected:
+            raise requests.HTTPError(f"404 for {name}")
+        return R({"protected": True})
+
+
+class TestGetProtectedBranches(TestCase):
+    def test_takes_the_newest_protected_release_lines(self) -> None:
+        c = BranchClient(
+            ["release/1.3", "release/1.4", "release/1.5"],
+            {"main", "nightly", "release/1.5", "release/1.4", "release/1.3"},
+        )
+        self.assertEqual(
+            m.get_protected_branches(c, "pytorch/executorch"),
+            ["main", "nightly", "release/1.5", "release/1.4"],
+        )
+
+    def test_stops_after_enough_protected_lines(self) -> None:
+        # A long release history must not cost one request per branch.
+        c = BranchClient([f"release/0.{n}" for n in range(1, 30)], {"main"})
+        c.protected |= {"release/0.29", "release/0.28"}
+        m.get_protected_branches(c, "pytorch/vision")
+        self.assertEqual(c.branch_calls[:2], ["release/0.29", "release/0.28"])
+        self.assertNotIn("release/0.1", c.branch_calls)
+
+    def test_skips_unprotected_and_keeps_walking(self) -> None:
+        c = BranchClient(
+            ["release/2.0", "release/0.29", "release/0.28"],
+            {"main", "release/0.29", "release/0.28"},
+        )
+        self.assertEqual(
+            m.get_protected_branches(c, "pytorch/vision"),
+            ["main", "release/0.29", "release/0.28"],
+        )
+
+    def test_ignores_branches_that_are_not_release_x_y(self) -> None:
+        c = BranchClient(
+            ["release/0.29_bkp", "release/0.8.0", "release/0.29"],
+            {"main", "release/0.29"},
+        )
+        self.assertEqual(
+            m.get_protected_branches(c, "pytorch/vision"), ["main", "release/0.29"]
+        )
+
+
+class TestRunnerFleetIsAReleaseSignal(TestCase):
+    """A wheel workflow names no rel- label: it passes runner-fleet: osdc to the
+    matrix generator, which resolves the labels per row."""
+
+    def test_runner_fleet_osdc_counts(self) -> None:
+        self.assertTrue(m.uses_release_label("      runner-fleet: osdc\n"))
+
+    def test_quoted_forms_count(self) -> None:
+        self.assertTrue(m.uses_release_label('      runner-fleet: "osdc"\n'))
+        self.assertTrue(m.uses_release_label("      runner-fleet: 'osdc'\n"))
+
+    def test_ec2_does_not_count(self) -> None:
+        self.assertFalse(m.uses_release_label("      runner-fleet: ec2\n"))
+
+    def test_a_similarly_named_input_does_not_count(self) -> None:
+        self.assertFalse(m.uses_release_label("      runner-fleet-override: osdcx\n"))
+
+    def test_a_caller_is_discovered_through_it(self) -> None:
+        files = {
+            ".github/workflows/build-wheels-linux.yml": m.WorkflowFile(
+                raw=(
+                    "jobs:\n"
+                    "  generate-matrix:\n"
+                    "    uses: pytorch/test-infra/.github/workflows/"
+                    "generate_binary_build_matrix.yml@main\n"
+                    "    with:\n"
+                    "      runner-fleet: osdc\n"
+                ),
+                doc={
+                    "jobs": {
+                        "generate-matrix": {
+                            "uses": "pytorch/test-infra/.github/workflows/"
+                            "generate_binary_build_matrix.yml@main",
+                            "with": {"runner-fleet": "osdc"},
+                        }
+                    }
+                },
+            )
+        }
+        self.assertEqual(
+            m.collect_release_workflow_paths(files),
+            {".github/workflows/build-wheels-linux.yml"},
+        )
+
+
+class TestSelfAllow(TestCase):
+    """A reusable workflow whose callers live in other repositories is invisible
+    to discovery here, so it is named explicitly."""
+
+    def test_builds_one_reference_per_ref(self) -> None:
+        self.assertEqual(
+            m.build_self_allowed(
+                "pytorch/test-infra",
+                [".github/workflows/build_wheels_linux.yml"],
+                ["refs/heads/main", "refs/heads/release/2.14"],
+            ),
+            {
+                "pytorch/test-infra/.github/workflows/build_wheels_linux.yml"
+                "@refs/heads/main",
+                "pytorch/test-infra/.github/workflows/build_wheels_linux.yml"
+                "@refs/heads/release/2.14",
+            },
+        )
+
+    def test_reusable_refs_are_main_nightly_then_releases_numerically(self) -> None:
+        class C(m.GitHubClient):
+            def __init__(self) -> None:
+                pass
+
+            def request(self, method: str, path: str, **kwargs: Any) -> Any:
+                class R:
+                    def json(self_inner):
+                        return [
+                            {"ref": "refs/heads/release/2.9"},
+                            {"ref": "refs/heads/release/2.10"},
+                            {"ref": "refs/heads/release/2.1"},
+                            {"ref": "refs/heads/release/2.14-rc"},
+                        ]
+
+                return R()
+
+        self.assertEqual(
+            m.get_reusable_refs(C(), "pytorch/test-infra"),
+            [
+                "refs/heads/main",
+                "refs/heads/nightly",
+                "refs/heads/release/2.1",
+                "refs/heads/release/2.9",
+                "refs/heads/release/2.10",
+            ],
+        )
+
+    def test_reusable_refs_pin_tags_of_the_newest_lines(self) -> None:
+        # pytorch/TensorRT builds its RC from a tag push and protects no release
+        # branch, so these tags are its only route onto the release runners.
+        responses = {
+            "/repos/pytorch/TensorRT/git/matching-refs/heads/release/": [
+                {"ref": "refs/heads/release/2.13"},
+                {"ref": "refs/heads/release/2.14"},
+                {"ref": "refs/heads/release/2.15"},
+            ],
+            "/repos/pytorch/TensorRT/git/matching-refs/tags/v2.14.": [
+                {"ref": "refs/tags/v2.14.0-rc3"},
+                {"ref": "refs/tags/v2.14.0"},
+            ],
+            "/repos/pytorch/TensorRT/git/matching-refs/tags/v2.15.": [
+                {"ref": "refs/tags/v2.15.0-rc1"},
+            ],
+        }
+        requested: List[str] = []
+
+        class C(m.GitHubClient):
+            def __init__(self) -> None:
+                pass
+
+            def request(self, method: str, path: str, **kwargs: Any) -> Any:
+                requested.append(path)
+
+                class R:
+                    def json(self_inner):
+                        return responses[path]
+
+                return R()
+
+        self.assertEqual(
+            m.get_reusable_refs(C(), "pytorch/TensorRT"),
+            [
+                "refs/heads/main",
+                "refs/heads/nightly",
+                "refs/heads/release/2.13",
+                "refs/heads/release/2.14",
+                "refs/heads/release/2.15",
+                "refs/tags/v2.14.0",
+                "refs/tags/v2.14.0-rc3",
+                "refs/tags/v2.15.0-rc1",
+            ],
+        )
+        self.assertNotIn(
+            "/repos/pytorch/TensorRT/git/matching-refs/tags/v2.13.", requested
+        )
+
+
+if __name__ == "__main__":
+    main()
