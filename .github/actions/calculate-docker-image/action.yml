@@ -260,7 +260,7 @@ runs:
         WORKING_DIRECTORY: ${{ inputs.working-directory }}/${{ inputs.docker-build-dir }}
         DOCKER_BUILD_SCRIPT: ${{ inputs.docker-build-script }}
       # NB: Retry here as this step frequently fails with network error downloading various stuffs
-      uses: nick-fields/retry@7152eba30c6575329ac0576536151aca5a72780e # v3.0.0
+      uses: chainguard-actions/nick-fields-retry@a9e32fcf3e97d152aefb9fb36f12959d0bca46af # v3.0.0
       with:
         shell: bash
         timeout_minutes: ${{ inputs.docker-build-timeout-minutes }}
