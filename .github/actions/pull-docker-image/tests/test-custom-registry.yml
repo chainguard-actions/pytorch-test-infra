@@ -1,0 +1,46 @@
+name: Test custom docker registry
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker on PATH
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/docker.log /tmp/aws.log /tmp/login-stdin.log
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "aws $*" >> /tmp/aws.log
+          echo "fake-ecr-password"
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/docker.log
+          case "$1" in
+            login) cat >> /tmp/login-stdin.log; exit 0 ;;
+            manifest) echo '{"config":{"size":1048576},"layers":[{"size":1048576}]}'; exit 0 ;;
+            inspect) [ -f /tmp/image-present ] && exit 0; exit 1 ;;
+            pull) [ -f /tmp/pull-fails ] && exit 1; echo "pulled $2"; exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          rm -f /tmp/image-present /tmp/pull-fails
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: 123456789012.dkr.ecr.us-east-1.amazonaws.com/custom/image:v1
+          docker-registry: 123456789012.dkr.ecr.us-east-1.amazonaws.com
+      - name: Assert login used custom registry
+        run: |
+          echo "--- docker.log"; cat /tmp/docker.log
+          grep -qx "docker login -u AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com" /tmp/docker.log || { echo "FAIL: login to custom registry missing"; exit 1; }
+          if grep -q "308535385114" /tmp/docker.log; then
+            echo "FAIL: default registry should not be used"
+            exit 1
+          fi
+          grep -qx "docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/custom/image:v1" /tmp/docker.log || { echo "FAIL: pull missing"; exit 1; }
+          echo "PASS"

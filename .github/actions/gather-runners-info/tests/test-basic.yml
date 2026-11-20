@@ -1,0 +1,46 @@
+name: Test basic usage (CPU runner, no venv)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert device name and type were exported
+        run: |
+          echo "DEVICE_NAME: ${DEVICE_NAME:-}"
+          echo "DEVICE_TYPE: ${DEVICE_TYPE:-}"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            aarch64|arm64) EXPECTED=arm64-cpu ;;
+            *) EXPECTED=cpu ;;
+          esac
+          if command -v nvidia-smi >/dev/null || command -v rocm-smi >/dev/null || command -v hl-smi >/dev/null; then
+            echo "Accelerator tool present; skipping strict device-name check"
+          elif [ "${DEVICE_NAME:-}" != "$EXPECTED" ]; then
+            echo "FAIL: expected DEVICE_NAME '$EXPECTED'"
+            exit 1
+          fi
+          if [ -z "${DEVICE_TYPE:-}" ]; then
+            echo "FAIL: DEVICE_TYPE is empty"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert runners-info is non-empty valid JSON
+        env:
+          ACTUAL: ${{ steps.action.outputs.runners-info }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "FAIL: runners-info output is empty"
+            exit 1
+          fi
+          if ! printf '%s' "$ACTUAL" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d not in (None, {}, [], ""), "empty json"'; then
+            echo "FAIL: runners-info is not valid non-empty JSON"
+            exit 1
+          fi
+          echo "PASS"

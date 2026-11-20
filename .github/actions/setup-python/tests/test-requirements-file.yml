@@ -1,0 +1,33 @@
+name: Test pip requirements file is installed into venv
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake brew/python and darwin preload
+        run: |
+          rm -f /tmp/brew.log /tmp/python.log /tmp/venv-python.log
+          mkdir -p /tmp/fakebin /tmp/fakebrew/bin
+          cp tests/fixtures/fake-darwin.js /tmp/fake-darwin.js
+          cp tests/fixtures/fake-brew.sh /tmp/fakebin/brew
+          cp tests/fixtures/fake-python.sh /tmp/fakebrew/bin/python3.12
+          cp tests/fixtures/fake-venv-python.sh /tmp/fake-venv-python.sh
+          chmod +x /tmp/fakebin/brew /tmp/fakebrew/bin/python3.12 /tmp/fake-venv-python.sh
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require /tmp/fake-darwin.js
+        with:
+          python-version: "3.12"
+          pip-requirements-file: tests/fixtures/requirements.txt
+      - name: Assert requirements installed with venv python
+        run: |
+          echo "VENV_PATH: ${VENV_PATH:-<unset>}"
+          echo "--- venv-python.log"; cat /tmp/venv-python.log || true
+          [ -n "${VENV_PATH:-}" ] || { echo "FAIL: VENV_PATH not set"; exit 1; }
+          grep -qx "venv-python -m pip install -r tests/fixtures/requirements.txt" /tmp/venv-python.log \
+            || { echo "FAIL: pip install -r not invoked with venv python"; exit 1; }
+          echo "PASS"

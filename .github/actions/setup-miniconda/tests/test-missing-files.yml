@@ -1,0 +1,36 @@
+name: Test missing environment and requirements files
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          python-version: "3.9"
+          default-packages: "pip"
+          environment-file: tests/fixtures/does-not-exist-env.txt
+          pip-requirements-file: tests/fixtures/does-not-exist-requirements.txt
+      - name: Assert action succeeded and env is usable despite missing files
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"; exit 1
+          fi
+          if [ -z "$CONDA_PREFIX" ] || [ ! -d "$CONDA_PREFIX" ]; then
+            echo "FAIL: CONDA_PREFIX not set or missing"; exit 1
+          fi
+          VER=$($CONDA_RUN python --version 2>&1)
+          echo "python: $VER"
+          case "$VER" in
+            "Python 3.9"*) ;;
+            *) echo "FAIL: expected Python 3.9"; exit 1 ;;
+          esac
+          if $CONDA_RUN python -c "import six" 2>/dev/null; then
+            echo "NOTE: six present (may come from base deps), not asserting"
+          fi
+          echo "PASS"

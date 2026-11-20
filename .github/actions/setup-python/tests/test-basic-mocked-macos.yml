@@ -1,0 +1,50 @@
+name: Test basic venv creation (simulated macOS with fake brew)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake brew/python and darwin preload
+        run: |
+          rm -f /tmp/brew.log /tmp/python.log /tmp/venv-python.log
+          mkdir -p /tmp/fakebin /tmp/fakebrew/bin
+          cp tests/fixtures/fake-darwin.js /tmp/fake-darwin.js
+          cp tests/fixtures/fake-brew.sh /tmp/fakebin/brew
+          cp tests/fixtures/fake-python.sh /tmp/fakebrew/bin/python3.12
+          cp tests/fixtures/fake-venv-python.sh /tmp/fake-venv-python.sh
+          chmod +x /tmp/fakebin/brew /tmp/fakebrew/bin/python3.12 /tmp/fake-venv-python.sh
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require /tmp/fake-darwin.js
+        with:
+          python-version: "3.12"
+      - name: Assert venv created and exported
+        run: |
+          echo "VENV_PATH: ${VENV_PATH:-<unset>}"
+          echo "--- brew.log"; cat /tmp/brew.log || true
+          echo "--- python.log"; cat /tmp/python.log || true
+          if [ -z "${VENV_PATH:-}" ]; then
+            echo "FAIL: VENV_PATH not set"; exit 1
+          fi
+          case "$(basename "$VENV_PATH")" in
+            venv-3.12-*) ;;
+            *) echo "FAIL: unexpected venv dir name"; exit 1 ;;
+          esac
+          if [ ! -x "$VENV_PATH/bin/python" ]; then
+            echo "FAIL: venv python missing"; exit 1
+          fi
+          grep -qx "brew update" /tmp/brew.log || { echo "FAIL: brew update not run"; exit 1; }
+          grep -qx "brew install python@3.12" /tmp/brew.log || { echo "FAIL: brew install python@3.12 not run"; exit 1; }
+          grep -qF -- "-m venv $VENV_PATH" /tmp/python.log || { echo "FAIL: venv not created with brew python"; exit 1; }
+          case ":$PATH:" in
+            *":$VENV_PATH/bin:"*) ;;
+            *) echo "FAIL: venv bin not on PATH: $PATH"; exit 1 ;;
+          esac
+          if [ -f /tmp/venv-python.log ]; then
+            echo "FAIL: pip should not run without a requirements file"; exit 1
+          fi
+          echo "PASS"

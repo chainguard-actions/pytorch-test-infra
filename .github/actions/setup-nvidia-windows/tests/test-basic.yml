@@ -1,0 +1,46 @@
+name: Test setup-nvidia-windows basic invocation
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Record platform
+        id: platform
+        shell: bash
+        run: |
+          echo "os=$(uname -s)" >> "$GITHUB_OUTPUT"
+          if command -v nvidia-smi >/dev/null 2>&1; then
+            echo "gpu=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "gpu=false" >> "$GITHUB_OUTPUT"
+          fi
+      - id: action
+        uses: .
+        continue-on-error: true
+      - name: Assert action outcome matches platform
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          OS_NAME: ${{ steps.platform.outputs.os }}
+          HAS_GPU: ${{ steps.platform.outputs.gpu }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "os: $OS_NAME"
+          echo "gpu: $HAS_GPU"
+          if [ "$OUTCOME" = "success" ]; then
+            # Success is only plausible on a Windows runner with an NVIDIA GPU.
+            if [ "$OS_NAME" = "Linux" ] && [ "$HAS_GPU" != "true" ]; then
+              echo "FAIL: action reported success on Linux without nvidia-smi"
+              exit 1
+            fi
+            echo "PASS: driver update and nvidia-smi verification succeeded"
+          elif [ "$OUTCOME" = "failure" ]; then
+            # The action requires the Windows 'cmd' shell, the driver_update.bat
+            # script and an NVIDIA GPU; on a Linux act container it must fail.
+            echo "PASS: action failed as expected on a non-Windows/non-GPU runner"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

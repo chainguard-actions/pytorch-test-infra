@@ -1,0 +1,47 @@
+name: Test with a CUDA version
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake Windows tooling (powershell, cygpath, EC2 curl)
+        run: bash "$GITHUB_WORKSPACE/tests/fixtures/setup-fakes.sh"
+      - id: action
+        uses: .
+        with:
+          cuda-version: "12.4"
+      - name: Assert EC2 metadata endpoint was queried
+        run: |
+          cat "$RUNNER_TEMP/fakelogs/curl.log"
+          for cat in ami-id instance-id instance-type; do
+            if ! grep -q "meta-data/$cat" "$RUNNER_TEMP/fakelogs/curl.log"; then
+              echo "FAIL: metadata category $cat not queried"
+              exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert powershell steps were executed
+        run: |
+          cat "$RUNNER_TEMP/fakelogs/powershell.log"
+          n=$(grep -c . "$RUNNER_TEMP/fakelogs/powershell.log" || true)
+          echo "powershell invocations: $n"
+          if [ "$n" -lt 2 ]; then
+            echo "FAIL: expected at least 2 powershell step invocations"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert env vars exported
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR:-}"
+          echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR:-}"
+          if [ -z "${RUNNER_ARTIFACT_DIR:-}" ] || [ ! -d "$RUNNER_ARTIFACT_DIR" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR missing or not created"
+            exit 1
+          fi
+          if [ -z "${RUNNER_TEST_RESULTS_DIR:-}" ] || [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR missing or not created"
+            exit 1
+          fi
+          echo "PASS"

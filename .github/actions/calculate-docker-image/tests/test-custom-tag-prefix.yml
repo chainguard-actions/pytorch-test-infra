@@ -1,0 +1,51 @@
+name: Test custom tag prefix and custom registry
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          mkdir -p "$HOME/fakebin"
+          cat > "$HOME/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "fake-password"
+          exit 0
+          EOF
+          cat > "$HOME/fakebin/docker" <<'EOF'
+          #!/bin/sh
+          echo "fake docker $*" >&2
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) echo '{}'; exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x "$HOME/fakebin/aws" "$HOME/fakebin/docker"
+          echo "$HOME/fakebin" >> "$GITHUB_PATH"
+      - name: Compute expected hash
+        id: hash
+        run: echo "hash=$(git rev-parse HEAD:tests/fixtures/docker)" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: my-image
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: registry.example.com
+          custom-tag-prefix: cuda12
+          repo-name: myrepo
+      - name: Assert image with prefix
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          EXPECTED="registry.example.com/myrepo/my-image:cuda12-${HASH}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ -z "$HASH" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"

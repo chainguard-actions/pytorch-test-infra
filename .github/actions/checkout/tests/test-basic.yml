@@ -1,0 +1,42 @@
+name: Test basic checkout into subdirectory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          path: checkout-target
+      - name: Assert checkout succeeded
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+          REF: ${{ steps.action.outputs.ref }}
+        run: |
+          echo "commit: $COMMIT"
+          echo "ref: $REF"
+          if [ ! -f "$GITHUB_WORKSPACE/checkout-target/action.yml" ]; then
+            echo "FAIL: action.yml not found in checkout-target"
+            exit 1
+          fi
+          if ! echo "$COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "FAIL: commit output is not a 40-char SHA"
+            exit 1
+          fi
+          HEAD_SHA="$(git -C "$GITHUB_WORKSPACE/checkout-target" rev-parse HEAD)"
+          echo "HEAD: $HEAD_SHA"
+          if [ "$HEAD_SHA" != "$COMMIT" ]; then
+            echo "FAIL: commit output does not match checked-out HEAD"
+            exit 1
+          fi
+          COUNT="$(git -C "$GITHUB_WORKSPACE/checkout-target" rev-list --count HEAD)"
+          echo "history depth: $COUNT"
+          if [ "$COUNT" != "1" ]; then
+            echo "FAIL: expected shallow clone of depth 1"
+            exit 1
+          fi
+          echo "PASS"

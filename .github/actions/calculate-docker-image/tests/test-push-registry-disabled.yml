@@ -1,0 +1,32 @@
+name: Test push is a no-op when custom registry is disabled
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create a docker build dir with a build script
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/push-test-docker"
+          printf '#!/bin/bash\necho "FAIL: build should not run"; exit 1\n' > "$GITHUB_WORKSPACE/push-test-docker/build.sh"
+          chmod +x "$GITHUB_WORKSPACE/push-test-docker/build.sh"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: pytorch-linux-focal-py3
+          docker-build-dir: push-test-docker
+          repo-name: myrepo
+          use-custom-docker-registry: "false"
+          push: "true"
+          force-push: "true"
+      - name: Assert image name returned unchanged (no push attempted)
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "pytorch-linux-focal-py3" ]; then
+            echo "FAIL: expected 'pytorch-linux-focal-py3'"
+            exit 1
+          fi
+          echo "PASS"

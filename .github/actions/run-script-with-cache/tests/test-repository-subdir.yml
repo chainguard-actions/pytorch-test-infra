@@ -1,0 +1,39 @@
+name: Test script runs in repository subdirectory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: /tmp/build_env.sh
+      CONDA_RUN: env
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare subdir with script
+        run: |
+          echo 'export MY_BUILD_VAR=subdir-value' > /tmp/build_env.sh
+          rm -rf "$GITHUB_WORKSPACE/act-subrepo"
+          mkdir -p "$GITHUB_WORKSPACE/act-subrepo/scripts"
+          cat > "$GITHUB_WORKSPACE/act-subrepo/scripts/build.sh" <<'EOF'
+          echo "${MY_BUILD_VAR}" > marker.txt
+          EOF
+      - id: action
+        uses: .
+        with:
+          script: scripts/build.sh
+          repository: act-subrepo
+      - name: Assert script ran inside subdirectory
+        run: |
+          F="$GITHUB_WORKSPACE/act-subrepo/marker.txt"
+          if [ ! -f "$F" ]; then
+            echo "FAIL: marker not found in act-subrepo"
+            ls -la "$GITHUB_WORKSPACE/act-subrepo"
+            exit 1
+          fi
+          ACTUAL="$(cat "$F")"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "subdir-value" ]; then
+            echo "FAIL: expected 'subdir-value'"
+            exit 1
+          fi
+          echo "PASS"

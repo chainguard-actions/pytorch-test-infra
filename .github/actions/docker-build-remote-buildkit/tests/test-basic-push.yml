@@ -1,0 +1,77 @@
+name: Test basic build and push (mocked docker)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FAKE_DOCKER_MODE: success
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker CLI on PATH
+        run: |
+          rm -rf /tmp/fake-docker && mkdir -p /tmp/fake-docker/bin
+          cat > /tmp/fake-docker/bin/docker <<'EOF'
+          #!/usr/bin/env bash
+          d=/tmp/fake-docker
+          echo "$*" >> "$d/calls.log"
+          if [ "$1" = buildx ] && { [ "$2" = create ] || [ "$2" = use ]; }; then exit 0; fi
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            shift 2
+            printf '%s\n' "$@" > "$d/build-args.txt"
+            n=$(cat "$d/count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$d/count"
+            case "${FAKE_DOCKER_MODE:-success}" in
+              success) echo "#1 [internal] load build definition from Dockerfile"; exit 0 ;;
+              connfail-then-success)
+                if [ "$n" -le "${FAKE_FAIL_TIMES:-2}" ]; then echo "ERROR: failed to dial gRPC: connection refused"; exit 1; fi
+                echo "#1 [internal] load build definition from Dockerfile"; exit 0 ;;
+              connfail) echo "ERROR: failed to dial gRPC: connection refused"; exit 1 ;;
+              builderror) echo "#1 [internal] load build definition from Dockerfile"; echo "ERROR: failed to solve: process did not complete successfully"; exit 1 ;;
+            esac
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fake-docker/bin/docker
+          echo "/tmp/fake-docker/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: |
+            ghcr.io/example/img:abc123, ghcr.io/example/img:latest
+            ghcr.io/example/img:v1
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.source=https://example.com
+          connect-delay: '0'
+      - name: Assert image output is first tag
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/img:abc123" ]; then
+            echo "FAIL: expected 'ghcr.io/example/img:abc123'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert buildx invocation
+        run: |
+          d=/tmp/fake-docker
+          echo "--- calls ---"; cat "$d/calls.log"
+          echo "--- build args ---"; cat "$d/build-args.txt"
+          grep -q '^buildx create --name remote-buildkit --driver remote --use tcp://buildkitd-' "$d/calls.log" || { echo "FAIL: builder not registered"; exit 1; }
+          [ "$(cat "$d/count")" = "1" ] || { echo "FAIL: expected exactly one build"; exit 1; }
+          a="$(tr '\n' ' ' < "$d/build-args.txt")"
+          echo "joined: $a"
+          for want in "--tag ghcr.io/example/img:abc123 " "--tag ghcr.io/example/img:latest " "--tag ghcr.io/example/img:v1 " \
+                      "--build-arg FOO=bar " "--build-arg BAZ=qux " \
+                      "--label org.opencontainers.image.source=https://example.com " "--push "; do
+            case "$a" in *"$want"*) ;; *) echo "FAIL: missing '$want'"; exit 1 ;; esac
+          done
+          case "$a" in *"--platform linux/amd64 "*|*"--platform linux/arm64 "*) ;; *) echo "FAIL: missing platform"; exit 1 ;; esac
+          for bad in "--file" "--target" "--cache-from" "--cache-to"; do
+            if grep -qx -- "$bad" "$d/build-args.txt"; then echo "FAIL: unexpected $bad"; exit 1; fi
+          done
+          [ "$(tail -n1 "$d/build-args.txt")" = "." ] || { echo "FAIL: context should be last arg '.'"; exit 1; }
+          echo "PASS"

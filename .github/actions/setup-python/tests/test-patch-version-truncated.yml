@@ -1,0 +1,38 @@
+name: Test patch version is truncated to major.minor
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake brew/python and darwin preload
+        run: |
+          rm -f /tmp/brew.log /tmp/python.log /tmp/venv-python.log
+          mkdir -p /tmp/fakebin /tmp/fakebrew/bin
+          cp tests/fixtures/fake-darwin.js /tmp/fake-darwin.js
+          cp tests/fixtures/fake-brew.sh /tmp/fakebin/brew
+          cp tests/fixtures/fake-python.sh /tmp/fakebrew/bin/python3.11
+          cp tests/fixtures/fake-venv-python.sh /tmp/fake-venv-python.sh
+          chmod +x /tmp/fakebin/brew /tmp/fakebrew/bin/python3.11 /tmp/fake-venv-python.sh
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require /tmp/fake-darwin.js
+        with:
+          python-version: "3.11.7"
+      - name: Assert formula and venv use major.minor only
+        run: |
+          echo "VENV_PATH: ${VENV_PATH:-<unset>}"
+          echo "--- brew.log"; cat /tmp/brew.log || true
+          grep -qx "brew install python@3.11" /tmp/brew.log || { echo "FAIL: expected brew install python@3.11"; exit 1; }
+          if grep -q "python@3.11.7" /tmp/brew.log; then
+            echo "FAIL: patch version leaked into formula"; exit 1
+          fi
+          case "$(basename "${VENV_PATH:-}")" in
+            venv-3.11-*) ;;
+            *) echo "FAIL: unexpected venv dir name"; exit 1 ;;
+          esac
+          [ -x "$VENV_PATH/bin/python" ] || { echo "FAIL: venv python missing"; exit 1; }
+          echo "PASS"

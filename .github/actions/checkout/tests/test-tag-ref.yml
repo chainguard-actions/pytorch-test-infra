@@ -1,0 +1,36 @@
+name: Test checkout of a tag ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: v4.0.0
+          path: tag-target
+      - name: Assert tag checked out
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          echo "commit: $COMMIT"
+          cd "$GITHUB_WORKSPACE/tag-target"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          TAG_SHA="$(git rev-parse 'v4.0.0^{commit}')"
+          echo "HEAD: $HEAD_SHA tag: $TAG_SHA"
+          if [ "$HEAD_SHA" != "$TAG_SHA" ]; then
+            echo "FAIL: HEAD is not at tag v4.0.0"
+            exit 1
+          fi
+          if [ "$COMMIT" != "$HEAD_SHA" ]; then
+            echo "FAIL: commit output does not match HEAD"
+            exit 1
+          fi
+          if ! grep -q "node20" action.yml; then
+            echo "FAIL: v4.0.0 action.yml should use node20"
+            exit 1
+          fi
+          echo "PASS"

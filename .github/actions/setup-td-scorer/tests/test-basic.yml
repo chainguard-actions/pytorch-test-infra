@@ -1,0 +1,68 @@
+name: Test basic setup of TD scorer
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure tools/torchci exists (create minimal package if absent)
+        id: prep
+        run: |
+          if [ -f tools/torchci/requirements.txt ]; then
+            echo "real=true" >> "$GITHUB_OUTPUT"
+            echo "Using real tools/torchci"
+            exit 0
+          fi
+          echo "real=false" >> "$GITHUB_OUTPUT"
+          mkdir -p tools/torchci/tdfakepkg
+          printf 'six\n' > tools/torchci/requirements.txt
+          cat > tools/torchci/pyproject.toml <<'EOF'
+          [build-system]
+          requires = ["setuptools>=61"]
+          build-backend = "setuptools.build_meta"
+
+          [project]
+          name = "tdfakepkg"
+          version = "0.0.1"
+
+          [tool.setuptools]
+          packages = ["tdfakepkg"]
+          EOF
+          echo 'MARKER = "td-scorer-ok"' > tools/torchci/tdfakepkg/__init__.py
+      - id: action
+        uses: .
+      - name: Assert python 3.11 is active
+        run: |
+          V="$(python -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+          echo "python version: $V"
+          if [ "$V" != "3.11" ]; then
+            echo "FAIL: expected python 3.11"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert requirements and editable package installed
+        if: steps.prep.outputs.real == 'false'
+        run: |
+          python -c 'import six; print("six", six.__version__)' || { echo "FAIL: requirement six not installed"; exit 1; }
+          M="$(cd /tmp && python -c 'import tdfakepkg; print(tdfakepkg.MARKER)')"
+          echo "marker: $M"
+          if [ "$M" != "td-scorer-ok" ]; then
+            echo "FAIL: editable package not importable"
+            exit 1
+          fi
+          LOC="$(cd /tmp && python -c 'import tdfakepkg, os; print(os.path.realpath(tdfakepkg.__file__))')"
+          echo "location: $LOC"
+          case "$LOC" in
+            *tools/torchci/tdfakepkg/*) echo "PASS: installed in editable mode" ;;
+            *) echo "FAIL: package not installed from source tree"; exit 1 ;;
+          esac
+      - name: Assert real torchci install produced an editable package
+        if: steps.prep.outputs.real == 'true'
+        run: |
+          python -m pip list --editable
+          if ! python -m pip list --editable 2>/dev/null | grep -qi .; then
+            echo "FAIL: no editable package installed"
+            exit 1
+          fi
+          echo "PASS"

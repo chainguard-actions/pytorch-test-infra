@@ -1,0 +1,55 @@
+name: Test basic teardown (no ssh sessions)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide a 'powershell' binary (pwsh) and mock Windows-only CIM cmdlets
+        run: |
+          set -e
+          echo "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1" >> "$GITHUB_ENV"
+          export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+          SHIM=/tmp/ps-shim
+          mkdir -p "$SHIM"
+          if ! command -v pwsh >/dev/null 2>&1; then
+            case "$(uname -m)" in
+              aarch64|arm64) ARCH=arm64 ;;
+              *) ARCH=x64 ;;
+            esac
+            mkdir -p /tmp/pwsh
+            curl -fsSL -o /tmp/pwsh.tgz \
+              "https://github.com/PowerShell/PowerShell/releases/download/v7.4.6/powershell-7.4.6-linux-${ARCH}.tar.gz"
+            tar -xzf /tmp/pwsh.tgz -C /tmp/pwsh
+            chmod +x /tmp/pwsh/pwsh
+            ln -sf /tmp/pwsh/pwsh "$SHIM/pwsh"
+            PWSH=/tmp/pwsh/pwsh
+          else
+            PWSH="$(command -v pwsh)"
+          fi
+          ln -sf "$PWSH" "$SHIM/powershell"
+          echo "$SHIM" >> "$GITHUB_PATH"
+          PROFILE_PATH="$("$PWSH" -NoProfile -Command '$PROFILE.CurrentUserAllHosts')"
+          echo "profile: $PROFILE_PATH"
+          mkdir -p "$(dirname "$PROFILE_PATH")"
+          cat > "$PROFILE_PATH" <<'EOF'
+          # Mocks for Windows-only CIM cmdlets: simulate no logged-on ssh users
+          function Get-CimInstance { param([Parameter(ValueFromRemainingArguments=$true)]$Rest) }
+          function Get-CimAssociatedInstance { param([Parameter(ValueFromPipeline=$true)]$InputObject, [Parameter(ValueFromRemainingArguments=$true)]$Rest) process { } }
+          EOF
+          "$SHIM/powershell" -Command 'Write-Output "powershell shim works: $($PSVersionTable.PSVersion)"'
+      - id: action
+        uses: .
+        with:
+          extra-delete-dir: /tmp/does-not-matter
+      - name: Assert action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,12 @@
+{
+  "owner": "pytorch",
+  "repo": "test-infra",
+  "version": "v20261119-192116",
+  "path": ".github/actions/setup-python",
+  "commit_sha": "7f4a746b35c7ac614b8dbfe3eb8a4e25fd23b3a4",
+  "url": "https://github.com/pytorch/test-infra",
+  "policy_sha": "d636be7e43ef829af6e853da6b3c7566db9f72fe",
+  "test_policy_sha": "843adf9e4b8f85d0c08b27b9d0b09dd094b54702",
+  "test_agent_version": "2",
+  "harden_agent_version": "2"
+}

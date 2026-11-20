@@ -1,0 +1,41 @@
+name: Test basic sanity check (no s3 upload)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide stub check_s3.py (normally lives in the calling repo)
+        run: |
+          mkdir -p tools/clang-tidy-checks
+          cat > tools/clang-tidy-checks/check_s3.py <<'EOF'
+          import argparse, sys
+          p = argparse.ArgumentParser()
+          p.add_argument("--s3-key", required=True)
+          p.add_argument("--local-file", required=True)
+          a = p.parse_args()
+          with open("/tmp/check_s3.log", "a") as f:
+              f.write(f"{a.s3_key} {a.local_file}\n")
+          print(f"checked {a.s3_key} against {a.local_file}")
+          EOF
+          rm -f /tmp/check_s3.log
+      - id: action
+        uses: .
+        with:
+          platform: linux64
+          version: "17.0.6"
+      - name: Assert check_s3 invoked with expected args
+        run: |
+          cat /tmp/check_s3.log
+          grep -qx "linux64/17.0.6/clang-tidy clang-tidy" /tmp/check_s3.log || { echo "FAIL: clang-tidy check missing"; exit 1; }
+          grep -qx "linux64/17.0.6/clang-format clang-format" /tmp/check_s3.log || { echo "FAIL: clang-format check missing"; exit 1; }
+          [ "$(wc -l < /tmp/check_s3.log)" -eq 2 ] || { echo "FAIL: expected exactly 2 checks"; exit 1; }
+          echo "PASS"
+      - name: Assert action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          [ "$OUTCOME" = "success" ] || { echo "FAIL"; exit 1; }
+          echo "PASS"

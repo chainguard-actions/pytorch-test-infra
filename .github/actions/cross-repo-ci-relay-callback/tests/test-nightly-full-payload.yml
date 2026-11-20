@@ -1,0 +1,83 @@
+name: Test nightly callback with full payload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local OIDC + relay server
+        run: |
+          rm -rf /tmp/mock-relay && mkdir -p /tmp/mock-relay
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" 18765 /tmp/mock-relay > /tmp/mock-relay-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18765/health >/dev/null; then echo "server up"; break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:18765/health >/dev/null || { cat /tmp/mock-relay-server.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:18765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+          echo "NO_PROXY=127.0.0.1,localhost" >> "$GITHUB_ENV"
+          echo "no_proxy=127.0.0.1,localhost" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0123456789abcdef0123456789abcdef01234567
+          event-type: nightly
+          job-name: build-npu
+          callback-url: http://127.0.0.1:18765/callback/
+          artifact-url: https://example.com/artifacts/42
+          test-results: '{"passed": 10, "failed": 2, "skipped": 1}'
+          failed-tests-detail: '[{"name":"test_foo","classname":"TestBar","message":"AssertionError"}]'
+          triage-verdict: '{"schema_version":1,"category":"upstream","confidence":"high","summary":"aten::foo changed"}'
+      - name: Assert callback payload
+        run: |
+          cat /tmp/mock-relay-server.log || true
+          ls -la /tmp/mock-relay
+          cat /tmp/mock-relay/token-requests.log
+          grep -q "audience=pytorch-cross-repo-ci-relay" /tmp/mock-relay/token-requests.log || { echo "FAIL: OIDC audience not requested"; exit 1; }
+          COUNT=$(ls /tmp/mock-relay/req-*.json | wc -l)
+          if [ "$COUNT" != "1" ]; then echo "FAIL: expected 1 callback request, got $COUNT"; exit 1; fi
+          python3 - <<'EOF'
+          import json, sys
+          r = json.load(open("/tmp/mock-relay/req-001.json"))
+          print(json.dumps(r, indent=2))
+          b = r["body"]; w = b["workflow"]
+          checks = [
+              (r["path"], "/callback"),
+              (r["auth"], "Bearer mock-oidc-token-123"),
+              (r["content_type"], "application/json"),
+              (b["event_type"], "nightly"),
+              (b["delivery_id"], "0123456789abcdef0123456789abcdef01234567"),
+              (b["payload"]["head_sha"], "0123456789abcdef0123456789abcdef01234567"),
+              (b["payload"]["repository"]["full_name"], "pytorch/pytorch"),
+              (w["schema_version"], "1"),
+              (w["status"], "completed"),
+              (w["conclusion"], "success"),
+              (w["job_name"], "build-npu"),
+              (w["name"], "Test nightly callback with full payload"),
+              (w["artifact_url"], "https://example.com/artifacts/42"),
+              (w["test_results"], {"passed": 10, "failed": 2, "skipped": 1}),
+              (w["failed_tests_detail"][0]["name"], "test_foo"),
+              (w["triage_verdict"]["category"], "upstream"),
+          ]
+          bad = False
+          for actual, expected in checks:
+              if actual != expected:
+                  print(f"FAIL: expected {expected!r}, got {actual!r}")
+                  bad = True
+          if not w.get("started_at") or not w.get("completed_at"):
+              print("FAIL: nightly should set started_at and completed_at"); bad = True
+          if "/actions/runs/" not in w["url"]:
+              print("FAIL: workflow url malformed"); bad = True
+          if not w.get("check_run_id") or not w.get("run_id"):
+              print("FAIL: check_run_id/run_id missing"); bad = True
+          if bad:
+              sys.exit(1)
+          print("PASS")
+          EOF

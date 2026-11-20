@@ -1,0 +1,77 @@
+// The measure the test hub's pages share: the tests table's column widths
+// and the page column cut to fit them, so the table on
+// /tests/[organization]/[repo] is whole at full width and never scrolled
+// sideways, and a page without the table, a test's own, keeps the same
+// width. Free of React, so TestsTable, PageColumn and the tests can read it.
+
+// The columns' widths in pixels, each sized to what it shows, as its
+// definition in TestsTable says. The Name column takes the width the others
+// leave, NAME_MIN_WIDTH at least. Together they must fit what a 1920px
+// display shows without sideways scrolling: 1905px after the scrollbar,
+// less the body's 5px padding and the layout's 2px margin each side, the
+// page column's 16px padding each side and the table's border, 1855px for
+// the columns (1853px with Windows' wider scrollbar).
+export const NAME_MIN_WIDTH = 480;
+export const COLUMN_WIDTHS = {
+  health: 170,
+  environment: 430,
+  test_config: 200,
+  mean_passed_duration_milliseconds: 180,
+  owners: 200,
+  last_run_at: 180,
+};
+// The commit page's table keeps the same width: its Outcome column takes
+// Health's, and Duration and Job share what Mean Passed Duration and Last
+// run have; the four shared columns keep theirs.
+// Duration holds its header, "DURATION" with the sort arrow, and figures
+// like "30.0 min"; Job takes the rest, enough for a build name on two
+// lines.
+const DURATION_WIDTH = 140;
+export const COMMIT_COLUMN_WIDTHS = {
+  outcome: COLUMN_WIDTHS.health,
+  duration: DURATION_WIDTH,
+  environment: COLUMN_WIDTHS.environment,
+  test_config: COLUMN_WIDTHS.test_config,
+  job:
+    COLUMN_WIDTHS.mean_passed_duration_milliseconds +
+    COLUMN_WIDTHS.last_run_at -
+    DURATION_WIDTH,
+  owners: COLUMN_WIDTHS.owners,
+};
+// The Job filter's menu, wide enough for a job's name on one line, "build ·
+// config · shard 4 of 5"; a longer name wraps.
+export const JOB_MENU_WIDTH = 540;
+export const TABLE_BORDER = 1;
+// The table's width with every column at its width and the Name column at
+// its minimum. The page column is this wide, so at full width the table is
+// whole and not scrolled sideways.
+export const TESTS_TABLE_WIDTH =
+  NAME_MIN_WIDTH +
+  Object.values(COLUMN_WIDTHS).reduce((sum, width) => sum + width, 0) +
+  2 * TABLE_BORDER;
+// The page column's padding on each side, in theme spacing units.
+export const PAGE_PADDING = 2;
+
+// The tables' header band, the list's and the grid's: as tall as the list's
+// two-line column headers; its titles small, bold, uppercase and spaced,
+// in the secondary text color set where they are drawn; and how long the
+// pointer rests on a title before its tooltip opens.
+export const COLUMN_HEADER_HEIGHT = 44;
+// A row of the chips the Name header's search field shows beneath its text
+// while the URL carries exact name filters (NameSearch): a chip and the air
+// under it. The chips wrap onto as many rows as they need, the field grows
+// by them, and the list's header band follows the field's measured height
+// (columnHeaderHeightFor in lib/tests/table.ts), so the other headers'
+// labels and keys stay centered.
+export const NAME_FILTER_ROW_HEIGHT = 22;
+export const HEADER_TITLE_STYLE = {
+  fontWeight: 600,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+} as const;
+export const HEADER_TITLE_TOOLTIP_DELAY_MS = 600;
+// A header's filter key (HeaderFilter): its side in pixels, the funnel with
+// its padding and edge, which the header leaves room for plus a gap; and
+// how far it sits in from the header's right edge.
+export const HEADER_FILTER_SIZE = 26;
+export const HEADER_FILTER_INSET = 6;

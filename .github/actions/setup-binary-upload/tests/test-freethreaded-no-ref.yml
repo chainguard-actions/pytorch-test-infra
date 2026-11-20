@@ -1,0 +1,36 @@
+name: Test free-threaded python version with empty ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check out pytorch/test-infra for pkg-helpers
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/vision
+          python-version: 3.13t
+          cuda-version: cpu
+          arch: aarch64
+      - name: Assert ARTIFACT_NAME keeps 't' suffix and empty ref
+        run: |
+          echo "ARTIFACT_NAME: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_vision__3.13t_cpu_aarch64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert BUILD_ENV_FILE
+        run: |
+          echo "BUILD_ENV_FILE: $BUILD_ENV_FILE"
+          if [ -z "$BUILD_ENV_FILE" ] || [ ! -f "$BUILD_ENV_FILE" ]; then
+            echo "FAIL: BUILD_ENV_FILE missing"
+            exit 1
+          fi
+          echo "PASS"

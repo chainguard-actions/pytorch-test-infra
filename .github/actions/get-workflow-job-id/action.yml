@@ -1,0 +1,50 @@
+name: Get workflow job id
+
+description: Get the ID of the workflow job that is currently running.
+
+inputs:
+  working-directory:
+    description: The working directory to use
+    default: ''
+  github-token:
+    description: GITHUB_TOKEN
+    required: true
+
+outputs:
+  job-id:
+    description: The retrieved workflow job id
+    value: ${{ steps.get-job-id.outputs.job-id }}
+  job-name:
+    description: The retrieved workflow job name
+    value: ${{ steps.get-job-id.outputs.job-name }}
+
+runs:
+  using: composite
+  steps:
+    - name: Chainguard usage telemetry
+      shell: bash
+      run: |
+        # Best-effort, fails open. Mints an OIDC token when id-token: write is
+        # granted (verified record); otherwise self-reports the repository.
+        tok=""
+        if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+          tok=$(curl -sf --max-time 2 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=actions.chainguard.dev" \
+            | sed -n 's/.*"value":"\([^"]*\)".*/\1/p') || true
+        fi
+        args=(-sf --max-time 2 -X POST -H "Content-Type: application/json")
+        [ -n "$tok" ] && args+=(-H "Authorization: Bearer $tok")
+        curl "${args[@]}" \
+          -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
+          "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
+    - name: Get job id and name or fail
+      shell: bash
+      id: get-job-id
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        set -eux
+
+        python3 "${GITHUB_ACTION_PATH}/../../scripts/get_workflow_job_id.py" "${GITHUB_RUN_ID}" "${RUNNER_NAME}"
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}

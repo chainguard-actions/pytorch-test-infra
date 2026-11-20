@@ -1,0 +1,52 @@
+name: Test long python version and slashed ref in artifact name
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: pytorch/test-infra
+      REF: release/2.5
+      PACKAGE_TYPE: wheel
+      CHANNEL: nightly
+      CONDA_PLUGINS_AUTO_ACCEPT_TOS: "yes"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide test-infra checkout (needed for tools/pkg-helpers)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          submodules: "false"
+          setup-miniconda: "true"
+          python-version: "3.10.19"
+          cuda-version: cu126
+          arch: x86_64
+      - name: Assert ARTIFACT_NAME shortens python version and replaces slashes
+        run: |
+          echo "ARTIFACT_NAME: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_test-infra_release_2.5_3.10_cu126_x86_64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda build environment uses requested python
+        shell: bash -l {0}
+        run: |
+          echo "CONDA_ENV: $CONDA_ENV"
+          if [ -z "$CONDA_ENV" ] || [ ! -d "$CONDA_ENV" ]; then
+            echo "FAIL: CONDA_ENV missing"
+            exit 1
+          fi
+          VER="$($CONDA_RUN python --version 2>&1)"
+          echo "python: $VER"
+          case "$VER" in
+            *"Python 3.10.19"*) echo "PASS" ;;
+            *) echo "FAIL: expected Python 3.10.19"; exit 1 ;;
+          esac

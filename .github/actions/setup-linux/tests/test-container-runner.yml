@@ -1,0 +1,36 @@
+name: Test container runner path
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Mark as container runner
+        run: |
+          touch /.incontainer 2>/dev/null || sudo touch /.incontainer
+          ls -l /.incontainer
+      - name: Install mocks
+        run: bash "$GITHUB_WORKSPACE/tests/fixtures/setup-mocks.sh"
+      - id: action
+        uses: .
+      - name: Assert container-runner behavior
+        run: |
+          LOG="${RUNNER_TEMP}/mock-calls.log"
+          cat "$LOG"
+          grep -q 'docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com' "$LOG" || { echo "FAIL: ECR login missing"; exit 1; }
+          if grep -q 'lspci' "$LOG"; then echo "FAIL: nvidia check should be skipped"; exit 1; fi
+          if grep -q 'docker system prune' "$LOG"; then echo "FAIL: prune should be skipped"; exit 1; fi
+          if grep -q 'systemctl' "$LOG"; then echo "FAIL: docker start should be skipped"; exit 1; fi
+          if ls /dev/nvidia[0-9] >/dev/null 2>&1; then
+            echo "GPU present; GPU_FLAG=$GPU_FLAG"
+          elif [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG set without GPU"; exit 1
+          fi
+          [ -d "$RUNNER_ARTIFACT_DIR" ] || { echo "FAIL: artifact dir missing"; exit 1; }
+          echo "PASS"
+      - name: Cleanup marker
+        if: always()
+        run: rm -f /.incontainer 2>/dev/null || sudo rm -f /.incontainer || true

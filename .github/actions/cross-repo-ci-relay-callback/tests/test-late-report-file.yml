@@ -1,0 +1,67 @@
+name: Test late report from a file
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local OIDC + relay server
+        run: |
+          rm -rf /tmp/mock-relay && mkdir -p /tmp/mock-relay
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" 18765 /tmp/mock-relay > /tmp/mock-relay-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18765/health >/dev/null; then echo "server up"; break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:18765/health >/dev/null || { cat /tmp/mock-relay-server.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:18765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+          echo "NO_PROXY=127.0.0.1,localhost" >> "$GITHUB_ENV"
+          echo "no_proxy=127.0.0.1,localhost" >> "$GITHUB_ENV"
+      - name: Write verdict list file
+        run: |
+          cat > /tmp/verdicts.json <<'EOF'
+          [
+            {"delivery_id": "d-1", "workflow_name": "wf", "job_name": "build-npu",
+             "check_run_id": 123456789,
+             "triage_verdict": {"schema_version": 1, "category": "backend", "confidence": "medium", "summary": "s1"}},
+            {"delivery_id": "d-2", "workflow_name": "wf", "job_name": "test-npu",
+             "triage_verdict": {"schema_version": 1, "category": "flake", "confidence": "low", "summary": "s2"}}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          event-type: late-report
+          triage-verdict-list: '@/tmp/verdicts.json'
+          callback-url: http://127.0.0.1:18765/callback
+      - name: Assert late report payload
+        run: |
+          cat /tmp/mock-relay-server.log || true
+          COUNT=$(ls /tmp/mock-relay/req-*.json 2>/dev/null | wc -l)
+          if [ "$COUNT" != "1" ]; then echo "FAIL: expected 1 request, got $COUNT"; exit 1; fi
+          python3 - <<'EOF'
+          import json, sys
+          r = json.load(open("/tmp/mock-relay/req-001.json"))
+          print(json.dumps(r, indent=2))
+          b = r["body"]
+          bad = False
+          if r["auth"] != "Bearer mock-oidc-token-123":
+              print("FAIL: wrong auth header"); bad = True
+          if b.get("event_type") != "late-report":
+              print("FAIL: event_type"); bad = True
+          if "workflow" in b:
+              print("FAIL: late report must not include workflow"); bad = True
+          reports = b.get("reports", [])
+          if [x["job_name"] for x in reports] != ["build-npu", "test-npu"]:
+              print(f"FAIL: reports {reports!r}"); bad = True
+          elif reports[0]["triage_verdict"]["category"] != "backend" or reports[0]["check_run_id"] != 123456789:
+              print("FAIL: report content not forwarded as-is"); bad = True
+          if bad:
+              sys.exit(1)
+          print("PASS")
+          EOF

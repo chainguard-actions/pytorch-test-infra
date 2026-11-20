@@ -1,0 +1,1688 @@
+#!/usr/bin/env python3
+
+# mypy: disable-error-code="union-attr, call-arg, call-overload, var-annotated, return-value, import-untyped"
+
+import enum
+import json
+import os
+import re
+import sys
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+
+class IssueState(enum.Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+    ALL = "all"
+
+    def __str__(self):
+        return self.value
+
+
+class GitCommit:
+    commit_hash: str
+    title: str
+    body: str
+    author: str
+    author_date: datetime
+    commit_date: Optional[datetime]
+    pr_url: str
+
+    def __init__(
+        self,
+        commit_hash: str,
+        author: str,
+        author_date: datetime,
+        title: str,
+        body: str,
+        pr_url: str,
+        commit_date: Optional[datetime] = None,
+    ) -> None:
+        self.commit_hash = commit_hash
+        self.author = author
+        self.author_date = author_date
+        self.commit_date = commit_date
+        self.title = title
+        self.body = body
+        self.pr_url = pr_url
+
+    def __contains__(self, item: Any) -> bool:
+        return item in self.body or item in self.title
+
+    def is_issue_mentioned(self, issue_url: str) -> bool:
+        if issue_url in self:
+            return True
+        if "/pull/" in issue_url:
+            return False
+        issue_hash = f"#{issue_url.split('issues/')[1]}"
+        if "fixes" in self.title.lower() and issue_hash in self.title:
+            return True
+        return any(
+            "fixes" in line.lower() and issue_hash in line
+            for line in self.body.split("\n")
+        )
+
+
+def get_revert_revision(commit: GitCommit) -> Optional[str]:
+    import re
+
+    body_rc = re.search("Original Phabricator Diff: (D\\d+)", commit.body)
+
+    if commit.title.startswith('Back out "') and body_rc is not None:
+        return body_rc.group(1)
+
+    rc = re.match("Revert (D\\d+):", commit.title)
+    if rc is None:
+        return None
+    return rc.group(1)
+
+
+def get_diff_revision(commit: GitCommit) -> Optional[str]:
+    import re
+
+    rc = re.search("\\s*Differential Revision: (D\\d+)", commit.body)
+    if rc is None:
+        return None
+    return rc.group(1)
+
+
+def get_ghf_revert_revision(commit: GitCommit) -> Optional[str]:
+    import re
+
+    rc = re.search("\\s*This reverts commit ([0-9a-f]+).", commit.body)
+    if all(
+        [
+            commit.title.startswith("Revert"),
+            commit.author
+            == "PyTorch MergeBot <pytorchmergebot@users.noreply.github.com>",
+            rc is not None,
+        ]
+    ):
+        return rc.group(1)
+    return None
+
+
+def is_revert(commit: GitCommit) -> bool:
+    return (
+        get_revert_revision(commit) is not None
+        or get_ghf_revert_revision(commit) is not None
+    )
+
+
+def parse_medium_format(lines: Union[str, List[str]]) -> GitCommit:
+    """
+    Expect commit message generated using `--format=medium --date=unix` format, i.e.:
+        commit <sha1>
+        Author: <author>
+        Date:   <author date>
+
+        <title line>
+
+        <full commit message>
+
+    """
+    if isinstance(lines, str):
+        lines = lines.split("\n")
+    # TODO: Handle merge commits correctly
+    if len(lines) > 1 and lines[1].startswith("Merge:"):
+        del lines[1]
+    assert len(lines) > 5
+    assert lines[0].startswith("commit")
+    assert lines[1].startswith("Author: ")
+    assert lines[2].startswith("Date: ")
+    assert len(lines[3]) == 0
+    return GitCommit(
+        commit_hash=lines[0].split()[1].strip(),
+        author=lines[1].split(":", 1)[1].strip(),
+        author_date=datetime.fromtimestamp(int(lines[2].split(":", 1)[1].strip())),
+        title=lines[4].strip(),
+        body="\n".join(lines[5:]),
+    )
+
+
+def parse_fuller_format(lines: Union[str, List[str]]) -> GitCommit:
+    """
+    Expect commit message generated using `--format=fuller --date=unix` format, i.e.:
+        commit <sha1>
+        Author:     <author>
+        AuthorDate: <author date>
+        Commit:     <committer>
+        CommitDate: <committer date>
+
+        <title line>
+
+        <full commit message>
+
+    """
+    if isinstance(lines, str):
+        lines = lines.split("\n")
+    # TODO: Handle merge commits correctly
+    if len(lines) > 1 and lines[1].startswith("Merge:"):
+        del lines[1]
+    assert len(lines) > 7
+    assert lines[0].startswith("commit")
+    assert lines[1].startswith("Author: ")
+    assert lines[2].startswith("AuthorDate: ")
+    assert lines[3].startswith("Commit: ")
+    assert lines[4].startswith("CommitDate: ")
+    assert len(lines[5]) == 0
+
+    prUrl = ""
+    for line in lines:
+        if "Pull Request resolved:" in line:
+            prUrl = line.split("Pull Request resolved:")[1].strip()
+            break
+
+    return GitCommit(
+        commit_hash=lines[0].split()[1].strip(),
+        author=lines[1].split(":", 1)[1].strip(),
+        author_date=datetime.fromtimestamp(int(lines[2].split(":", 1)[1].strip())),
+        commit_date=datetime.fromtimestamp(int(lines[4].split(":", 1)[1].strip())),
+        title=lines[6].strip(),
+        body="\n".join(lines[7:]),
+        pr_url=prUrl,
+    )
+
+
+def _check_output(items: List[str], encoding="utf-8") -> str:
+    from subprocess import check_output
+
+    return check_output(items).decode(encoding)
+
+
+def get_git_remotes(path: str) -> Dict[str, str]:
+    keys = _check_output(["git", "-C", path, "remote"]).strip().split("\n")
+    return {
+        key: _check_output(["git", "-C", path, "remote", "get-url", key]).strip()
+        for key in keys
+    }
+
+
+class GitRepo:
+    def __init__(self, path, remote="upstream"):
+        self.repo_dir = path
+        self.remote = remote
+
+    def _run_git_cmd(self, *args) -> str:
+        return _check_output(["git", "-C", self.repo_dir] + list(args))
+
+    def get_tags_for_commit(self, commit_hash: str) -> List[str]:
+        """Get all tags that contain the given commit hash."""
+        try:
+            tags = self._run_git_cmd("tag", "--contains", commit_hash).strip()
+            if tags:
+                return [tag.strip() for tag in tags.split("\n")]
+            return []
+        except Exception:
+            return []
+
+    def _run_git_log(self, revision_range, additional_args=[]) -> List[GitCommit]:
+        log = self._run_git_cmd(
+            "log",
+            "--format=fuller",
+            "--date=unix",
+            revision_range,
+            *additional_args,
+            "--",
+            ".",
+            *additional_args,
+        ).split("\n")
+        rc: List[GitCommit] = []
+        cur_msg: List[str] = []
+        for line in log:
+            if line.startswith("commit"):
+                if len(cur_msg) > 0:
+                    rc.append(parse_fuller_format(cur_msg))
+                    cur_msg = []
+            cur_msg.append(line)
+        if len(cur_msg) > 0:
+            rc.append(parse_fuller_format(cur_msg))
+        return rc
+
+    def get_commit_list(self, from_ref, to_ref) -> List[GitCommit]:
+        return self._run_git_log(f"{self.remote}/{from_ref}..{self.remote}/{to_ref}")
+
+    def get_ghstack_orig_branches(self) -> List[str]:
+        return [
+            x.strip()
+            for x in self._run_git_cmd(
+                "branch", "--remotes", "--list", self.remote + "/gh/*/orig"
+            )
+            .strip()
+            .split("\n")
+        ]
+
+    def ref_exists(self, ref: str) -> bool:
+        """Whether the ref (a branch name, on this repo's remote) exists."""
+        try:
+            self._run_git_cmd(
+                "rev-parse", "--verify", "--quiet", f"{self.remote}/{ref}"
+            )
+            return True
+        except Exception:
+            return False
+
+    def tag_exists(self, tag: str) -> bool:
+        """Whether the tag exists in this checkout."""
+        try:
+            self._run_git_cmd("rev-parse", "--verify", "--quiet", f"refs/tags/{tag}")
+            return True
+        except Exception:
+            return False
+
+    def show_file(self, ref: str, path: str) -> Optional[str]:
+        """The file at the ref (a branch name, on this repo's remote), or None."""
+        try:
+            return self._run_git_cmd("show", f"{self.remote}/{ref}:{path}")
+        except Exception:
+            return None
+
+    def show_ref(self, ref) -> str:
+        return self._run_git_cmd("show-ref", ref).split(" ")[0]
+
+    def merge_base(self, ref1, ref2) -> str:
+        return self._run_git_cmd("merge-base", ref1, ref2).strip()
+
+    def rev_list(self, ref):
+        return (
+            self._run_git_cmd("rev-list", f"{self.remote}/main..{ref}").strip().split()
+        )
+
+
+def build_commit_dict(commits: List[GitCommit]) -> Dict[str, GitCommit]:
+    rc = {}
+    for commit in commits:
+        assert commit.commit_hash not in rc
+        rc[commit.commit_hash] = commit
+    return rc
+
+
+def fetch_json(
+    url: str, params: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    token = os.environ.get("GITHUB_TOKEN")
+    if token is not None and url.startswith("https://api.github.com/"):
+        headers["Authorization"] = f"token {token}"
+    if params is not None and len(params) > 0:
+        url += "?" + "&".join(f"{name}={val}" for name, val in params.items())
+    try:
+        with urlopen(Request(url, headers=headers)) as data:
+            return json.load(data)
+    except HTTPError as err:
+        if err.code == 403 and all(
+            key in err.headers for key in ["X-RateLimit-Limit", "X-RateLimit-Used"]
+        ):
+            print(
+                f"Rate limit exceeded: {err.headers['X-RateLimit-Used']}/{err.headers['X-RateLimit-Limit']}"
+            )
+        raise
+
+
+def fetch_multipage_json(
+    url: str, params: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    if params is None:
+        params = {}
+    assert "page" not in params
+    page_idx, rc, prev_len, params = 1, [], -1, params.copy()
+    while len(rc) > prev_len:
+        prev_len = len(rc)
+        params["page"] = page_idx
+        page_idx += 1
+        rc += fetch_json(url, params)
+    return rc
+
+
+def gh_get_milestones(
+    org="pytorch", project="pytorch", state: IssueState = IssueState.OPEN
+) -> List[Dict[str, Any]]:
+    url = f"https://api.github.com/repos/{org}/{project}/milestones"
+    return fetch_multipage_json(url, {"state": state})
+
+
+def gh_get_milestone_issues(
+    org: str, project: str, milestone_idx: int, state: IssueState = IssueState.OPEN
+):
+    url = f"https://api.github.com/repos/{org}/{project}/issues"
+    return fetch_multipage_json(url, {"milestone": milestone_idx, "state": state})
+
+
+def gh_get_ref_statuses(org: str, project: str, ref: str) -> Dict[str, Any]:
+    url = f"https://api.github.com/repos/{org}/{project}/commits/{ref}/status"
+    params = {"page": 1, "per_page": 100}
+    nrc = rc = fetch_json(url, params)
+    while "statuses" in nrc and len(nrc["statuses"]) == 100:
+        params["page"] += 1
+        nrc = fetch_json(url, params)
+        if "statuses" in nrc:
+            rc["statuses"] += nrc["statuses"]
+    return rc
+
+
+def get_issue_comments(org: str, project: str, issue_number: int):
+    url = f"https://api.github.com/repos/{org}/{project}/issues/{issue_number}/comments"
+
+    return fetch_multipage_json(url)
+
+
+def extract_statuses_map(json: Dict[str, Any]):
+    return {s["context"]: s["state"] for s in json["statuses"]}
+
+
+class PeriodStats:
+    commits: int
+    reverts: int
+    authors: int
+    date: datetime
+
+    def __init__(
+        self, date: datetime, commits: int, reverts: int, authors: int
+    ) -> None:
+        self.date = date
+        self.commits = commits
+        self.reverts = reverts
+        self.authors = authors
+
+
+def get_monthly_stats(commits: List[GitCommit]) -> Iterable[PeriodStats]:
+    y, m, total, reverts, authors = None, None, 0, 0, set()
+    for commit in commits:
+        commit_date = (
+            commit.commit_date if commit.commit_date is not None else commit.author_date
+        )
+        if y != commit_date.year or m != commit_date.month:
+            if y is not None:
+                yield PeriodStats(datetime(y, m, 1), total, reverts, len(authors))
+            y, m, total, reverts, authors = (
+                commit_date.year,
+                commit_date.month,
+                0,
+                0,
+                set(),
+            )
+        if is_revert(commit):
+            reverts += 1
+        total += 1
+        authors.add(commit.author)
+
+
+def print_monthly_stats(commits: List[GitCommit]) -> None:
+    stats = list(get_monthly_stats(commits))
+    for idx, stat in enumerate(stats):
+        y = stat.date.year
+        m = stat.date.month
+        total, reverts, authors = stat.commits, stat.reverts, stat.authors
+        reverts_ratio = 100.0 * reverts / total
+        if idx + 1 < len(stats):
+            commits_growth = 100.0 * (stat.commits / stats[idx + 1].commits - 1)
+        else:
+            commits_growth = float("nan")
+        print(
+            f"{y}-{m:02d}: commits {total} ({commits_growth:+.1f}%)  reverts {reverts} ({reverts_ratio:.1f}%) authors {authors}"
+        )
+
+
+def print_reverts(commits: List[GitCommit]) -> None:
+    for commit in commits:
+        if not is_revert(commit):
+            continue
+        print(f"{commit.commit_date} {commit.title} {commit.commit_hash} {commit.body}")
+
+
+def analyze_reverts(commits: List[GitCommit]):
+    for idx, commit in enumerate(commits):
+        revert_id = get_revert_revision(commit)
+        if revert_id is None:
+            continue
+        orig_commit = None
+        for i in range(1, 100):
+            orig_commit = commits[idx + i]
+            if get_diff_revision(orig_commit) == revert_id:
+                break
+        if orig_commit is None:
+            print(f"Failed to find original commit for {commit.title}")
+            continue
+        print(
+            f"{commit.commit_hash} is a revert of {orig_commit.commit_hash}: {orig_commit.title}"
+        )
+        revert_statuses = gh_get_ref_statuses("pytorch", "pytorch", commit.commit_hash)
+        orig_statuses = gh_get_ref_statuses(
+            "pytorch", "pytorch", orig_commit.commit_hash
+        )
+        orig_sm = extract_statuses_map(orig_statuses)
+        revert_sm = extract_statuses_map(revert_statuses)
+        for k in revert_sm.keys():
+            if k not in orig_sm:
+                continue
+            if orig_sm[k] != revert_sm[k]:
+                print(f"{k} {orig_sm[k]}->{revert_sm[k]}")
+
+
+def print_contributor_stats(commits, delta: Optional[timedelta] = None) -> None:
+    authors: Dict[str, int] = {}
+    now = datetime.now()
+    # Default delta is one non-leap year
+    if delta is None:
+        delta = timedelta(days=365)
+    for commit in commits:
+        date, author = commit.commit_date, commit.author
+        if now - date > delta:
+            break
+        if author not in authors:
+            authors[author] = 0
+        authors[author] += 1
+
+    print(
+        f"{len(authors)} contributors made {sum(authors.values())} commits in last {delta.days} days"
+    )
+    for count, author in sorted(
+        ((commit, author) for author, commit in authors.items()), reverse=True
+    ):
+        print(f"{author}: {count}")
+
+
+# Issues of a milestone that are not work to land and are left open until the release is out:
+# an [RFC], the release tracker ("[v.2.15.0] Release Tracker") and the validation issue
+# ("Release 2.15 validations checklist and cherry-picks"). The milestone checks ignore them.
+IGNORED_MILESTONE_ISSUE = re.compile(
+    r"^\s*\[RFC\]|release tracker|^release \S+ validations", re.IGNORECASE
+)
+
+
+def milestone_issue_statuses(
+    repo: GitRepo, branch: str, orig_branch: str, milestone_idx: int
+) -> List[Dict[str, Any]]:
+    """
+    The status of every issue and PR in a milestone, as {"issue": <GitHub issue>,
+    "outstanding": bool, "reason": str}. The reasons:
+
+    - feature_request: labelled release-feature-request, not counted
+    - ignored_issue: an issue (not a PR) that is an [RFC], the release tracker or the
+      validation issue (IGNORED_MILESTONE_ISSUE), open or not, not counted
+    - open: still open
+    - closed_before_cut: closed, and the release branch is not cut yet (so there is
+      nothing to pick)
+    - landed_before_cut: closed, and not mentioned by a commit on main after the cut
+    - on_release_branch: closed, landed on main after the cut, and picked
+    - not_on_release_branch: closed, landed on main after the cut, and not picked
+    """
+    branch_cut = repo.ref_exists(branch)
+    main_commits: Dict[str, GitCommit] = {}
+    release_commits: Dict[str, GitCommit] = {}
+    if branch_cut:
+
+        def get_commits_dict(x, y):
+            return build_commit_dict(repo.get_commit_list(x, y))
+
+        main_commits = get_commits_dict(orig_branch, "main")
+        release_commits = get_commits_dict(orig_branch, branch)
+    print(f"len(main_commits)={len(main_commits)}")
+    print(f"len(release_commits)={len(release_commits)}")
+    statuses = []
+    for issue in gh_get_milestone_issues(
+        "pytorch", "pytorch", milestone_idx, IssueState.ALL
+    ):
+        labels = [label["name"] for label in issue.get("labels", [])]
+        issue_url, state = issue["html_url"], issue["state"]
+        if "release-feature-request" in labels:
+            outstanding, reason = False, "feature_request"
+        elif "pull_request" not in issue and IGNORED_MILESTONE_ISSUE.search(
+            issue["title"]
+        ):
+            outstanding, reason = False, "ignored_issue"
+        elif state != "closed":
+            outstanding, reason = True, "open"
+        elif not branch_cut:
+            outstanding, reason = False, "closed_before_cut"
+        elif not any(
+            commit.is_issue_mentioned(issue_url) for commit in main_commits.values()
+        ):
+            # not mentioned after the cut, so it must be present in the release branch
+            outstanding, reason = False, "landed_before_cut"
+        elif any(
+            commit.is_issue_mentioned(issue_url) for commit in release_commits.values()
+        ):
+            # mentioned in the release branch, so it was picked already
+            outstanding, reason = False, "on_release_branch"
+        else:
+            outstanding, reason = True, "not_on_release_branch"
+        statuses.append({"issue": issue, "outstanding": outstanding, "reason": reason})
+    return statuses
+
+
+def commits_missing_in_branch(
+    repo: GitRepo, branch: str, orig_branch: str, milestone_idx: int
+) -> None:
+    statuses = milestone_issue_statuses(repo, branch, orig_branch, milestone_idx)
+    print("URL;Title;Status")
+    for status in statuses:
+        if status["outstanding"]:
+            issue = status["issue"]
+            print(f"{issue['html_url']} ;{issue['title']};{issue['state']}")
+
+
+def milestone_step_rows(
+    release: str,
+    branch: str,
+    milestone_idx: int,
+    steps: List[Dict[str, Any]],
+    statuses: List[Dict[str, Any]],
+    branch_cut: bool,
+    config_sha: str,
+    run_id: str,
+    run_url: str,
+    observed_at: datetime,
+    released: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    The misc.release_event rows for one scan of a release's milestone: one per release
+    portal step that checks milestone_outstanding_items, done when the milestone has at
+    most the step's max_outstanding outstanding items. The outstanding items, and the
+    count of every issue by reason, are in `details`.
+
+    Once the release is out (its v<version> tag exists) the steps are done whatever is left
+    in the milestone: nothing outstanding can block a release that has shipped, and the
+    milestone of a shipped release is often left open. The evidence still lists the items.
+    """
+    outstanding = [status for status in statuses if status["outstanding"]]
+    by_reason: Dict[str, int] = {}
+    for status in statuses:
+        by_reason[status["reason"]] = by_reason.get(status["reason"], 0) + 1
+    milestone_url = f"https://github.com/pytorch/pytorch/milestone/{milestone_idx}"
+    if outstanding:
+        numbers = ", ".join(f"#{status['issue']['number']}" for status in outstanding)
+        evidence = f"{len(outstanding)} outstanding in milestone {release}: {numbers}"
+        if released:
+            evidence = f"Release tag v{release} exists, so the step is done; {evidence}"
+    else:
+        evidence = f"No outstanding items in milestone {release}"
+    details = json.dumps(
+        {
+            "milestone": milestone_idx,
+            "branch": branch,
+            "branch_cut": branch_cut,
+            "released": released,
+            "issues": len(statuses),
+            "by_reason": by_reason,
+            "outstanding": [
+                {
+                    "number": status["issue"]["number"],
+                    "kind": (
+                        "pull_request" if "pull_request" in status["issue"] else "issue"
+                    ),
+                    "title": status["issue"]["title"],
+                    "url": status["issue"]["html_url"],
+                    "state": status["issue"]["state"],
+                    "reason": status["reason"],
+                }
+                for status in outstanding
+            ],
+        }
+    )
+    return [
+        {
+            "release": release,
+            "step_id": step["id"],
+            "rc": "",
+            "status": (
+                "done"
+                if released or len(outstanding) <= step["check"]["max_outstanding"]
+                else "in_progress"
+            ),
+            "blocking": 0,
+            "evidence_text": evidence,
+            "evidence_url": milestone_url,
+            "check_type": "milestone_outstanding_items",
+            "source": "collector",
+            "run_id": run_id,
+            "run_url": run_url,
+            "config_sha": config_sha,
+            "details": details,
+            "observed_at": observed_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        }
+        for step in steps
+    ]
+
+
+def milestone_pr_step_rows(
+    release: str,
+    branch: str,
+    milestone_idx: int,
+    steps: List[Dict[str, Any]],
+    statuses: List[Dict[str, Any]],
+    branch_cut: bool,
+    config_sha: str,
+    run_id: str,
+    run_url: str,
+    observed_at: datetime,
+    released: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    The misc.release_event rows for one scan of the pull requests of a release's milestone:
+    one per release portal step that checks milestone_prs_on_branch, done when every closed
+    PR of the milestone that landed on main after the branch cut is on the release branch
+    (milestone_issue_statuses: not_on_release_branch is the one that is missing).
+
+    Only the PRs count. The open issues of the milestone (an [RFC], the release tracker, the
+    validation issue) are not looked at: they are what milestone_outstanding_items is for, and
+    they are listed in `details`. Before the cut there is nothing to pick, so the step is todo.
+    Once the release is out (its v<version> tag exists) the step is done whatever is missing,
+    and the evidence still lists the PRs.
+    """
+    prs = [status for status in statuses if "pull_request" in status["issue"]]
+    missing = [status for status in prs if status["reason"] == "not_on_release_branch"]
+    by_reason: Dict[str, int] = {}
+    for status in prs:
+        by_reason[status["reason"]] = by_reason.get(status["reason"], 0) + 1
+    closed = sum(1 for status in prs if status["issue"]["state"] == "closed")
+    if missing:
+        numbers = ", ".join(f"#{status['issue']['number']}" for status in missing)
+        evidence = f"{len(missing)} closed PR(s) of milestone {release} not on {branch}: {numbers}"
+        if released:
+            evidence = f"Release tag v{release} exists, so the step is done; {evidence}"
+    elif not branch_cut and not released:
+        evidence = (
+            f"{branch} is not cut yet: no closed PR of milestone {release} to check"
+        )
+    else:
+        evidence = f"All {closed} closed PR(s) of milestone {release} are on {branch}"
+    if released or (branch_cut and not missing):
+        status_value = "done"
+    elif branch_cut:
+        status_value = "in_progress"
+    else:
+        status_value = "todo"
+    details = json.dumps(
+        {
+            "milestone": milestone_idx,
+            "branch": branch,
+            "branch_cut": branch_cut,
+            "released": released,
+            "pull_requests": len(prs),
+            "closed_pull_requests": closed,
+            "by_reason": by_reason,
+            "missing": [
+                {
+                    "number": status["issue"]["number"],
+                    "title": status["issue"]["title"],
+                    "url": status["issue"]["html_url"],
+                }
+                for status in missing
+            ],
+            # not looked at: the open issues (an [RFC], the tracker, the validation issue)
+            "open_issues_not_checked": [
+                {
+                    "number": status["issue"]["number"],
+                    "title": status["issue"]["title"],
+                    "url": status["issue"]["html_url"],
+                }
+                for status in statuses
+                if "pull_request" not in status["issue"]
+                and status["issue"]["state"] == "open"
+            ],
+        }
+    )
+    return [
+        {
+            "release": release,
+            "step_id": step["id"],
+            "rc": "",
+            "status": status_value,
+            "blocking": 0,
+            "evidence_text": evidence,
+            "evidence_url": f"https://github.com/pytorch/pytorch/milestone/{milestone_idx}?closed=1",
+            "check_type": "milestone_prs_on_branch",
+            "source": "collector",
+            "run_id": run_id,
+            "run_url": run_url,
+            "config_sha": config_sha,
+            "details": details,
+            "observed_at": observed_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        }
+        for step in steps
+    ]
+
+
+def insert_clickhouse_rows(table: str, rows: List[Dict[str, Any]]) -> None:
+    """Append rows to a ClickHouse table over its HTTP interface (JSONEachRow)."""
+    from urllib.parse import quote
+
+    endpoint = os.environ["CLICKHOUSE_ENDPOINT"].rstrip("/")
+    if not endpoint.startswith("http"):
+        endpoint = f"https://{endpoint}"
+    query = quote(f"INSERT INTO {table} FORMAT JSONEachRow")
+    request = Request(
+        f"{endpoint}/?query={query}",
+        data="\n".join(json.dumps(row) for row in rows).encode(),
+        headers={
+            "X-ClickHouse-User": os.environ["CLICKHOUSE_USERNAME"],
+            "X-ClickHouse-Key": os.environ["CLICKHOUSE_PASSWORD"],
+        },
+    )
+    try:
+        with urlopen(request):
+            pass
+    except HTTPError as err:
+        print(f"ClickHouse insert into {table} failed: {err.read().decode()[:500]}")
+        raise
+
+
+def workflow_run_info() -> Tuple[str, str]:
+    """The id and URL of the GitHub Actions run this is part of ("" when it is not one)."""
+    run_id = f"{os.environ.get('GITHUB_RUN_ID', '')}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
+    run_url = ""
+    if "GITHUB_RUN_ID" in os.environ:
+        run_url = (
+            f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/"
+            f"{os.environ.get('GITHUB_REPOSITORY', 'pytorch/test-infra')}"
+            f"/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+        )
+    return run_id, run_url
+
+
+STATUS_LABELS = {"done": "✅ done", "in_progress": "🟡 in progress", "todo": "⚪ todo"}
+
+
+def _markdown_cell(text: str) -> str:
+    """Text for a table cell: one line, the pipes escaped."""
+    return " ".join(text.split()).replace("|", "\\|")
+
+
+def write_step_summary(
+    title: str,
+    rows: List[Dict[str, Any]],
+    written: bool,
+    extra: Optional[List[str]] = None,
+) -> None:
+    """
+    Append the state of the portal steps of one scan to the job summary of the GitHub Actions
+    run ($GITHUB_STEP_SUMMARY; nothing outside of one): a table with the release, the step,
+    its status and its evidence (linked), then `extra` lines. `written` says whether the rows
+    went to misc.release_event or the run only showed them (a pull request).
+    """
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path or not rows:
+        return
+    lines = [
+        f"## {title}",
+        "",
+        "| Release | Step | Status | Evidence |",
+        "| --- | --- | --- | --- |",
+    ]
+    for row in rows:
+        text = (
+            _markdown_cell(row["evidence_text"]).replace("[", "\\[").replace("]", "\\]")
+        )
+        evidence = f"[{text}]({row['evidence_url']})" if row["evidence_url"] else text
+        status = STATUS_LABELS.get(row["status"], row["status"])
+        lines.append(f"| {row['release']} | {row['step_id']} | {status} | {evidence} |")
+    lines += [
+        "",
+        (
+            "Recorded in `misc.release_event`."
+            if written
+            else "Not recorded in `misc.release_event` (this run does not write)."
+        ),
+    ]
+    if extra:
+        lines += ["", *extra]
+    with open(path, "a") as f:
+        f.write("\n".join(lines) + "\n\n")
+
+
+def record_milestone_steps(
+    repo: GitRepo,
+    release: str,
+    config: Dict[str, Any],
+    milestone_idx: int,
+    write: bool,
+) -> None:
+    """
+    Scan the release's milestone and print every issue with its reason and the state of
+    each release portal step that checks the milestone. With write, record those rows in
+    misc.release_event.
+    """
+    branch = config["branch"]
+    milestone_steps = [
+        step
+        for step in config["steps"]
+        if step["check"]["type"] == "milestone_outstanding_items"
+    ]
+    pr_steps = [
+        step
+        for step in config["steps"]
+        if step["check"]["type"] == "milestone_prs_on_branch"
+    ]
+    statuses = milestone_issue_statuses(repo, branch, f"orig/{branch}", milestone_idx)
+    run_id, run_url = workflow_run_info()
+    branch_cut, released = repo.ref_exists(branch), repo.tag_exists(f"v{release}")
+    # both kinds of step read the same scan of the milestone
+    rows = [
+        row
+        for make_rows, kind_steps in (
+            (milestone_step_rows, milestone_steps),
+            (milestone_pr_step_rows, pr_steps),
+        )
+        for row in make_rows(
+            release,
+            branch,
+            milestone_idx,
+            kind_steps,
+            statuses,
+            branch_cut,
+            os.environ.get("GITHUB_SHA", "0" * 40),
+            run_id,
+            run_url,
+            datetime.now(timezone.utc),
+            released,
+        )
+    ]
+    outstanding = [status for status in statuses if status["outstanding"]]
+    print(
+        f"{release}: milestone {milestone_idx}, {len(statuses)} issues, "
+        f"{len(outstanding)} outstanding"
+    )
+    for status in statuses:
+        issue = status["issue"]
+        print(
+            f"{issue['html_url']} ;{issue['title']};{issue['state']};{status['reason']}"
+        )
+    for row in rows:
+        print(f"step {row['step_id']}: {row['status']}: {row['evidence_text']}")
+    if write:
+        insert_clickhouse_rows("misc.release_event", rows)
+        print(f"Inserted {len(rows)} rows into misc.release_event")
+    write_step_summary(
+        f"{release}: milestone steps",
+        rows,
+        write,
+        [
+            f"- [#{status['issue']['number']}]({status['issue']['html_url']}) "
+            f"{_markdown_cell(status['issue']['title'])} ({status['reason']})"
+            for status in outstanding
+        ],
+    )
+
+
+def release_in_preparation(repo: GitRepo, ref: str) -> Optional[str]:
+    """
+    The release the branch is preparing, from its version.txt: main is 2.16.0a0, so 2.16.0.
+    A release branch keeps its a0 version after the release (release/2.15 is 2.15.0a0), so
+    the version is bumped past every patch that is already tagged: release/2.15 is 2.15.1
+    once v2.15.0 exists, and 2.15.2 once v2.15.1 does.
+    """
+    text = repo.show_file(ref, "version.txt")
+    match = re.match(r"(\d+)\.(\d+)\.(\d+)", text.strip()) if text else None
+    if not match:
+        return None
+    major, minor, patch = (int(part) for part in match.groups())
+    while repo.tag_exists(f"v{major}.{minor}.{patch}"):
+        patch += 1
+    return f"{major}.{minor}.{patch}"
+
+
+def releases_in_flight(
+    repo: GitRepo, open_milestones: Iterable[str], release_lines: int = 3
+) -> List[str]:
+    """
+    The releases in flight, newest first: for main and each of the latest release
+    branches, the release it is preparing (release_in_preparation) when its milestone is
+    still open. 2.16.0 before its branch is cut and 2.15.1 once 2.15.0 has shipped are
+    both in flight, and so is a release that is being prepared on its branch.
+    """
+    text = repo.show_file("main", "version.txt")
+    match = re.match(r"(\d+)\.(\d+)\.", text.strip()) if text else None
+    if not match:
+        return []
+    major, minor = int(match.group(1)), int(match.group(2))
+    open_titles = set(open_milestones)
+    releases: List[str] = []
+    for back in range(release_lines):
+        if minor - back < 0:
+            break
+        ref = "main" if back == 0 else f"release/{major}.{minor - back}"
+        release = release_in_preparation(repo, ref)
+        if release and release in open_titles and release not in releases:
+            releases.append(release)
+    return releases
+
+
+def releases_just_shipped(
+    repo: GitRepo, open_milestones: Iterable[str], release_lines: int = 3
+) -> List[str]:
+    """
+    The releases of the latest release lines that have shipped (their v<version> tag
+    exists) but whose milestone is still open, newest first. They are scanned once more so
+    that their milestone steps are recorded as done (milestone_step_rows, released) instead
+    of staying at what the last scan before the release found; closing the milestone ends it.
+    """
+    text = repo.show_file("main", "version.txt")
+    match = re.match(r"(\d+)\.(\d+)\.", text.strip()) if text else None
+    if not match:
+        return []
+    major, minor = int(match.group(1)), int(match.group(2))
+    open_titles = set(open_milestones)
+    releases: List[str] = []
+    for back in range(release_lines):
+        if minor - back < 0:
+            break
+        ref = "main" if back == 0 else f"release/{major}.{minor - back}"
+        prepared = release_in_preparation(repo, ref)
+        if not prepared:
+            continue
+        line, next_patch = prepared.rsplit(".", 1)
+        for patch in range(int(next_patch) - 1, -1, -1):
+            release = f"{line}.{patch}"
+            if release in open_titles and release not in releases:
+                releases.append(release)
+    return releases
+
+
+def analyze_releases_in_flight(repo: GitRepo, write: bool) -> bool:
+    """
+    For each release in flight that has a release portal config file: list the reverts
+    missing from its release branch (from the branch cut until the release) and scan its
+    milestone, recording the state of the steps that check them. One scan failing does not
+    hide another, nor another release's. Returns whether every scan succeeded.
+    """
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from torchci.release_portal_config import load_resolved, RELEASES_DIR
+
+    milestones = gh_get_milestones()
+    open_milestones = [m.get("title", "") for m in milestones]
+    releases = releases_in_flight(repo, open_milestones)
+    print(f"Releases in flight: {', '.join(releases) if releases else 'none'}")
+    shipped = releases_just_shipped(repo, open_milestones)
+    print(f"Shipped, milestone still open: {', '.join(shipped) if shipped else 'none'}")
+    releases += [release for release in shipped if release not in releases]
+    ok = True
+    for release in releases:
+        print(f"::group::{release}")
+        try:
+            if not (RELEASES_DIR / f"{release}.yml").exists():
+                print(
+                    f"::warning::{release} is in flight but has no "
+                    f"release/portal/config/releases/{release}.yml: skipped"
+                )
+                continue
+            config = load_resolved(release)
+            milestone_idx = next(
+                int(m["number"]) for m in milestones if m.get("title") == release
+            )
+            scans = []
+            # The reverts matter from the branch cut until the release: the release's step
+            # has the same window (opens: branch_cut, closes: ga).
+            if repo.ref_exists(config["branch"]) and not repo.tag_exists(f"v{release}"):
+                scans.append(lambda: record_revert_steps(repo, release, config, write))
+            # The release-only changes PR is opened right after the cut. A release that has
+            # shipped is scanned too (its milestone is open): the step is done once the PR
+            # is merged, and a release that skipped the scans before is filled in.
+            if repo.ref_exists(config["branch"]):
+                scans.append(
+                    lambda: record_release_only_changes_steps(release, config, write)
+                )
+            scans.append(
+                lambda: record_milestone_steps(
+                    repo, release, config, milestone_idx, write
+                )
+            )
+            for scan in scans:
+                try:
+                    scan()
+                except Exception as err:
+                    print(f"::error::{release}: {err}")
+                    ok = False
+        except Exception as err:
+            print(f"::error::{release}: {err}")
+            ok = False
+        finally:
+            print("::endgroup::")
+    return ok
+
+
+def commits_missing_in_release(
+    repo: GitRepo,
+    branch: str,
+    orig_branch: str,
+    minor_release: str,
+    milestone_idx: int,
+    cut_off_date: datetime,
+    issue_num: int,
+) -> None:
+    def get_commits_dict(x, y):
+        return build_commit_dict(repo.get_commit_list(x, y))
+
+    main_commits = get_commits_dict(minor_release, "main")
+    prev_release_commits = get_commits_dict(orig_branch, branch)
+    current_issue_comments = get_issue_comments(
+        "pytorch", "pytorch", issue_num
+    )  # issue comments for the release tracker as cherry picks
+    print(f"len(main_commits)={len(main_commits)}")
+    print(f"len(prev_release_commits)={len(prev_release_commits)}")
+    print(f"len(current_issue_comments)={len(current_issue_comments)}")
+    print(f"issue_num: {issue_num}, len(issue_comments)={len(current_issue_comments)}")
+    print("URL;Title;Status")
+
+    # Iterate over the previous release branch to find potentially missing cherry picks in the current issue.
+    for commit in prev_release_commits.values():
+        not_cherry_picked_in_current_issue = any(
+            commit.pr_url not in issue_comment["body"]
+            for issue_comment in current_issue_comments
+        )
+        for main_commit in main_commits.values():
+            if main_commit.pr_url == commit.pr_url:
+                mentioned_after_cut_off_date = cut_off_date < main_commit.commit_date
+                if not_cherry_picked_in_current_issue and mentioned_after_cut_off_date:
+                    # Commits that are release only, which exist in previous release branch and not in main.
+                    print(f"{commit.pr_url};{commit.title};{commit.commit_date}")
+                break
+
+
+def analyze_stacks(repo: GitRepo) -> None:
+    from tqdm.contrib.concurrent import thread_map
+
+    branches = repo.get_ghstack_orig_branches()
+    stacks_by_author: Dict[str, List[int]] = {}
+    for branch, rv_commits in thread_map(
+        lambda x: (x, repo.rev_list(x)), branches, max_workers=10
+    ):
+        author = branch.split("/")[2]
+        if author not in stacks_by_author:
+            stacks_by_author[author] = []
+        stacks_by_author[author].append(len(rv_commits))
+    for author, slen in sorted(
+        stacks_by_author.items(), key=lambda x: len(x[1]), reverse=True
+    ):
+        if len(slen) == 1:
+            print(f"{author} has 1 stack of depth {slen[0]}")
+            continue
+        print(
+            f"{author} has {len(slen)} stacks max depth is {max(slen)} avg depth is {sum(slen) / len(slen):.2f} mean is {slen[len(slen) // 2]}"
+        )
+
+
+def extract_commit_hash_from_revert(text):
+    """
+    Extract commit hash from a revert commit message.
+
+    Args:
+        text (str): The revert commit message
+
+    Returns:
+        str or None: The extracted commit hash, or None if not found
+    """
+    # Pattern to match "This reverts commit <hash>."
+    pattern = r"This reverts commit ([0-9a-f]+)\."
+
+    match = re.search(pattern, text)
+    if match:
+        return match.group(1)
+    return None
+
+
+RC_TAG_PATTERN = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$")
+
+
+def find_missing_reverts(repo: GitRepo, branch: str) -> Dict[str, Any]:
+    """
+    The reverts applied to main but not to the branch: these may need to be cherry-picked
+    to the release branch. {"main_only": commits on main not on the branch, "branch_only":
+    commits on the branch not on main, "reverts": [...]}, each revert with its `status`:
+
+    - cherry_picked: the reverted commit was cherry-picked to the branch
+    - in_release_candidate: the reverted commit is in a release candidate, so it may be
+      on the branch and the revert is needed (the ones to act on)
+    - not_needed: the reverted commit does not appear to be on the branch
+    """
+    # Get commits from main that are not in the specified branch
+    main_only_commits = build_commit_dict(repo.get_commit_list(branch, "main"))
+
+    # Get commits from the specified branch that are not in main
+    branch_only_commits = build_commit_dict(repo.get_commit_list("main", branch))
+    branch_only_reverts = set()
+    for commit_hash, commit in branch_only_commits.items():
+        revert_hash = extract_commit_hash_from_revert(commit.body)
+        if revert_hash != None:
+            branch_only_reverts.add(revert_hash)
+        if is_revert(commit):
+            branch_only_reverts.add(commit_hash)
+
+    reverts = []
+    for commit in main_only_commits.values():
+        if not is_revert(commit):
+            continue
+        # Try to identify what was reverted
+        revert_revision = get_revert_revision(commit)
+        ghf_revert_revision = get_ghf_revert_revision(commit)
+        rc_tags: List[str] = []
+        if ghf_revert_revision:
+            # Tags matching v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+ for the reverted commit
+            rc_tags = [
+                tag
+                for tag in repo.get_tags_for_commit(ghf_revert_revision)
+                if RC_TAG_PATTERN.match(tag)
+            ]
+        if ghf_revert_revision and ghf_revert_revision in branch_only_reverts:
+            status = "cherry_picked"
+        elif rc_tags:
+            status = "in_release_candidate"
+        else:
+            status = "not_needed"
+        reverts.append(
+            {
+                "commit": commit,
+                "phabricator_revision": revert_revision,
+                "reverted_commit": ghf_revert_revision,
+                "rc_tags": rc_tags,
+                "status": status,
+            }
+        )
+    return {
+        "main_only": len(main_only_commits),
+        "branch_only": len(branch_only_commits),
+        "reverts": reverts,
+    }
+
+
+def print_missing_reverts(branch: str, found: Dict[str, Any]) -> None:
+    print(f"Analyzing reverts in main branch not present in {branch} branch")
+    print(f"Total commits in main but not in {branch}: {found['main_only']}")
+    print(f"Total commits in {branch} but not in main: {found['branch_only']}")
+    print()
+
+    reverts = found["reverts"]
+    if not reverts:
+        print(f"No reverts found in main branch that are missing from {branch} branch.")
+        return
+
+    print(
+        f"Found {len(reverts)} revert(s) in main branch not present in {branch} branch:"
+    )
+    print("=" * 80)
+
+    for revert in reverts:
+        commit = revert["commit"]
+        if revert["phabricator_revision"]:
+            print(f"Reverted Phabricator Diff: {revert['phabricator_revision']}")
+        elif revert["reverted_commit"]:
+            print(f"Reverted GitHub Commit: {revert['reverted_commit']}")
+
+        if revert["rc_tags"]:
+            print(
+                f"🏷️  Tags matching v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+ for commit {revert['reverted_commit']}:"
+            )
+            for tag in revert["rc_tags"]:
+                print(f"   - {tag}")
+
+        if revert["status"] == "cherry_picked":
+            print(
+                f"✅  DETECTED: The reverted commit {revert['reverted_commit']} was cherry-picked to {branch}"
+            )
+
+        print(f"Commit Hash: {commit.commit_hash}")
+        print(f"Author: {commit.author}")
+        print(f"Date: {commit.commit_date or commit.author_date}")
+        print(f"Title: {commit.title}")
+        if commit.pr_url:
+            print(f"PR URL: {commit.pr_url}")
+
+        if revert["status"] == "cherry_picked":
+            pass  # Already printed the detected message
+        elif revert["status"] == "in_release_candidate":
+            print(
+                f"🔴  WARNING: This is possibly a revert of a commit that was included in a release candidate. The reverted commit may be present in {branch}."
+            )
+        else:
+            print(
+                f"🟢  STATUS: The reverted commit does not appear to be in {branch}, so this revert may not be needed."
+            )
+
+        print(
+            f"Body Preview: {commit.body[:200]}{'...' if len(commit.body) > 200 else ''}"
+        )
+        print("-" * 80)
+
+
+def analyze_reverts_missing_from_branch(repo: GitRepo, branch: str) -> None:
+    """
+    Analyze reverts applied to main branch but not applied to specified branch.
+    This identifies potential missing revert commits that may need to be cherry-picked
+    to the release branch. Also detects if reverted commits from main were cherry-picked
+    to the branch.
+    """
+    print_missing_reverts(branch, find_missing_reverts(repo, branch))
+
+
+def revert_step_rows(
+    release: str,
+    branch: str,
+    steps: List[Dict[str, Any]],
+    found: Dict[str, Any],
+    config_sha: str,
+    run_id: str,
+    run_url: str,
+    observed_at: datetime,
+) -> List[Dict[str, Any]]:
+    """
+    The misc.release_event rows for one scan of the reverts missing from a release
+    branch: one per release portal step that checks reverts_missing_from_branch, done
+    when no revert is in_release_candidate (find_missing_reverts): a revert on main of a
+    commit that was in a release candidate, which the branch may still carry. Only the
+    reverts that need action are listed in `details`; the others (already cherry-picked, or
+    of a commit the branch never had) are only counted, by status.
+    """
+    reverts = found["reverts"]
+    by_status: Dict[str, int] = {}
+    for revert in reverts:
+        by_status[revert["status"]] = by_status.get(revert["status"], 0) + 1
+    needed = [
+        revert for revert in reverts if revert["status"] == "in_release_candidate"
+    ]
+
+    def short(revert: Dict[str, Any]) -> str:
+        commit = revert["commit"]
+        match = re.search(r"/pull/(\d+)$", commit.pr_url or "")
+        return f"#{match.group(1)}" if match else commit.commit_hash[:9]
+
+    if needed:
+        evidence = (
+            f"{len(needed)} revert(s) on main of release candidate commits may need to be "
+            f"cherry-picked to {branch}: " + ", ".join(short(r) for r in needed)
+        )
+    else:
+        evidence = f"No revert of a release candidate commit is missing from {branch}"
+    details = json.dumps(
+        {
+            "branch": branch,
+            "reverts_on_main_not_on_branch": len(reverts),
+            "by_status": by_status,
+            # the reverts to cherry-pick; the others are counted in by_status
+            "reverts": [
+                {
+                    "commit": revert["commit"].commit_hash,
+                    "title": revert["commit"].title,
+                    "url": revert["commit"].pr_url,
+                    "status": revert["status"],
+                    "reverted_commit": revert["reverted_commit"],
+                    "rc_tags": revert["rc_tags"],
+                }
+                for revert in needed
+            ],
+        }
+    )
+    return [
+        {
+            "release": release,
+            "step_id": step["id"],
+            "rc": "",
+            "status": "in_progress" if needed else "done",
+            "blocking": 0,
+            "evidence_text": evidence,
+            "evidence_url": run_url
+            or f"https://github.com/pytorch/pytorch/compare/{branch}...main",
+            "check_type": "reverts_missing_from_branch",
+            "source": "collector",
+            "run_id": run_id,
+            "run_url": run_url,
+            "config_sha": config_sha,
+            "details": details,
+            "observed_at": observed_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        }
+        for step in steps
+    ]
+
+
+def record_revert_steps(
+    repo: GitRepo, release: str, config: Dict[str, Any], write: bool
+) -> None:
+    """
+    Print the reverts on main that are missing from the release's branch, and the state of
+    each release portal step that checks them. With write, record those rows in
+    misc.release_event.
+    """
+    branch = config["branch"]
+    steps = [
+        step
+        for step in config["steps"]
+        if step["check"]["type"] == "reverts_missing_from_branch"
+    ]
+    found = find_missing_reverts(repo, branch)
+    print_missing_reverts(branch, found)
+    run_id, run_url = workflow_run_info()
+    rows = revert_step_rows(
+        release,
+        branch,
+        steps,
+        found,
+        os.environ.get("GITHUB_SHA", "0" * 40),
+        run_id,
+        run_url,
+        datetime.now(timezone.utc),
+    )
+    for row in rows:
+        print(f"step {row['step_id']}: {row['status']}: {row['evidence_text']}")
+    if write and rows:
+        insert_clickhouse_rows("misc.release_event", rows)
+        print(f"Inserted {len(rows)} rows into misc.release_event")
+    write_step_summary(
+        f"{release}: reverts missing from {branch}", rows, write and bool(rows)
+    )
+
+
+def find_release_only_changes_prs(
+    repo_name: str, branch: str, title_regex: str
+) -> List[Dict[str, Any]]:
+    """
+    The pull requests whose base is the release branch and whose title matches title_regex
+    (the release-only changes PR: it changes the workflows from main to the release branch),
+    oldest first. It is opened right after the branch cut, so it is at the start of the list.
+    """
+    pattern = re.compile(title_regex)
+    pulls = fetch_multipage_json(
+        f"https://api.github.com/repos/{repo_name}/pulls",
+        {
+            "base": branch,
+            "state": "all",
+            "sort": "created",
+            "direction": "asc",
+            "per_page": 100,
+        },
+    )
+    return [pull for pull in pulls if pattern.search(pull["title"])]
+
+
+def release_only_changes_step_rows(
+    release: str,
+    branch: str,
+    repo_name: str,
+    steps: List[Dict[str, Any]],
+    prs: List[Dict[str, Any]],
+    config_sha: str,
+    run_id: str,
+    run_url: str,
+    observed_at: datetime,
+) -> List[Dict[str, Any]]:
+    """
+    The misc.release_event rows for one scan of the release-only changes PR of a release
+    branch: one per release portal step that checks release_only_changes, done when such a
+    PR is merged into the branch (the newest one, if there are several), and in progress
+    until then (its evidence says whether the PR is open, closed unmerged or not there yet).
+    """
+    merged = sorted(
+        (pr for pr in prs if pr.get("merged_at")), key=lambda pr: pr["merged_at"]
+    )
+    open_prs = [pr for pr in prs if pr["state"] == "open"]
+    if merged:
+        pr = merged[-1]
+        status = "done"
+        evidence = f"#{pr['number']} {pr['title']} merged into {branch} on {pr['merged_at'][:10]}"
+    elif open_prs:
+        pr = open_prs[-1]
+        status = "in_progress"
+        evidence = (
+            f"#{pr['number']} {pr['title']} is open, not merged into {branch} yet"
+        )
+    elif prs:
+        pr = prs[-1]
+        status = "in_progress"
+        evidence = (
+            f"#{pr['number']} {pr['title']} was closed without merging into {branch}"
+        )
+    else:
+        pr = None
+        status = "in_progress"
+        evidence = f"no release-only changes PR into {branch} yet"
+    details = json.dumps(
+        {
+            "branch": branch,
+            "pull_requests": [
+                {
+                    "number": candidate["number"],
+                    "title": candidate["title"],
+                    "url": candidate["html_url"],
+                    "state": candidate["state"],
+                    "merged_at": candidate.get("merged_at"),
+                }
+                for candidate in prs
+            ],
+        }
+    )
+    return [
+        {
+            "release": release,
+            "step_id": step["id"],
+            "rc": "",
+            "status": status,
+            "blocking": 0,
+            "evidence_text": evidence,
+            "evidence_url": (
+                pr["html_url"]
+                if pr
+                else f"https://github.com/{repo_name}/pulls?q=is%3Apr+base%3A{branch}"
+            ),
+            "check_type": "release_only_changes",
+            "source": "collector",
+            "run_id": run_id,
+            "run_url": run_url,
+            "config_sha": config_sha,
+            "details": details,
+            "observed_at": observed_at.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        }
+        for step in steps
+    ]
+
+
+def record_release_only_changes_steps(
+    release: str, config: Dict[str, Any], write: bool
+) -> None:
+    """
+    Look for the release-only changes PR of the release's branch (config["branch"]) and
+    print the state of each release portal step that checks it. With write, record those
+    rows in misc.release_event.
+    """
+    branch = config["branch"]
+    steps = [
+        step
+        for step in config["steps"]
+        if step["check"]["type"] == "release_only_changes"
+    ]
+    if not steps:
+        print(f"{release} has no release_only_changes step")
+        return
+    run_id, run_url = workflow_run_info()
+    # one search per distinct check; the steps that share it share its result
+    by_check: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for step in steps:
+        check = step["check"]
+        by_check.setdefault((check["repo"], check["title_regex"]), []).append(step)
+    rows: List[Dict[str, Any]] = []
+    for (repo_name, title_regex), check_steps in by_check.items():
+        prs = find_release_only_changes_prs(repo_name, branch, title_regex)
+        for pr in prs:
+            print(
+                f"{pr['html_url']} ;{pr['title']};{pr['state']};merged_at={pr.get('merged_at')}"
+            )
+        rows += release_only_changes_step_rows(
+            release,
+            branch,
+            repo_name,
+            check_steps,
+            prs,
+            os.environ.get("GITHUB_SHA", "0" * 40),
+            run_id,
+            run_url,
+            datetime.now(timezone.utc),
+        )
+    for row in rows:
+        print(f"step {row['step_id']}: {row['status']}: {row['evidence_text']}")
+    if write and rows:
+        insert_clickhouse_rows("misc.release_event", rows)
+        print(f"Inserted {len(rows)} rows into misc.release_event")
+    write_step_summary(f"{release}: release-only changes", rows, write and bool(rows))
+
+
+def parse_arguments():
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser(description="Print GitHub repo stats")
+    parser.add_argument(
+        "--repo-path",
+        type=str,
+        help="Path to PyTorch git checkout",
+        default=os.path.expanduser("~/git/pytorch/pytorch"),
+    )
+    parser.add_argument("--milestone-id", type=str)
+    parser.add_argument("--branch", type=str)
+    parser.add_argument("--minor-release", type=str)
+    parser.add_argument("--remote", type=str, help="Remote to base off of", default="")
+    parser.add_argument("--analyze-reverts", action="store_true")
+    parser.add_argument("--print-reverts", action="store_true")
+    parser.add_argument("--contributor-stats", action="store_true")
+    parser.add_argument("--missing-in-branch", action="store_true")
+    parser.add_argument("--missing-in-release", action="store_true")
+    parser.add_argument("--analyze-stacks", action="store_true")
+    parser.add_argument(
+        "--analyze-missing-reverts-from-branch",
+        action="store_true",
+        help="Analyze reverts applied to main branch but not applied to specified branch",
+    )
+    parser.add_argument(
+        "--release",
+        type=str,
+        help="The release whose milestone to scan (e.g. 2.16.0): --branch and "
+        "--milestone-id default to its release branch and its title",
+    )
+    parser.add_argument(
+        "--in-flight",
+        action="store_true",
+        help="Scan every release in flight (releases_in_flight): the reverts missing "
+        "from its release branch and its milestone. --write-to-clickhouse records the "
+        "milestone steps",
+    )
+    parser.add_argument(
+        "--write-to-clickhouse",
+        action="store_true",
+        help="With --in-flight, or --missing-in-branch and --release, record the state of the release "
+        "portal steps that check the milestone in misc.release_event (CLICKHOUSE_ENDPOINT, "
+        "CLICKHOUSE_USERNAME and CLICKHOUSE_PASSWORD)",
+    )
+    parser.add_argument(
+        "--release-only-changes",
+        action="store_true",
+        help="With --release, look for the release-only changes PR of its release branch "
+        "and print the state of the portal steps that check it. --write-to-clickhouse "
+        "records them in misc.release_event",
+    )
+    parser.add_argument("--date", type=lambda d: datetime.strptime(d, "%Y-%m-%d"))
+    parser.add_argument("--issue-num", type=int)
+    return parser.parse_args()
+
+
+def main():
+    import time
+
+    args = parse_arguments()
+    remote = args.remote
+    if not remote:
+        remotes = get_git_remotes(args.repo_path)
+        # Pick best remote
+        remote = next(iter(remotes.keys()))
+        for key in remotes:
+            if remotes[key].endswith("github.com/pytorch/pytorch"):
+                remote = key
+
+    repo = GitRepo(args.repo_path, remote)
+
+    if args.in_flight:
+        sys.exit(0 if analyze_releases_in_flight(repo, args.write_to_clickhouse) else 1)
+
+    if args.analyze_stacks:
+        analyze_stacks(repo)
+        return
+
+    if args.analyze_missing_reverts_from_branch:
+        if not args.branch:
+            print(
+                "Error: --branch argument is required for --analyze-missing-reverts-from-branch"
+            )
+            return
+        analyze_reverts_missing_from_branch(repo, args.branch)
+        return
+
+    if args.write_to_clickhouse and not args.release:
+        print("Error: --release is required with --write-to-clickhouse")
+        sys.exit(1)
+    if args.release_only_changes and not args.release:
+        print("Error: --release is required with --release-only-changes")
+        sys.exit(1)
+    if args.release:
+        # The release portal config says which steps check the milestone, the release
+        # branch to check it against and, by default, the milestone's title.
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from torchci.release_portal_config import load_resolved
+
+        config = load_resolved(args.release)
+        if args.release_only_changes:
+            record_release_only_changes_steps(
+                args.release, config, args.write_to_clickhouse
+            )
+            return
+        args.branch = args.branch or config["branch"]
+        args.milestone_id = args.milestone_id or args.release
+
+    # Use milestone idx or search it along milestone titles
+    try:
+        milestone_idx = int(args.milestone_id)
+    except ValueError:
+        milestone_idx = -1
+        milestones = gh_get_milestones()
+        for milestone in milestones:
+            if milestone.get("title", "") == args.milestone_id:
+                milestone_idx = int(milestone.get("number", "-2"))
+        if milestone_idx < 0:
+            print(f"Could not find milestone {args.milestone_id}")
+            if args.write_to_clickhouse:
+                sys.exit(1)  # a scheduled run must not silently record nothing
+            return
+
+    if args.missing_in_branch:
+        if not args.write_to_clickhouse:
+            commits_missing_in_branch(
+                repo, args.branch, f"orig/{args.branch}", milestone_idx
+            )
+            return
+        record_milestone_steps(repo, args.release, config, milestone_idx, True)
+        return
+
+    if args.missing_in_release:
+        commits_missing_in_release(
+            repo,
+            args.branch,
+            f"orig/{args.branch}",
+            args.minor_release,
+            milestone_idx,
+            args.date,
+            args.issue_num,
+        )
+        return
+
+    print(f"Parsing git history with remote {remote}...", end="", flush=True)
+    start_time = time.time()
+    x = repo._run_git_log(f"{remote}/main")
+    print(f"done in {time.time() - start_time:.1f} sec")
+    if args.analyze_reverts:
+        analyze_reverts(x)
+    elif args.contributor_stats:
+        print_contributor_stats(x)
+    elif args.print_reverts:
+        print_reverts(x[: 2**9])
+    else:
+        print_monthly_stats(x)
+
+
+if __name__ == "__main__":
+    main()

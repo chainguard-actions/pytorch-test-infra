@@ -1,0 +1,43 @@
+name: Test teardown tolerates docker stop failure with no containers
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake who/docker on PATH (no containers, stop fails)
+        run: |
+          mkdir -p /tmp/fakebin
+          : > /tmp/calls.log
+          cat > /tmp/fakebin/who <<'EOF'
+          #!/bin/sh
+          echo "who $*" >> /tmp/calls.log
+          exit 0
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/calls.log
+          case "$1" in
+            ps) exit 0 ;;
+            stop) echo "requires at least 1 argument" >&2; exit 1 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/who /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert action succeeded and prune still ran
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/calls.log
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          grep -q "^docker stop" /tmp/calls.log || { echo "FAIL: docker stop not attempted"; exit 1; }
+          grep -qx "docker system prune -af" /tmp/calls.log || { echo "FAIL: prune not called after stop failure"; exit 1; }
+          echo "PASS"

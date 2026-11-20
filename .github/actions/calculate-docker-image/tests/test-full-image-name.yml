@@ -1,0 +1,44 @@
+name: Test full ECR image name passthrough
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          mkdir -p "$HOME/fakebin"
+          cat > "$HOME/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "fake-password"
+          exit 0
+          EOF
+          cat > "$HOME/fakebin/docker" <<'EOF'
+          #!/bin/sh
+          echo "fake docker $*" >&2
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) echo '{}'; exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x "$HOME/fakebin/aws" "$HOME/fakebin/docker"
+          echo "$HOME/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: 308535385114.dkr.ecr.us-east-1.amazonaws.com/myrepo/my-image:abc123
+          docker-build-dir: tests/fixtures/docker
+          repo-name: myrepo
+      - name: Assert full name passed through
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          EXPECTED="308535385114.dkr.ecr.us-east-1.amazonaws.com/myrepo/my-image:abc123"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: expected '$EXPECTED'"
+            exit 1
+          fi
+          echo "PASS"

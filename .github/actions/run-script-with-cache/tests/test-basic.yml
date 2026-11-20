@@ -1,0 +1,37 @@
+name: Test basic script run (no cache)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: /tmp/build_env.sh
+      CONDA_RUN: env
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare build env file and script
+        run: |
+          echo 'export MY_BUILD_VAR=hello-from-build-env' > /tmp/build_env.sh
+          rm -f /tmp/basic-marker.txt
+          cat > "$GITHUB_WORKSPACE/act-test-script.sh" <<'EOF'
+          echo "running test script in $(pwd)"
+          echo "${MY_BUILD_VAR}" > /tmp/basic-marker.txt
+          EOF
+      - id: action
+        uses: .
+        with:
+          script: act-test-script.sh
+          repository: "."
+      - name: Assert script ran with build env sourced
+        run: |
+          if [ ! -f /tmp/basic-marker.txt ]; then
+            echo "FAIL: marker file not created; script did not run"
+            exit 1
+          fi
+          ACTUAL="$(cat /tmp/basic-marker.txt)"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "hello-from-build-env" ]; then
+            echo "FAIL: expected 'hello-from-build-env'"
+            exit 1
+          fi
+          echo "PASS"

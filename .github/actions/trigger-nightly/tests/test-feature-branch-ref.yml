@@ -1,0 +1,61 @@
+name: Test nightly cut from a non-default branch
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up a local remote with main, release and nightly branches
+        run: |
+          set -euo pipefail
+          git config --global user.email "test@example.com"
+          git config --global user.name "Test User"
+          rm -rf /tmp/nightly-rel-src /tmp/nightly-rel-remote.git
+          git init --bare /tmp/nightly-rel-remote.git
+          git init /tmp/nightly-rel-src
+          cd /tmp/nightly-rel-src
+          git checkout -b main
+          echo "main" > README.md
+          git add README.md
+          git commit -m "main commit"
+          git checkout -b release/1.0
+          echo "release content" > RELEASE.md
+          git add RELEASE.md
+          git commit -m "release commit"
+          git checkout main
+          git checkout -b nightly
+          echo "nightly" > NIGHTLY.md
+          git add NIGHTLY.md
+          git commit -m "previous nightly"
+          git push /tmp/nightly-rel-remote.git main release/1.0 nightly
+          echo "OLD_NIGHTLY=$(git rev-parse nightly)" >> "$GITHUB_ENV"
+          echo "REL_SHA=$(git rev-parse release/1.0)" >> "$GITHUB_ENV"
+          echo "REL_TREE=$(git rev-parse 'release/1.0^{tree}')" >> "$GITHUB_ENV"
+          git config --global url."file:///tmp/nightly-rel-remote.git".insteadOf "https://github.com/test-owner/nightly-rel"
+
+      - id: action
+        uses: .
+        with:
+          token: ${{ github.token }}
+          repository: test-owner/nightly-rel
+          ref: release/1.0
+          path: nightly-rel-target
+
+      - name: Assert nightly reflects the release branch tree
+        run: |
+          set -euo pipefail
+          if [ ! -f "$GITHUB_WORKSPACE/nightly-rel-target/RELEASE.md" ]; then
+            echo "FAIL: release branch was not checked out"
+            exit 1
+          fi
+          cd /tmp/nightly-rel-remote.git
+          NEW_NIGHTLY=$(git rev-parse refs/heads/nightly)
+          echo "new nightly: $NEW_NIGHTLY"
+          [ "$(git rev-parse "${NEW_NIGHTLY}^")" = "$OLD_NIGHTLY" ] || { echo "FAIL: wrong parent"; exit 1; }
+          [ "$(git rev-parse "${NEW_NIGHTLY}^{tree}")" = "$REL_TREE" ] || { echo "FAIL: wrong tree"; exit 1; }
+          MSG=$(git log -1 --format=%s "$NEW_NIGHTLY")
+          echo "message: $MSG"
+          echo "$MSG" | grep -q "nightly release (${REL_SHA})" || { echo "FAIL: message lacks release sha"; exit 1; }
+          echo "PASS"

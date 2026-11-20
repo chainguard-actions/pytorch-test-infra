@@ -1,0 +1,35 @@
+name: Test action fails when sanity check fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide failing stub check_s3.py
+        run: |
+          mkdir -p tools/clang-tidy-checks
+          cat > tools/clang-tidy-checks/check_s3.py <<'EOF'
+          import sys
+          with open("/tmp/check_s3_fail.log", "a") as f:
+              f.write(" ".join(sys.argv[1:]) + "\n")
+          print("binary has changed!")
+          sys.exit(1)
+          EOF
+          rm -f /tmp/check_s3_fail.log
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          platform: linux64
+          version: "17.0.6"
+      - name: Assert action failed and stopped after first check
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/check_s3_fail.log
+          [ "$OUTCOME" = "failure" ] || { echo "FAIL: expected failure"; exit 1; }
+          [ "$(wc -l < /tmp/check_s3_fail.log)" -eq 1 ] || { echo "FAIL: expected script to stop after first check (set -e)"; exit 1; }
+          grep -q "linux64/17.0.6/clang-tidy" /tmp/check_s3_fail.log || { echo "FAIL: wrong key"; exit 1; }
+          echo "PASS"

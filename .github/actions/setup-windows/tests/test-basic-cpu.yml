@@ -1,0 +1,47 @@
+name: Test basic usage (cpu)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake Windows tooling (powershell, cygpath, EC2 curl)
+        run: bash "$GITHUB_WORKSPACE/tests/fixtures/setup-fakes.sh"
+      - id: action
+        uses: .
+        with:
+          cuda-version: cpu
+      - name: Assert artifact dir env var exported and created
+        run: |
+          echo "RUNNER_ARTIFACT_DIR: ${RUNNER_ARTIFACT_DIR:-}"
+          if [ "${RUNNER_ARTIFACT_DIR:-}" != "${RUNNER_TEMP}/artifacts" ]; then
+            echo "FAIL: expected RUNNER_ARTIFACT_DIR='${RUNNER_TEMP}/artifacts'"
+            exit 1
+          fi
+          if [ ! -d "$RUNNER_ARTIFACT_DIR" ]; then
+            echo "FAIL: artifact dir does not exist"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert test results dir env var exported and created
+        run: |
+          echo "RUNNER_TEST_RESULTS_DIR: ${RUNNER_TEST_RESULTS_DIR:-}"
+          if [ "${RUNNER_TEST_RESULTS_DIR:-}" != "${RUNNER_TEMP}/test-results" ]; then
+            echo "FAIL: expected RUNNER_TEST_RESULTS_DIR='${RUNNER_TEMP}/test-results'"
+            exit 1
+          fi
+          if [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+            echo "FAIL: test results dir does not exist"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert global git config set
+        run: |
+          for key in core.longpaths core.symlinks core.fsmonitor; do
+            echo "$key=$(git config --global --get $key || true)"
+          done
+          [ "$(git config --global --get core.longpaths)" = "true" ] || { echo "FAIL: core.longpaths"; exit 1; }
+          [ "$(git config --global --get core.symlinks)" = "true" ] || { echo "FAIL: core.symlinks"; exit 1; }
+          [ "$(git config --global --get core.fsmonitor)" = "false" ] || { echo "FAIL: core.fsmonitor"; exit 1; }
+          echo "PASS"

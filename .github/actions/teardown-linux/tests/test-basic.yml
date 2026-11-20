@@ -1,0 +1,38 @@
+name: Test basic teardown (default inputs)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake who/docker on PATH (never touch the real docker daemon)
+        run: |
+          mkdir -p /tmp/fakebin
+          : > /tmp/calls.log
+          cat > /tmp/fakebin/who <<'EOF'
+          #!/bin/sh
+          echo "who $*" >> /tmp/calls.log
+          exit 0
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/calls.log
+          if [ "$1" = "ps" ]; then
+            printf 'abc123\ndef456\n'
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/who /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert expected commands ran
+        run: |
+          echo "--- calls ---"
+          cat /tmp/calls.log
+          grep -qx "who " /tmp/calls.log || { echo "FAIL: who was not called (ssh wait step should run)"; exit 1; }
+          grep -qx "docker ps -q" /tmp/calls.log || { echo "FAIL: docker ps -q not called"; exit 1; }
+          grep -qx "docker stop abc123 def456" /tmp/calls.log || { echo "FAIL: docker stop with container ids not called"; exit 1; }
+          grep -qx "docker system prune -af" /tmp/calls.log || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          echo "PASS"

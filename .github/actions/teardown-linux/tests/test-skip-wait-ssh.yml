@@ -1,0 +1,42 @@
+name: Test skip-wait-ssh skips the ssh drain step
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake who/docker on PATH
+        run: |
+          mkdir -p /tmp/fakebin
+          : > /tmp/calls.log
+          cat > /tmp/fakebin/who <<'EOF'
+          #!/bin/sh
+          echo "who $*" >> /tmp/calls.log
+          exit 0
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "docker $*" >> /tmp/calls.log
+          if [ "$1" = "ps" ]; then
+            echo "c0ffee"
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/who /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          skip-wait-ssh: "true"
+      - name: Assert ssh wait skipped and cleanup ran
+        run: |
+          echo "--- calls ---"
+          cat /tmp/calls.log
+          if grep -q "^who" /tmp/calls.log; then
+            echo "FAIL: who was called although skip-wait-ssh was set"
+            exit 1
+          fi
+          grep -qx "docker stop c0ffee" /tmp/calls.log || { echo "FAIL: docker stop not called"; exit 1; }
+          grep -qx "docker system prune -af" /tmp/calls.log || { echo "FAIL: prune not called"; exit 1; }
+          echo "PASS"

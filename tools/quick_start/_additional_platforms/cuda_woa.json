@@ -1,0 +1,12 @@
+{
+  "name": "CUDA 13.4 ARM64",
+  "support_channel": "https://github.com/pytorch/pytorch/issues",
+  "stable": {
+    "windows": "uv pip install --index https://pypi.nvidia.com/nvtorch_oot/ \"torch==2.14.0+cu134\" \"torchvision==0.29.0+cu134\"",
+    "linux": "Please go to getting started page for installation instructions: https://pytorch.org/get-started/locally/"
+  },
+  "preview": {
+    "windows": "uv pip install --pre --index https://pypi.nvidia.com/nvtorch_oot_nightly/ torch torchvision",
+    "linux": "Please go to getting started page for installation instructions: https://pytorch.org/get-started/locally/"
+  }
+}

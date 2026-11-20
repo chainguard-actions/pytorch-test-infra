@@ -1,0 +1,33 @@
+name: Test remove-existing-keys false with fail-silently false
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Seed authorized_keys
+        run: |
+          mkdir -p "$HOME/.ssh"
+          echo "ssh-ed25519 AAAATESTKEY test@example" > "$HOME/.ssh/authorized_keys"
+      - id: action
+        uses: .
+        with:
+          github-secret: ${{ secrets.GITHUB_TOKEN }}
+          remove-existing-keys: "false"
+          fail-silently: "false"
+      - name: Assert action succeeded and existing keys preserved
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          cat "$HOME/.ssh/authorized_keys" || true
+          if ! grep -q "AAAATESTKEY" "$HOME/.ssh/authorized_keys"; then
+            echo "FAIL: pre-existing key was removed"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,37 @@
+name: Test explicit upload-to-s3 false with macos platform
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide stub check_s3.py (normally lives in the calling repo)
+        run: |
+          mkdir -p tools/clang-tidy-checks
+          cat > tools/clang-tidy-checks/check_s3.py <<'EOF'
+          import argparse
+          p = argparse.ArgumentParser()
+          p.add_argument("--s3-key", required=True)
+          p.add_argument("--local-file", required=True)
+          a = p.parse_args()
+          with open("/tmp/check_s3.log", "a") as f:
+              f.write(f"{a.s3_key} {a.local_file}\n")
+          EOF
+          rm -f /tmp/check_s3.log
+      - id: action
+        uses: .
+        with:
+          platform: macos-arm
+          version: "18.1.8"
+          upload-to-s3: "false"
+      - name: Assert check_s3 invoked with expected keys
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/check_s3.log
+          [ "$OUTCOME" = "success" ] || { echo "FAIL: action did not succeed"; exit 1; }
+          grep -qx "macos-arm/18.1.8/clang-tidy clang-tidy" /tmp/check_s3.log || { echo "FAIL: clang-tidy key"; exit 1; }
+          grep -qx "macos-arm/18.1.8/clang-format clang-format" /tmp/check_s3.log || { echo "FAIL: clang-format key"; exit 1; }
+          echo "PASS"

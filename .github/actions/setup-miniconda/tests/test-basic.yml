@@ -1,0 +1,65 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          python-version: "3.9"
+          default-packages: "wheel"
+      - name: Assert environment variables exported
+        run: |
+          echo "CONDA_ENV=$CONDA_ENV"
+          echo "CONDA_PREFIX=$CONDA_PREFIX"
+          echo "CONDA_RUN=$CONDA_RUN"
+          echo "CONDA_INSTALL=$CONDA_INSTALL"
+          echo "CONDA_EXE=$CONDA_EXE"
+          EXPECTED="${RUNNER_TEMP}/conda_environment_${GITHUB_RUN_ID}"
+          if [ "$CONDA_PREFIX" != "$EXPECTED" ]; then
+            echo "FAIL: CONDA_PREFIX expected '$EXPECTED'"; exit 1
+          fi
+          if [ "$CONDA_ENV" != "$CONDA_PREFIX" ]; then
+            echo "FAIL: CONDA_ENV should equal CONDA_PREFIX"; exit 1
+          fi
+          case "$CONDA_RUN" in
+            *"run -p ${CONDA_PREFIX} --no-capture-output"*) ;;
+            *) echo "FAIL: unexpected CONDA_RUN"; exit 1 ;;
+          esac
+          case "$CONDA_INSTALL" in
+            *"install --yes --quiet -p ${CONDA_PREFIX}"*) ;;
+            *) echo "FAIL: unexpected CONDA_INSTALL"; exit 1 ;;
+          esac
+          if [ "$CONDA_EXE" != "${RUNNER_TEMP}/miniconda/bin/conda" ]; then
+            echo "FAIL: unexpected CONDA_EXE"; exit 1
+          fi
+          if [ ! -d "$CONDA_PREFIX" ]; then
+            echo "FAIL: conda env dir missing"; exit 1
+          fi
+          echo "PASS"
+      - name: Assert python version and conda on PATH
+        run: |
+          which conda
+          case "$(which conda)" in
+            "${RUNNER_TEMP}/miniconda/bin/conda") ;;
+            *) echo "FAIL: conda not from miniconda install"; exit 1 ;;
+          esac
+          VER=$($CONDA_RUN python --version 2>&1)
+          echo "python: $VER"
+          case "$VER" in
+            "Python 3.9"*) ;;
+            *) echo "FAIL: expected Python 3.9"; exit 1 ;;
+          esac
+          $CONDA_RUN python -c "import wheel; print(wheel.__version__)" || { echo "FAIL: wheel not installed"; exit 1; }
+          echo "PASS"
+      - name: Assert channel priority reset
+        run: |
+          OUT=$(conda config --show channel_priority)
+          echo "$OUT"
+          if ! echo "$OUT" | grep -qi "disabled\|false"; then
+            echo "FAIL: channel_priority not disabled"; exit 1
+          fi
+          echo "PASS"

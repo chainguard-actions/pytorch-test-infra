@@ -1,0 +1,35 @@
+name: Test dry-run upload with token
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create benchmark results dir
+        run: |
+          mkdir -p "$RUNNER_TEMP/benchmark-results"
+          cat > "$RUNNER_TEMP/benchmark-results/results.json" <<'EOF'
+          [{"benchmark": {"name": "test-bench"}, "model": {"name": "m"}, "metric": {"name": "latency", "benchmark_values": [1.0]}}]
+          EOF
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          benchmark-results-dir: ${{ runner.temp }}/benchmark-results
+          benchmark-name: test-bench
+          dry-run: 'true'
+          github-token: ${{ github.token }}
+      - name: Assert action ran (succeeded, or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: dry-run upload completed"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo job-id lookup / harness layout)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

@@ -1,0 +1,63 @@
+name: Test custom bucket/prefix and field coercion
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI and metrics
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" >> "$RUNNER_TEMP/aws-calls.log"
+          if [ "$1" = "s3" ] && [ "$2" = "cp" ]; then
+            cp "$3" "$RUNNER_TEMP/captured-payload.json"
+            echo "$4" > "$RUNNER_TEMP/captured-dest.txt"
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          cat > "$RUNNER_TEMP/metrics.json" <<'EOF'
+          [
+            {"type": "result", "duration_ms": 999, "num_turns": 9},
+            "not-an-object",
+            {"type": "result", "duration_ms": "42", "num_turns": "abc", "modelUsage": "bogus"}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+          s3-bucket: my-test-bucket
+          s3-prefix: my/prefix
+      - name: Assert destination uses custom bucket/prefix
+        run: |
+          DEST="$(cat "$RUNNER_TEMP/captured-dest.txt")" || { echo "FAIL: aws not called"; exit 1; }
+          echo "dest: $DEST"
+          case "$DEST" in
+            s3://my-test-bucket/my/prefix/*.json) echo "PASS" ;;
+            *) echo "FAIL: unexpected dest"; exit 1 ;;
+          esac
+      - name: Assert last result wins and fields are coerced
+        run: |
+          P="$RUNNER_TEMP/captured-payload.json"
+          cat "$P"
+          check() {
+            actual="$(jq -r "$1" "$P")"
+            echo "$1 = $actual"
+            if [ "$actual" != "$2" ]; then
+              echo "FAIL: expected '$2'"
+              exit 1
+            fi
+          }
+          check '.duration_ms' 42
+          check '.duration_ms | type' number
+          check '.num_turns' 0
+          check '.total_cost_usd' 0
+          check '.input_tokens' 0
+          check '.output_tokens' 0
+          check '.model' ''
+          echo "PASS"

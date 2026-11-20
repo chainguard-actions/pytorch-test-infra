@@ -1,0 +1,31 @@
+name: Test basic chown with public alpine image
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/chown-target/sub"
+          echo hello > "$GITHUB_WORKSPACE/chown-target/sub/file.txt"
+      - id: action
+        uses: .
+        with:
+          directory: ${{ github.workspace }}/chown-target
+          ALPINE_IMAGE: alpine:3.20
+      - name: Assert directory still owned by current user and contents intact
+        run: |
+          UID_NOW="$(id -u)"
+          OWNER="$(stat -c '%u' "$GITHUB_WORKSPACE/chown-target/sub/file.txt")"
+          echo "current uid: $UID_NOW, file owner: $OWNER"
+          if [ "$OWNER" != "$UID_NOW" ]; then
+            echo "FAIL: file not owned by current user"
+            exit 1
+          fi
+          if [ "$(cat "$GITHUB_WORKSPACE/chown-target/sub/file.txt")" != "hello" ]; then
+            echo "FAIL: file contents changed"
+            exit 1
+          fi
+          echo "PASS"

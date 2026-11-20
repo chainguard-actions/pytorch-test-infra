@@ -1,0 +1,86 @@
+name: Run Script with optional cache using github actions cache
+
+description: Cache path on host using github actions cache
+inputs:
+  cache-path:
+    description: "The path(s) on the runner to cache or restore. The path is relative to repository."
+    default: ""
+    type: string
+  cache-key:
+    description: "The key created when saving a cache and the key used to search for a cache."
+    default: ""
+    type: string
+  script:
+    description: "Script to run"
+    default: ""
+    type: string
+  repository:
+    description: 'Repository to checkout, defaults to ""'
+    default: ""
+    type: string
+  is_windows:
+    description: 'Is executing on windows'
+    default: 'disabled'
+    type: string
+
+runs:
+  using: composite
+  steps:
+    - name: Chainguard usage telemetry
+      shell: bash
+      run: |
+        # Best-effort, fails open. Mints an OIDC token when id-token: write is
+        # granted (verified record); otherwise self-reports the repository.
+        tok=""
+        if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+          tok=$(curl -sf --max-time 2 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=actions.chainguard.dev" \
+            | sed -n 's/.*"value":"\([^"]*\)".*/\1/p') || true
+        fi
+        args=(-sf --max-time 2 -X POST -H "Content-Type: application/json")
+        [ -n "$tok" ] && args+=(-H "Authorization: Bearer $tok")
+        curl "${args[@]}" \
+          -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
+          "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
+    # Use the same trick from https://github.com/marketplace/actions/setup-miniconda
+    # to refresh the cache daily. This is kind of optional though
+    - name: Get date
+      id: get-date
+      shell: bash
+      run: |
+        echo "today=$(/bin/date -u '+%Y%m%d')d" >> "${GITHUB_OUTPUT}"
+    - name: Run cache action
+      if: ${{ inputs.cache-path != '' }}
+      id: run-cache-action
+      uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+      with:
+        path: '${{ github.workspace }}/${{ inputs.repository }}${{ inputs.cache-path }}'
+        key: '${{ inputs.cache-key }}-${{ steps.get-date.outputs.today }}'
+    - name: Run script
+      shell: bash -l {0}
+      working-directory: ${{ inputs.repository }}
+      env:
+        SCRIPT: ${{ inputs.script }}
+        IS_WINDOWS: ${{ inputs.is_windows }}
+      if: ${{ inputs.cache-path == '' || steps.run-cache-action.outputs.cache-hit != 'true' }}
+      run: |
+        # Windows scripts needs cleanup on audio and vision, todo remove this once resolved
+        if [[ "${IS_WINDOWS}" == 'disabled' ]]; then
+          set -euxo pipefail
+        fi
+        source "${BUILD_ENV_FILE}"
+
+        if [[ ! -f "${SCRIPT}" ]]; then
+          echo "::error::Specified script file (${SCRIPT}) not found, not going execute it"
+          exit 1
+        else
+          # CONDA_RUN is a command prefix (e.g. "conda run -p <env>") and must word-split as upstream did
+          # shellcheck disable=SC2206
+          conda_run=(${CONDA_RUN:-})
+          if [[ "${SCRIPT}" == *.bat ]]; then
+            ${conda_run[@]+"${conda_run[@]}"} "${SCRIPT}"
+          else
+            ${conda_run[@]+"${conda_run[@]}"} bash "${SCRIPT}"
+          fi
+        fi

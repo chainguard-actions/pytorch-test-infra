@@ -1,0 +1,48 @@
+name: Test basic (non-container runner)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure not flagged as container runner
+        run: |
+          rm -f /.inarc /.incontainer 2>/dev/null || sudo rm -f /.inarc /.incontainer || true
+      - name: Install mocks
+        run: bash "$GITHUB_WORKSPACE/tests/fixtures/setup-mocks.sh"
+      - id: action
+        uses: .
+      - name: Assert env dirs exported and created
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          echo "RUNNER_DOCS_DIR=$RUNNER_DOCS_DIR"
+          [ "$RUNNER_ARTIFACT_DIR" = "${RUNNER_TEMP}/artifacts" ] || { echo "FAIL: RUNNER_ARTIFACT_DIR"; exit 1; }
+          [ "$RUNNER_TEST_RESULTS_DIR" = "${RUNNER_TEMP}/test-results" ] || { echo "FAIL: RUNNER_TEST_RESULTS_DIR"; exit 1; }
+          [ "$RUNNER_DOCS_DIR" = "${RUNNER_TEMP}/docs" ] || { echo "FAIL: RUNNER_DOCS_DIR"; exit 1; }
+          for d in "$RUNNER_ARTIFACT_DIR" "$RUNNER_TEST_RESULTS_DIR" "$RUNNER_DOCS_DIR"; do
+            [ -d "$d" ] || { echo "FAIL: $d missing"; exit 1; }
+          done
+          echo "PASS"
+      - name: Assert github env preserved
+        run: |
+          f="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          [ -f "$f" ] || { echo "FAIL: $f missing"; exit 1; }
+          grep -q '^GITHUB' "$f" || { echo "FAIL: no GITHUB vars"; exit 1; }
+          grep -q '^CI' "$f" || { echo "FAIL: no CI vars"; exit 1; }
+          grep -q '^RUNNER' "$f" || { echo "FAIL: no RUNNER vars"; exit 1; }
+          echo "PASS"
+      - name: Assert ECR login, metadata and docker cleanup
+        run: |
+          LOG="${RUNNER_TEMP}/mock-calls.log"
+          cat "$LOG"
+          grep -q 'meta-data/instance-id' "$LOG" || { echo "FAIL: metadata not queried"; exit 1; }
+          grep -q 'docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com' "$LOG" || { echo "FAIL: ECR login missing"; exit 1; }
+          grep -q 'docker-login-password fake-ecr-password' "$LOG" || { echo "FAIL: password not piped"; exit 1; }
+          grep -q 'lspci' "$LOG" || { echo "FAIL: nvidia check not run"; exit 1; }
+          grep -q 'docker system prune -af' "$LOG" || { echo "FAIL: prune not run"; exit 1; }
+          if [ -n "${GPU_FLAG:-}" ]; then echo "FAIL: GPU_FLAG unexpectedly set"; exit 1; fi
+          echo "PASS"

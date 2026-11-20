@@ -1,0 +1,63 @@
+name: Test push=false with file, target, cache options (mocked docker)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FAKE_DOCKER_MODE: success
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker CLI on PATH
+        run: |
+          rm -rf /tmp/fake-docker && mkdir -p /tmp/fake-docker/bin
+          cat > /tmp/fake-docker/bin/docker <<'EOF'
+          #!/usr/bin/env bash
+          d=/tmp/fake-docker
+          echo "$*" >> "$d/calls.log"
+          if [ "$1" = buildx ] && { [ "$2" = create ] || [ "$2" = use ]; }; then exit 0; fi
+          if [ "$1" = buildx ] && [ "$2" = build ]; then
+            shift 2
+            printf '%s\n' "$@" > "$d/build-args.txt"
+            n=$(cat "$d/count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$d/count"
+            echo "#1 [internal] load build definition from Dockerfile"; exit 0
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fake-docker/bin/docker
+          echo "/tmp/fake-docker/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: registry.example.com/test/img:dev
+          context: some/ctx
+          file: some/ctx/Dockerfile.custom
+          target: builder
+          push: 'false'
+          cache-from: |
+            type=registry,ref=registry.example.com/test/img:cache
+          cache-to: |
+            type=inline
+          connect-delay: '0'
+      - name: Assert image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "registry.example.com/test/img:dev" ]; then
+            echo "FAIL: expected 'registry.example.com/test/img:dev'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert buildx invocation
+        run: |
+          d=/tmp/fake-docker
+          cat "$d/build-args.txt"
+          a="$(tr '\n' ' ' < "$d/build-args.txt")"
+          for want in "--tag registry.example.com/test/img:dev " "--file some/ctx/Dockerfile.custom " "--target builder " \
+                      "--cache-from type=registry,ref=registry.example.com/test/img:cache " "--cache-to type=inline "; do
+            case "$a" in *"$want"*) ;; *) echo "FAIL: missing '$want'"; exit 1 ;; esac
+          done
+          if grep -qx -- "--push" "$d/build-args.txt"; then echo "FAIL: --push must not be passed when push=false"; exit 1; fi
+          [ "$(tail -n1 "$d/build-args.txt")" = "some/ctx" ] || { echo "FAIL: context should be last arg"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,44 @@
+name: Test invalid metrics JSON skips upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI and malformed metrics
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" >> "$RUNNER_TEMP/aws-calls.log"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          printf '[{"type": "result", "duration_ms": 12' > "$RUNNER_TEMP/bad.json"
+          echo '{"type": "result", "duration_ms": 5}' > "$RUNNER_TEMP/notarray.json"
+      - id: truncated
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/bad.json
+      - id: notarray
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/notarray.json
+      - name: Assert steps succeeded and aws was not called
+        env:
+          OUT1: ${{ steps.truncated.outcome }}
+          OUT2: ${{ steps.notarray.outcome }}
+        run: |
+          echo "truncated: $OUT1, notarray: $OUT2"
+          if [ "$OUT1" != "success" ] || [ "$OUT2" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ -f "$RUNNER_TEMP/aws-calls.log" ]; then
+            cat "$RUNNER_TEMP/aws-calls.log"
+            echo "FAIL: aws should not have been called"
+            exit 1
+          fi
+          echo "PASS"

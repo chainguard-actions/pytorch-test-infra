@@ -1,0 +1,44 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert uv-version output is pinned version
+        env:
+          ACTUAL: ${{ steps.action.outputs.uv-version }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "0.11.14" ]; then
+            echo "FAIL: expected '0.11.14'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert uv-path and uvx-path exist and are executable
+        env:
+          UV_PATH: ${{ steps.action.outputs.uv-path }}
+          UVX_PATH: ${{ steps.action.outputs.uvx-path }}
+        run: |
+          echo "uv-path: $UV_PATH"
+          echo "uvx-path: $UVX_PATH"
+          if [ -z "$UV_PATH" ] || [ ! -x "$UV_PATH" ]; then
+            echo "FAIL: uv-path missing or not executable"
+            exit 1
+          fi
+          if [ -z "$UVX_PATH" ] || [ ! -x "$UVX_PATH" ]; then
+            echo "FAIL: uvx-path missing or not executable"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert uv is on PATH with pinned version
+        run: |
+          OUT="$(uv --version)"
+          echo "uv --version: $OUT"
+          case "$OUT" in
+            *0.11.14*) echo "PASS" ;;
+            *) echo "FAIL: expected uv 0.11.14 on PATH"; exit 1 ;;
+          esac
