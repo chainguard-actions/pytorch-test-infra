@@ -61,7 +61,7 @@ runs:
         aws-region: us-east-1
         output-credentials: true
 
-    - uses: seemethere/upload-artifact-s3@baba72d0712b404f646cebe0730933554ebce96a # v5
+    - uses: chainguard-actions/seemethere-upload-artifact-s3@599d0e443446e1812db5580197af2143b729fc0a # v5
       name: Publish clang-tidy binary
       if: ${{ fromJSON(inputs.upload-to-s3) }}
       with:
@@ -70,7 +70,7 @@ runs:
         s3-bucket: oss-clang-format
         path: clang-tidy
 
-    - uses: seemethere/upload-artifact-s3@baba72d0712b404f646cebe0730933554ebce96a # v5
+    - uses: chainguard-actions/seemethere-upload-artifact-s3@599d0e443446e1812db5580197af2143b729fc0a # v5
       name: Publish clang-format binary
       if: ${{ fromJSON(inputs.upload-to-s3) }}
       with:
