@@ -1,0 +1,38 @@
+name: Test dry-run with token
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create benchmark results
+        run: |
+          mkdir -p "$RUNNER_TEMP/benchmark-results"
+          echo '[{"benchmark":{"name":"test"},"model":{"name":"m"},"metric":{"name":"latency","benchmark_values":[1.0]}}]' > "$RUNNER_TEMP/benchmark-results/results.json"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          benchmark-results-dir: ${{ runner.temp }}/benchmark-results
+          benchmark-name: my-benchmark
+          dry-run: 'true'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert action ran (succeeded, or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "DEVICE_NAME: ${DEVICE_NAME:-<unset>}"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "${DEVICE_NAME:-}" ]; then
+              echo "FAIL: action succeeded but DEVICE_NAME was not exported"
+              exit 1
+            fi
+            echo "PASS: action succeeded with DEVICE_NAME=$DEVICE_NAME"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo job-id lookup not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

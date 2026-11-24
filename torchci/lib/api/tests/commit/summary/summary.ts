@@ -1,0 +1,433 @@
+import { queryClickhouse } from "lib/api/tests/clickhouse";
+import type {
+  CommitSummaryField,
+  CommitSummaryQuery,
+} from "lib/api/tests/commit/summary/parameters";
+import {
+  buildCommitInfoQuery,
+  buildCommitNeighboursQuery,
+  buildCommitPullRequestByHeadQuery,
+  buildCommitPullRequestQuery,
+  buildCommitTestCountsQuery,
+  NEAR_NEIGHBOUR_CANDIDATES,
+  NEIGHBOUR_DIRECTIONS,
+  NeighbourDirection,
+} from "lib/api/tests/commit/summary/query";
+import {
+  CommitRecord,
+  CommitSummary,
+  CommitTestCounts,
+} from "lib/api/tests/commit/summary/types";
+import { RUNS_RETENTION_DAYS } from "lib/api/tests/database";
+import { commitPageUrl } from "lib/api/tests/pages/links";
+import { timed } from "lib/api/tests/timed";
+import { titleFirstLine, titleSuffix } from "lib/commitTitle";
+import { BUNDLE_STATUSES, BundleStatus } from "lib/runOutcomes";
+
+interface CommitInfoRow {
+  workflow_runs: number;
+  workflow_message: string;
+  workflow_author_name: string;
+  workflow_committed_at_ms: number;
+  // The head branches of the commit's push runs, ciflow tags left out.
+  push_branches: string[];
+  // (number, API url) pairs.
+  pull_requests: [number, string][];
+  // The head branch of the commit's pull_request runs; empty without any.
+  pull_request_branch: string;
+  pushes: number;
+  author_login: string;
+  push_message: string;
+  push_author_name: string;
+  push_committed_at_ms: number;
+  refs: string[];
+}
+
+interface PullRequestRow {
+  title: string;
+  html_url: string;
+}
+
+// A pull request found by the commit's SHA among the heads its records have
+// named, with its head branch.
+interface PullRequestByHeadRow extends PullRequestRow {
+  number: number;
+  head_branch: string;
+}
+
+// A side of buildCommitNeighboursQuery: its candidates, and the nearest of
+// them with a test job, empty for none.
+interface NeighbourRow {
+  direction: NeighbourDirection;
+  pushes: number;
+  neighbour: string;
+}
+
+// One row per worst result, plus the rollup row (category '') for the whole
+// commit; the per-status columns are read off the rollup row alone.
+interface CountsRow {
+  [column: string]: unknown;
+  category: string;
+  tests: number;
+  jobs: number;
+  any_jobs: number;
+  first_started_at: string;
+  last_ended_at: string;
+}
+
+// The branch to name among several a commit was pushed to: main, else the
+// first by name, so the answer does not change from one request to the next.
+function preferredBranch(branches: readonly string[]): string | undefined {
+  return branches.includes("main") ? "main" : [...branches].sort()[0];
+}
+
+function toCounts(rows: CountsRow[]): CommitTestCounts {
+  const total = rows.find((row) => row.category === "");
+  const zero = { tests: 0, jobs: 0 };
+  const byWorstStatus = Object.fromEntries(
+    BUNDLE_STATUSES.map((status) => {
+      const row = rows.find((candidate) => candidate.category === status);
+      return [
+        status,
+        row === undefined ? zero : { tests: row.tests, jobs: row.jobs },
+      ];
+    })
+  ) as CommitTestCounts["by_worst_status"];
+  const byStatus = Object.fromEntries(
+    BUNDLE_STATUSES.map((status) => [
+      status,
+      total === undefined
+        ? { ...zero, runs: 0 }
+        : {
+            tests: Number(total[`${status}_tests`]),
+            jobs: Number(total[`${status}_distinct_jobs`]),
+            runs: Number(total[`${status}_bundles`]),
+          },
+    ])
+  ) as CommitTestCounts["by_status"];
+  return {
+    total:
+      total === undefined
+        ? { ...zero, runs: 0 }
+        : {
+            tests: total.tests,
+            jobs: total.any_jobs,
+            // Every bundle has one status, so the statuses' bundles add up.
+            runs: BUNDLE_STATUSES.reduce(
+              (sum, status) => sum + byStatus[status].runs,
+              0
+            ),
+          },
+    by_worst_status: byWorstStatus,
+    by_status: byStatus,
+  };
+}
+
+// The pull request page for an API URL GitHub records on a workflow run,
+// "https://api.github.com/repos/pytorch/pytorch/pulls/202376".
+function pullRequestPage(repo: string, number: number, apiUrl: string) {
+  const match =
+    /^https:\/\/api\.github\.com\/repos\/([^/?#]+\/[^/?#]+)\/pulls\/(\d+)$/.exec(
+      apiUrl
+    );
+  return `https://github.com/${
+    match === null ? repo : match[1]
+  }/pull/${number}`;
+}
+
+// What the commit's own lookups establish about it, before anything else is
+// read for it: its message, author and timestamp, the pull request it
+// belongs to and whether it is that pull request's head, and its branch.
+export interface CommitLookup {
+  row: CommitInfoRow;
+  // The commit's message, author and timestamp, from its workflow runs when
+  // it has any, else from its push.
+  message: string;
+  authorName: string;
+  committedAtMs: number;
+  // The pull request the runs record for the commit, as (number, API url).
+  recorded: [number, string] | undefined;
+  // The pull request found by the commit's SHA, for a fork's.
+  byHeadRow: PullRequestByHeadRow | undefined;
+  pullRequestHead: boolean;
+  branch: string | null;
+  pullRequestNumber: number | null;
+  // The lookups' elapsed milliseconds, each rounded, summed.
+  duration_ms: number;
+}
+
+// The commit as its workflow runs and pushes describe it: null for a commit
+// GitHub never told HUD about, with no workflow run and no push. A commit
+// whose runs record no pull request and that no push run put on a branch is
+// then looked up as a pull request head by its SHA
+// (buildCommitPullRequestByHeadQuery), which is how a pull request from a
+// fork is known. The summary and the commit's GreenLight verdict both start
+// here, each under its own query ids (`queryIdPrefix`), so the two endpoints
+// never disagree about which pull request a commit belongs to.
+export async function lookUpCommit(
+  query: CommitSummaryQuery,
+  queryIdPrefix: string
+): Promise<CommitLookup | null> {
+  const info = buildCommitInfoQuery(query);
+  const lookup = await timed(
+    queryClickhouse(info.sql, info.params, `${queryIdPrefix}_info`) as Promise<
+      CommitInfoRow[]
+    >
+  );
+  const row = lookup.result[0];
+  if (row === undefined || (row.workflow_runs === 0 && row.pushes === 0)) {
+    return null;
+  }
+  const fromWorkflow = row.workflow_runs > 0;
+  const message = fromWorkflow ? row.workflow_message : row.push_message;
+  const committedAtMs = fromWorkflow
+    ? row.workflow_committed_at_ms
+    : row.push_committed_at_ms;
+  const authorName = fromWorkflow
+    ? row.workflow_author_name
+    : row.push_author_name;
+  // The pull request the runs record for the commit, the lowest numbered
+  // when they record several: a commit with one is a pull request head,
+  // whether its branch was pushed to the repository, as ghstack pushes
+  // gh/<user>/<n>/head, or to a fork.
+  const recorded = [...row.pull_requests].sort(
+    ([left], [right]) => left - right
+  )[0];
+  // The runs of a pull request from a fork record no pull request at all,
+  // its ciflow tag push's included. A commit they record none for, and that
+  // no push run put on a branch, is looked up by its SHA among the heads the
+  // repository's pull request records have named; a commit with push runs
+  // on a branch is a branch commit.
+  let byHead: { result: PullRequestByHeadRow[]; duration_ms: number } | null =
+    null;
+  if (recorded === undefined && row.push_branches.length === 0) {
+    const byHeadQuery = buildCommitPullRequestByHeadQuery(query);
+    byHead = await timed(
+      queryClickhouse(
+        byHeadQuery.sql,
+        byHeadQuery.params,
+        `${queryIdPrefix}_pull_request_by_head`
+      ) as Promise<PullRequestByHeadRow[]>
+    );
+  }
+  const byHeadRow = byHead?.result[0];
+  const pullRequestHead = recorded !== undefined || byHeadRow !== undefined;
+  // The branch: for a pull request head the head branch its pull_request
+  // runs record, else the one its record names; else, and failing that, the
+  // branch of its push runs, else a branch ref of its push.
+  const pushedBranches = row.refs
+    .filter((ref) => ref.startsWith("refs/heads/"))
+    .map((ref) => ref.slice("refs/heads/".length));
+  const branch =
+    (pullRequestHead && row.pull_request_branch !== ""
+      ? row.pull_request_branch
+      : undefined) ??
+    (byHeadRow !== undefined && byHeadRow.head_branch !== ""
+      ? byHeadRow.head_branch
+      : undefined) ??
+    preferredBranch(row.push_branches) ??
+    preferredBranch(pushedBranches) ??
+    null;
+  // The pull request: the runs' own, else the one the commit's SHA found,
+  // else the one a branch commit's title names at its end.
+  const titled = titleSuffix(titleFirstLine(message));
+  const pullRequestNumber =
+    recorded !== undefined
+      ? recorded[0]
+      : byHeadRow !== undefined
+      ? byHeadRow.number
+      : branch !== null && titled !== null
+      ? titled.pullRequest
+      : null;
+  return {
+    row,
+    message,
+    authorName,
+    committedAtMs,
+    recorded,
+    byHeadRow,
+    pullRequestHead,
+    branch,
+    pullRequestNumber,
+    duration_ms: lookup.duration_ms + (byHead?.duration_ms ?? 0),
+  };
+}
+
+// A branch commit's neighbours, each null for none. The nearest pushes are
+// asked first; a side they leave open is then searched in full: one where
+// none of them has a test job and there may be pushes past them, which on
+// the older side, whose nearest stop a week back, there always may.
+async function findNeighbours(commit: {
+  repo: string;
+  branch: string;
+  committedAtMs: number;
+}): Promise<
+  Record<NeighbourDirection, string | null> & { duration_ms: number }
+> {
+  const search = (directions: readonly NeighbourDirection[], near: boolean) => {
+    const query = buildCommitNeighboursQuery({ ...commit, directions, near });
+    return timed(
+      queryClickhouse(
+        query.sql,
+        query.params,
+        near
+          ? "api_commit_summary_neighbours"
+          : "api_commit_summary_neighbours_far"
+      ) as Promise<NeighbourRow[]>
+    );
+  };
+  const near = await search(NEIGHBOUR_DIRECTIONS, true);
+  const open = NEIGHBOUR_DIRECTIONS.filter((direction) => {
+    const side = near.result.find((row) => row.direction === direction);
+    return (
+      !side?.neighbour &&
+      (direction === "older" ||
+        Number(side?.pushes ?? 0) >= NEAR_NEIGHBOUR_CANDIDATES)
+    );
+  });
+  const far = open.length === 0 ? null : await search(open, false);
+  const neighbour = (direction: NeighbourDirection) =>
+    [...near.result, ...(far?.result ?? [])].find(
+      (row) => row.direction === direction && row.neighbour !== ""
+    )?.neighbour ?? null;
+  return {
+    newer: neighbour("newer"),
+    older: neighbour("older"),
+    duration_ms: near.duration_ms + (far?.duration_ms ?? 0),
+  };
+}
+
+// The summary of a commit's tests: null for a commit GitHub never told HUD
+// about, with no workflow run and no push. It answers the fields the request
+// names, every one when it names none, and reads only what they need: the
+// commit's own lookup always, which says whether HUD knows the commit; the
+// pull request's record and a branch commit's neighbours for `commit`,
+// after the lookup, since they depend on it; and the counts for `counts`
+// and the span of the runs, while the lookup runs. The counts query reads
+// every run of the commit, about 5 seconds on one thread for a main
+// commit's 9 million runs since 2026-11-05 (22 before;
+// commit/query-validation.md), so it stays out of the heavy workload, whose
+// bar is about ten CPU-seconds (the API README's "Heavy queries"): queued
+// there, the page's header waited behind tests pages. The commit page's
+// header asks for the commit without them.
+export async function getCommitSummary(
+  query: CommitSummaryQuery
+): Promise<CommitSummary | null> {
+  const asked = (field: CommitSummaryField) =>
+    query.fields === undefined || query.fields.includes(field);
+  const countsQuery =
+    asked("counts") || asked("first_started_at") || asked("last_ended_at")
+      ? buildCommitTestCountsQuery(query)
+      : null;
+  const counts =
+    countsQuery === null
+      ? null
+      : timed(
+          queryClickhouse(
+            countsQuery.sql,
+            countsQuery.params,
+            "api_commit_summary_counts"
+          ) as Promise<CountsRow[]>
+        );
+  // Observed from the start, so a failure of the lookup below does not leave
+  // the counts' failure unhandled; awaiting counts still throws it.
+  counts?.catch(() => undefined);
+  const found = await lookUpCommit(query, "api_commit_summary");
+  if (found === null) {
+    // Let the counts finish rather than leave the query running unobserved.
+    await counts?.catch(() => undefined);
+    return null;
+  }
+  const {
+    row,
+    message,
+    authorName,
+    committedAtMs,
+    recorded,
+    byHeadRow,
+    pullRequestHead,
+    branch,
+    pullRequestNumber,
+  } = found;
+
+  // The record by number, unless the lookup by SHA read it already.
+  const pullRequestQuery =
+    !asked("commit") || pullRequestNumber === null || byHeadRow !== undefined
+      ? null
+      : buildCommitPullRequestQuery(pullRequestNumber, query.repo);
+  const [pullRequest, neighbours] = await Promise.all([
+    pullRequestQuery === null
+      ? null
+      : timed(
+          queryClickhouse(
+            pullRequestQuery.sql,
+            pullRequestQuery.params,
+            "api_commit_summary_pull_request"
+          ) as Promise<PullRequestRow[]>
+        ),
+    !asked("commit") || pullRequestHead || branch === null
+      ? null
+      : findNeighbours({ repo: query.repo, branch, committedAtMs }),
+  ]);
+  const pullRequestRow: PullRequestRow | undefined =
+    byHeadRow ?? pullRequest?.result[0];
+  const pullRequestTitle = pullRequestRow?.title ?? null;
+  const counted = await counts;
+
+  const commit: CommitRecord = {
+    sha: query.sha,
+    url: `https://github.com/${query.repo}/commit/${query.sha}`,
+    title:
+      pullRequestHead && pullRequestTitle !== null
+        ? pullRequestTitle
+        : titleFirstLine(message),
+    author: {
+      name: authorName === "" ? null : authorName,
+      login: row.author_login === "" ? null : row.author_login,
+    },
+    committed_at: new Date(committedAtMs).toISOString(),
+    branch,
+    pull_request_head: pullRequestHead,
+    pull_request:
+      pullRequestNumber === null
+        ? null
+        : {
+            number: pullRequestNumber,
+            url:
+              pullRequestRow?.html_url ||
+              pullRequestPage(
+                query.repo,
+                pullRequestNumber,
+                recorded === undefined ? "" : recorded[1]
+              ),
+            title: pullRequestTitle,
+          },
+    newer_sha: neighbours?.newer ?? null,
+    older_sha: neighbours?.older ?? null,
+  };
+  const total = counted?.result.find((candidate) => candidate.category === "");
+  const fields: Record<CommitSummaryField, unknown> = {
+    commit,
+    counts: toCounts(counted?.result ?? []),
+    first_started_at: total === undefined ? null : total.first_started_at,
+    last_ended_at: total === undefined ? null : total.last_ended_at,
+    retention_starts_at: new Date(
+      Date.now() - RUNS_RETENTION_DAYS * 24 * 60 * 60 * 1000
+    ).toISOString(),
+  };
+  return {
+    ...Object.fromEntries(
+      Object.entries(fields).filter(([field]) =>
+        asked(field as CommitSummaryField)
+      )
+    ),
+    hud_url: commitPageUrl(query.repo, query.sha),
+    query_duration_ms:
+      found.duration_ms +
+      (counted?.duration_ms ?? 0) +
+      (pullRequest?.duration_ms ?? 0) +
+      (neighbours?.duration_ms ?? 0),
+  };
+}
+
+export type { BundleStatus };

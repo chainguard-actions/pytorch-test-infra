@@ -1,0 +1,35 @@
+name: Test checkout of a specific tag
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: v4.0.0
+          path: tag-target
+      - name: Assert tag commit checked out
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          D="$GITHUB_WORKSPACE/tag-target"
+          HEAD_SHA="$(git -C "$D" rev-parse HEAD)"
+          echo "head: $HEAD_SHA"
+          echo "commit: $COMMIT"
+          if [ "$HEAD_SHA" != "$COMMIT" ]; then
+            echo "FAIL: commit output does not match HEAD"
+            exit 1
+          fi
+          if [ ! -f "$D/action.yml" ]; then
+            echo "FAIL: action.yml missing"
+            exit 1
+          fi
+          if ! grep -q "node20" "$D/action.yml"; then
+            echo "FAIL: expected v4.0.0 action.yml (node20)"
+            exit 1
+          fi
+          echo "PASS"

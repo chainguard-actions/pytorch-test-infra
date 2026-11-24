@@ -1,0 +1,42 @@
+name: Test push false
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/usr/bin/env bash
+          log=/tmp/fake-docker.log
+          { echo "---CALL---"; printf '%s\n' "$@"; } >> "$log"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          rm -f /tmp/fake-docker.log
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: ghcr.io/example/nopush:1
+          push: 'false'
+          connect-delay: '0'
+      - name: Assert no --push and image output set
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          cat /tmp/fake-docker.log
+          echo "image: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/nopush:1" ]; then
+            echo "FAIL: unexpected image output"
+            exit 1
+          fi
+          if grep -Fxq -- "--push" /tmp/fake-docker.log; then
+            echo "FAIL: --push should not be passed when push=false"
+            exit 1
+          fi
+          grep -Fxq "build" /tmp/fake-docker.log || { echo "FAIL: buildx build not called"; exit 1; }
+          echo "PASS"

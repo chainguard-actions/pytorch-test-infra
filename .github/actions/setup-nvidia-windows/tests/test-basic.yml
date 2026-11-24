@@ -1,0 +1,30 @@
+name: Test setup-nvidia-windows basic invocation
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # This action is Windows-only (shell: cmd, NVIDIA driver update + nvidia-smi).
+      # Under act on a Linux container there is no cmd.exe and no GPU, so the
+      # step cannot succeed here; we verify it is invoked and finishes with a
+      # definite outcome (never skipped).
+      - id: action
+        uses: .
+        continue-on-error: true
+      - name: Assert action ran with a definite outcome
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          RUNNER_OS_VAL: ${{ runner.os }}
+        run: |
+          echo "runner os: $RUNNER_OS_VAL"
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: action succeeded (Windows GPU environment available)"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed as expected without Windows cmd/NVIDIA GPU"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

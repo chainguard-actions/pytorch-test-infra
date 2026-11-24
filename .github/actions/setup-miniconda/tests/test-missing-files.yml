@@ -1,0 +1,35 @@
+name: Test missing environment and requirements files are tolerated
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          default-packages: "wheel"
+          environment-file: tests/fixtures/does-not-exist-environment.yml
+          pip-requirements-file: tests/fixtures/does-not-exist-requirements.txt
+      - name: Assert action succeeded and env is usable
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ -z "$CONDA_PREFIX" ] || [ ! -d "$CONDA_PREFIX" ]; then
+            echo "FAIL: CONDA_PREFIX missing"
+            exit 1
+          fi
+          OUT="$($CONDA_RUN python --version 2>&1)"
+          echo "python: $OUT"
+          if ! echo "$OUT" | grep -q "Python 3.9"; then
+            echo "FAIL: expected Python 3.9"
+            exit 1
+          fi
+          echo "PASS"

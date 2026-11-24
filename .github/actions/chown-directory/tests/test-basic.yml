@@ -1,0 +1,40 @@
+name: Test basic chown
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/chown-target/sub"
+          echo hello > "$GITHUB_WORKSPACE/chown-target/file.txt"
+          echo world > "$GITHUB_WORKSPACE/chown-target/sub/nested.txt"
+      - id: action
+        uses: .
+        with:
+          directory: ${{ github.workspace }}/chown-target
+          ALPINE_IMAGE: alpine:3.19
+      - name: Assert action succeeded and files are owned by current user
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          for f in "$GITHUB_WORKSPACE/chown-target/file.txt" "$GITHUB_WORKSPACE/chown-target/sub/nested.txt"; do
+            owner="$(stat -c '%u:%g' "$f")"
+            echo "$f -> $owner"
+            if [ "$owner" != "$(id -u):$(id -g)" ]; then
+              echo "FAIL: $f not owned by $(id -u):$(id -g)"
+              exit 1
+            fi
+          done
+          if [ "$(cat "$GITHUB_WORKSPACE/chown-target/file.txt")" != "hello" ]; then
+            echo "FAIL: file content changed"
+            exit 1
+          fi
+          echo "PASS"

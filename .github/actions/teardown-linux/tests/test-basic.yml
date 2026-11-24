@@ -1,0 +1,36 @@
+name: Test basic teardown (default, no ssh sessions)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who on PATH
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          LOG="$RUNNER_TEMP/calls.log"
+          mkdir -p "$FAKEBIN"
+          : > "$LOG"
+          cat > "$FAKEBIN/docker" <<EOF
+          #!/bin/sh
+          echo "docker \$*" >> "$LOG"
+          exit 0
+          EOF
+          cat > "$FAKEBIN/who" <<EOF
+          #!/bin/sh
+          echo "who" >> "$LOG"
+          exit 0
+          EOF
+          chmod +x "$FAKEBIN/docker" "$FAKEBIN/who"
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert calls
+        run: |
+          LOG="$RUNNER_TEMP/calls.log"
+          echo "--- calls ---"; cat "$LOG"
+          grep -qx "who" "$LOG" || { echo "FAIL: who not called (ssh wait step skipped)"; exit 1; }
+          grep -qx "docker ps -q" "$LOG" || { echo "FAIL: docker ps -q not called"; exit 1; }
+          grep -qx "docker system prune -af" "$LOG" || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          echo "PASS"

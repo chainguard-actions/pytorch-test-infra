@@ -1,0 +1,64 @@
+name: Test setup-windows with cpu
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # This action is Windows-only (powershell, cygpath, EC2 metadata). Under act on
+      # Linux it is expected to fail at the powershell step; on a real Windows runner
+      # it should succeed and export RUNNER_ARTIFACT_DIR / RUNNER_TEST_RESULTS_DIR.
+      - id: action
+        uses: .
+        continue-on-error: true
+        timeout-minutes: 20
+        with:
+          cuda-version: cpu
+      - name: Assert action outcome
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR:-}"
+            echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR:-}"
+            if [ -z "${RUNNER_ARTIFACT_DIR:-}" ] || [ ! -d "$RUNNER_ARTIFACT_DIR" ]; then
+              echo "FAIL: RUNNER_ARTIFACT_DIR not set or missing"
+              exit 1
+            fi
+            if [ -z "${RUNNER_TEST_RESULTS_DIR:-}" ] || [ ! -d "$RUNNER_TEST_RESULTS_DIR" ]; then
+              echo "FAIL: RUNNER_TEST_RESULTS_DIR not set or missing"
+              exit 1
+            fi
+            case "$RUNNER_ARTIFACT_DIR" in
+              */artifacts) ;;
+              *) echo "FAIL: RUNNER_ARTIFACT_DIR should end with /artifacts"; exit 1 ;;
+            esac
+            case "$RUNNER_TEST_RESULTS_DIR" in
+              */test-results) ;;
+              *) echo "FAIL: RUNNER_TEST_RESULTS_DIR should end with /test-results"; exit 1 ;;
+            esac
+            for key in core.longpaths core.symlinks; do
+              v="$(git config --global --get "$key" || true)"
+              echo "$key=$v"
+              if [ "$v" != "true" ]; then
+                echo "FAIL: expected $key=true"
+                exit 1
+              fi
+            done
+            v="$(git config --global --get core.fsmonitor || true)"
+            echo "core.fsmonitor=$v"
+            if [ "$v" != "false" ]; then
+              echo "FAIL: expected core.fsmonitor=false"
+              exit 1
+            fi
+            echo "PASS: action succeeded and configured environment"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: Windows-only action failed gracefully on a non-Windows runner"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

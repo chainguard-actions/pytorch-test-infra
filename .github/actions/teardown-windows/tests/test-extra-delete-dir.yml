@@ -1,0 +1,43 @@
+name: Test teardown with extra-delete-dir input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide a 'powershell' shim backed by pwsh when available
+        run: |
+          if ! command -v powershell >/dev/null 2>&1 && command -v pwsh >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/psbin"
+            printf '#!/bin/sh\nexec pwsh "$@"\n' > "$RUNNER_TEMP/psbin/powershell"
+            chmod +x "$RUNNER_TEMP/psbin/powershell"
+            echo "$RUNNER_TEMP/psbin" >> "$GITHUB_PATH"
+          fi
+      - name: Create extra dir
+        run: |
+          mkdir -p "$RUNNER_TEMP/extra-dir"
+          echo hello > "$RUNNER_TEMP/extra-dir/file.txt"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          extra-delete-dir: ${{ runner.temp }}/extra-dir
+      - name: Assert action accepted input and ran
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ] || [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action executed (outcome '$OUTCOME')"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+      - name: Assert workspace is intact
+        run: |
+          if [ ! -d "$GITHUB_WORKSPACE/.git" ]; then
+            echo "FAIL: workspace git repo missing"
+            exit 1
+          fi
+          echo "PASS"

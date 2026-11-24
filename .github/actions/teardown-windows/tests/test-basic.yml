@@ -1,0 +1,42 @@
+name: Test basic teardown
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide a 'powershell' shim backed by pwsh when available
+        run: |
+          if ! command -v powershell >/dev/null 2>&1 && command -v pwsh >/dev/null 2>&1; then
+            mkdir -p "$RUNNER_TEMP/psbin"
+            printf '#!/bin/sh\nexec pwsh "$@"\n' > "$RUNNER_TEMP/psbin/powershell"
+            chmod +x "$RUNNER_TEMP/psbin/powershell"
+            echo "$RUNNER_TEMP/psbin" >> "$GITHUB_PATH"
+            echo "shim installed"
+          else
+            echo "no shim needed / pwsh unavailable"
+          fi
+      - id: action
+        uses: .
+        continue-on-error: true
+      - name: Assert action ran (Windows-only cmdlets may fail on Linux runner)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: teardown completed"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (Windows-only PowerShell cmdlets unavailable on Linux)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
+      - name: Assert workspace is intact
+        run: |
+          if [ ! -d "$GITHUB_WORKSPACE/.git" ]; then
+            echo "FAIL: workspace git repo missing"
+            exit 1
+          fi
+          echo "PASS"

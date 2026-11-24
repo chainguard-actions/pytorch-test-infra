@@ -1,0 +1,81 @@
+name: Test basic binary build setup
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # The "Set artifact name" step reads REPOSITORY and REF from the environment
+      REPOSITORY: actions/checkout
+      REF: main
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake conda
+        run: |
+          if [ "$(id -u)" = "0" ]; then SUDO=""; else SUDO="sudo"; fi
+          $SUDO cp "$GITHUB_WORKSPACE/tests/fixtures/fake-conda.sh" /usr/local/bin/conda
+          $SUDO chmod +x /usr/local/bin/conda
+          rm -f /tmp/fake-conda.log
+          bash -l -c 'command -v conda'
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          submodules: "false"
+          python-version: "3.10.19"
+          cuda-version: cu121
+          arch: x86_64
+      - name: Assert checkout into repository subdirectory
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/actions/checkout/action.yml" ]; then
+            echo "FAIL: actions/checkout/action.yml not found"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert ARTIFACT_NAME
+        run: |
+          echo "ARTIFACT_NAME: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "actions_checkout_main_3.10_cu121_x86_64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert BUILD_ENV_FILE generated
+        run: |
+          echo "BUILD_ENV_FILE: $BUILD_ENV_FILE"
+          if [ -z "$BUILD_ENV_FILE" ] || [ ! -f "$BUILD_ENV_FILE" ]; then
+            echo "FAIL: BUILD_ENV_FILE missing"
+            exit 1
+          fi
+          cat "$BUILD_ENV_FILE"
+          if ! grep -q "FAKE_PKG_HELPERS=generated" "$BUILD_ENV_FILE"; then
+            echo "FAIL: BUILD_ENV_FILE does not contain pkg-helpers output"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert CONDA_ENV and CONDA_RUN
+        run: |
+          echo "CONDA_ENV: $CONDA_ENV"
+          echo "CONDA_RUN: $CONDA_RUN"
+          if [ "$CONDA_ENV" != "${RUNNER_TEMP}/conda_environment_${GITHUB_RUN_ID}" ]; then
+            echo "FAIL: unexpected CONDA_ENV"
+            exit 1
+          fi
+          if [ "$CONDA_RUN" != "conda run --no-capture-output -p ${CONDA_ENV}" ]; then
+            echo "FAIL: unexpected CONDA_RUN"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda invocations
+        run: |
+          cat /tmp/fake-conda.log
+          grep -q "conda clean --all --quiet --yes" /tmp/fake-conda.log || { echo "FAIL: no conda clean"; exit 1; }
+          grep -q "conda config --set channel_priority false" /tmp/fake-conda.log || { echo "FAIL: no channel_priority reset"; exit 1; }
+          LINE="$(grep "conda_environment_" /tmp/fake-conda.log | grep "conda create" || true)"
+          echo "create line: $LINE"
+          echo "$LINE" | grep -q "python=3.10.19 " || { echo "FAIL: expected python=3.10.19"; exit 1; }
+          echo "$LINE" | grep -q "openssl=3.5.6" || { echo "FAIL: expected openssl pin"; exit 1; }
+          echo "$LINE" | grep -q "cmake=3.31.2" || { echo "FAIL: expected cmake pin"; exit 1; }
+          if echo "$LINE" | grep -q "conda-forge"; then echo "FAIL: unexpected conda-forge"; exit 1; fi
+          echo "PASS"

@@ -1,0 +1,49 @@
+name: Set Channel for Build Matrix Generation/Binary Build Step
+
+description: Add CHANNEL to GITHUB_ENV
+
+
+runs:
+  using: composite
+  steps:
+    - name: Chainguard usage telemetry
+      shell: bash
+      run: |
+        # Best-effort, fails open. Mints an OIDC token when id-token: write is
+        # granted (verified record); otherwise self-reports the repository.
+        tok=""
+        if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && [ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+          tok=$(curl -sf --max-time 2 \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=actions.chainguard.dev" \
+            | sed -n 's/.*"value":"\([^"]*\)".*/\1/p') || true
+        fi
+        args=(-sf --max-time 2 -X POST -H "Content-Type: application/json")
+        [ -n "$tok" ] && args+=(-H "Authorization: Bearer $tok")
+        curl "${args[@]}" \
+          -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
+          "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
+    - name: Set CHANNEL for tagged pushes
+      if: ${{ github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/') }}
+      shell: bash
+      run: |
+        set -euxo pipefail
+        # reference ends with an RC suffix
+        if [[ "${GITHUB_REF_NAME}" = *-rc[0-9]* ]]; then
+          echo "CHANNEL=test" >> "${GITHUB_ENV}"
+        fi
+    - name: Set Release CHANNEL for release
+      if: ${{ (github.event_name == 'pull_request' && startsWith(github.base_ref, 'release')) || startsWith(github.ref, 'refs/heads/release') }}
+      shell: bash
+      run: |
+        set -euxo pipefail
+        echo "CHANNEL=test" >> "$GITHUB_ENV"
+    - name: Set default CHANNEL
+      # Set this to nightly only when the CHANNEL hasn't been set yet. In GHA, once
+      # an env is set, it's fixed unless we can figure out a way to overwrite it in
+      # $GITHUB_ENV
+      if: ${{ env.CHANNEL == '' }}
+      shell: bash
+      run: |
+        set -euxo pipefail
+        echo "CHANNEL=nightly" >> "${GITHUB_ENV}"

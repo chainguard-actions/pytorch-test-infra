@@ -1,0 +1,35 @@
+name: Test explicit github-server-url
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          path: server-url-target
+          github-server-url: https://github.com
+      - name: Assert files checked out and remote uses server URL
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/server-url-target/action.yml" ]; then
+            echo "FAIL: action.yml not found"
+            exit 1
+          fi
+          URL="$(git -C "$GITHUB_WORKSPACE/server-url-target" config --get remote.origin.url)"
+          echo "remote url: $URL"
+          case "$URL" in
+            https://github.com/actions/checkout*) ;;
+            *) echo "FAIL: unexpected remote url"; exit 1 ;;
+          esac
+          echo "commit: $COMMIT"
+          if ! echo "$COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "FAIL: commit output is not a 40-char SHA"
+            exit 1
+          fi
+          echo "PASS"

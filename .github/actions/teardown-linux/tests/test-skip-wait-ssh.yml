@@ -1,0 +1,39 @@
+name: Test skip-wait-ssh skips the ssh wait
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who on PATH
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          LOG="$RUNNER_TEMP/calls.log"
+          mkdir -p "$FAKEBIN"
+          : > "$LOG"
+          cat > "$FAKEBIN/docker" <<EOF
+          #!/bin/sh
+          echo "docker \$*" >> "$LOG"
+          exit 0
+          EOF
+          # who reports an active session; if the wait step ran it would loop
+          cat > "$FAKEBIN/who" <<EOF
+          #!/bin/sh
+          echo "who" >> "$LOG"
+          echo "user pts/0 2024-01-01 00:00"
+          EOF
+          chmod +x "$FAKEBIN/docker" "$FAKEBIN/who"
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        timeout-minutes: 3
+        with:
+          skip-wait-ssh: "true"
+      - name: Assert wait skipped and cleanup ran
+        run: |
+          LOG="$RUNNER_TEMP/calls.log"
+          echo "--- calls ---"; cat "$LOG"
+          if grep -qx "who" "$LOG"; then echo "FAIL: who was called despite skip-wait-ssh"; exit 1; fi
+          grep -qx "docker system prune -af" "$LOG" || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          echo "PASS"

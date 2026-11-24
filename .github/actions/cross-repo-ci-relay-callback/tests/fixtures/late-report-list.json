@@ -1,0 +1,25 @@
+[
+  {
+    "delivery_id": "delivery-1",
+    "workflow_name": "Downstream CI",
+    "job_name": "build-npu",
+    "check_run_id": 123456789,
+    "triage_verdict": {
+      "schema_version": 1,
+      "category": "upstream",
+      "confidence": "high",
+      "summary": "aten::foo lost its out= overload"
+    }
+  },
+  {
+    "delivery_id": "delivery-2",
+    "workflow_name": "Downstream CI",
+    "job_name": "build-cpu",
+    "triage_verdict": {
+      "schema_version": 1,
+      "category": "flake",
+      "confidence": "medium",
+      "summary": "network timeout"
+    }
+  }
+]

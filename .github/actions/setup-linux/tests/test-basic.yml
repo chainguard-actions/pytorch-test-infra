@@ -1,0 +1,49 @@
+name: Test basic (non-container runner)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure not flagged as container runner
+        run: |
+          rm -f /.inarc /.incontainer 2>/dev/null || sudo rm -f /.inarc /.incontainer || true
+      - name: Install mocks
+        run: bash "$GITHUB_WORKSPACE/tests/fixtures/setup-mocks.sh"
+      - id: action
+        uses: .
+      - name: Assert env dirs exported and created
+        run: |
+          for v in RUNNER_ARTIFACT_DIR RUNNER_TEST_RESULTS_DIR RUNNER_DOCS_DIR; do
+            val="${!v:-}"
+            echo "$v=$val"
+            if [ -z "$val" ] || [ ! -d "$val" ]; then
+              echo "FAIL: $v not set or directory missing"
+              exit 1
+            fi
+          done
+          [ "$RUNNER_ARTIFACT_DIR" = "$RUNNER_TEMP/artifacts" ] || { echo "FAIL: artifact dir"; exit 1; }
+          [ "$RUNNER_TEST_RESULTS_DIR" = "$RUNNER_TEMP/test-results" ] || { echo "FAIL: test-results dir"; exit 1; }
+          [ "$RUNNER_DOCS_DIR" = "$RUNNER_TEMP/docs" ] || { echo "FAIL: docs dir"; exit 1; }
+          echo "PASS"
+      - name: Assert github env preserved
+        run: |
+          f="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          if [ ! -f "$f" ]; then echo "FAIL: $f missing"; exit 1; fi
+          grep -q '^GITHUB' "$f" || { echo "FAIL: no GITHUB vars"; exit 1; }
+          grep -q '^CI' "$f" || { echo "FAIL: no CI vars"; exit 1; }
+          grep -q '^RUNNER' "$f" || { echo "FAIL: no RUNNER vars"; exit 1; }
+          echo "PASS"
+      - name: Assert ECR login and docker cleanup
+        run: |
+          cat "$MOCK_LOG"
+          grep -q 'docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com' "$MOCK_LOG" || { echo "FAIL: docker login"; exit 1; }
+          grep -q 'docker-login-password fake-ecr-password' "$MOCK_LOG" || { echo "FAIL: password not piped"; exit 1; }
+          grep -q 'aws ecr get-login-password --region us-east-1' "$MOCK_LOG" || { echo "FAIL: ecr call"; exit 1; }
+          grep -q 'docker system prune -af' "$MOCK_LOG" || { echo "FAIL: prune not run"; exit 1; }
+          grep -q '^lspci' "$MOCK_LOG" || { echo "FAIL: nvidia check not run"; exit 1; }
+          if [ -n "${GPU_FLAG:-}" ]; then echo "FAIL: GPU_FLAG unexpectedly set"; exit 1; fi
+          echo "PASS"

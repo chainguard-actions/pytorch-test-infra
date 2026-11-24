@@ -1,0 +1,29 @@
+name: Test CONDA_RUN prefix from BUILD_ENV_FILE is used
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare build env file with CONDA_RUN prefix
+        run: |
+          printf 'export CONDA_RUN="env FOO=from-conda-run"\n' > "$RUNNER_TEMP/build.env"
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/build.env" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/marker.txt"
+      - id: action
+        uses: .
+        with:
+          script: tests/fixtures/write-marker.sh
+      - name: Assert CONDA_RUN prefix applied
+        run: |
+          if [ ! -f "$RUNNER_TEMP/marker.txt" ]; then
+            echo "FAIL: marker file not created"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/marker.txt"
+          if ! grep -q "^ran:from-conda-run:" "$RUNNER_TEMP/marker.txt"; then
+            echo "FAIL: expected FOO=from-conda-run from CONDA_RUN prefix"
+            exit 1
+          fi
+          echo "PASS"

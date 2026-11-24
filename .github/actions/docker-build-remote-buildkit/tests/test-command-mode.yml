@@ -1,0 +1,45 @@
+name: Test command mode
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/usr/bin/env bash
+          { echo "---CALL---"; printf '%s\n' "$@"; } >> /tmp/fake-docker.log
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          rm -f /tmp/fake-docker.log /tmp/command-ran
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          command: echo "custom build $((1+2))" > /tmp/command-ran
+          tags: ghcr.io/example/ignored:1
+          connect-delay: '0'
+      - name: Assert command ran and image empty
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          cat /tmp/fake-docker.log || true
+          echo "image: '$IMAGE'"
+          if [ -n "$IMAGE" ]; then
+            echo "FAIL: image output should be empty in command mode"
+            exit 1
+          fi
+          if [ "$(cat /tmp/command-ran)" != "custom build 3" ]; then
+            echo "FAIL: command did not run as expected"
+            exit 1
+          fi
+          grep -Fxq "create" /tmp/fake-docker.log || { echo "FAIL: builder not registered"; exit 1; }
+          if grep -Fxq "ghcr.io/example/ignored:1" /tmp/fake-docker.log; then
+            echo "FAIL: tags should be ignored in command mode"
+            exit 1
+          fi
+          echo "PASS"

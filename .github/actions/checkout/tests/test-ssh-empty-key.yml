@@ -1,0 +1,35 @@
+name: Test empty ssh-key falls back to HTTPS token auth
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          path: ssh-empty-target
+          ssh-key: ""
+          ssh-known-hosts: "example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+      - name: Assert HTTPS checkout succeeded without SSH
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/ssh-empty-target/action.yml" ]; then
+            echo "FAIL: action.yml not found"
+            exit 1
+          fi
+          URL="$(git -C "$GITHUB_WORKSPACE/ssh-empty-target" config --get remote.origin.url)"
+          echo "remote url: $URL"
+          case "$URL" in
+            https://*) ;;
+            *) echo "FAIL: expected HTTPS remote when ssh-key is empty"; exit 1 ;;
+          esac
+          SSHCMD="$(git -C "$GITHUB_WORKSPACE/ssh-empty-target" config --local --get core.sshCommand || true)"
+          echo "core.sshCommand: $SSHCMD"
+          if [ -n "$SSHCMD" ]; then
+            echo "FAIL: core.sshCommand should not be set without an ssh-key"
+            exit 1
+          fi
+          echo "PASS"

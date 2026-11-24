@@ -1,0 +1,43 @@
+name: Test runner waits until ssh sessions drain
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who on PATH
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          LOG="$RUNNER_TEMP/calls.log"
+          mkdir -p "$FAKEBIN"
+          : > "$LOG"
+          cat > "$FAKEBIN/docker" <<EOF
+          #!/bin/sh
+          echo "docker \$*" >> "$LOG"
+          exit 0
+          EOF
+          # who reports a session on the first call only, then none
+          cat > "$FAKEBIN/who" <<EOF
+          #!/bin/sh
+          echo "who" >> "$LOG"
+          if [ ! -f "$RUNNER_TEMP/who-called" ]; then
+            touch "$RUNNER_TEMP/who-called"
+            echo "user pts/0 2024-01-01 00:00"
+          fi
+          exit 0
+          EOF
+          chmod +x "$FAKEBIN/docker" "$FAKEBIN/who"
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        timeout-minutes: 3
+      - name: Assert waited then cleaned up
+        run: |
+          LOG="$RUNNER_TEMP/calls.log"
+          echo "--- calls ---"; cat "$LOG"
+          COUNT=$(grep -cx "who" "$LOG" || true)
+          echo "who calls: $COUNT"
+          if [ "$COUNT" -ne 2 ]; then echo "FAIL: expected exactly 2 who calls"; exit 1; fi
+          grep -qx "docker system prune -af" "$LOG" || { echo "FAIL: prune not run"; exit 1; }
+          echo "PASS"

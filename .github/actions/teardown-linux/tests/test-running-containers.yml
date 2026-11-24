@@ -1,0 +1,40 @@
+name: Test running containers are stopped (stop failure tolerated)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who on PATH
+        run: |
+          FAKEBIN="$RUNNER_TEMP/fakebin"
+          LOG="$RUNNER_TEMP/calls.log"
+          mkdir -p "$FAKEBIN"
+          : > "$LOG"
+          cat > "$FAKEBIN/docker" <<EOF
+          #!/bin/sh
+          echo "docker \$*" >> "$LOG"
+          case "\$1" in
+            ps) echo abc123; echo def456 ;;
+            stop) exit 1 ;;
+          esac
+          exit 0
+          EOF
+          cat > "$FAKEBIN/who" <<EOF
+          #!/bin/sh
+          exit 0
+          EOF
+          chmod +x "$FAKEBIN/docker" "$FAKEBIN/who"
+          echo "$FAKEBIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          skip-wait-ssh: "1"
+      - name: Assert containers stopped and prune ran
+        run: |
+          LOG="$RUNNER_TEMP/calls.log"
+          echo "--- calls ---"; cat "$LOG"
+          grep -qx "docker stop abc123 def456" "$LOG" || { echo "FAIL: docker stop not called with container ids"; exit 1; }
+          grep -qx "docker system prune -af" "$LOG" || { echo "FAIL: prune not run after failed stop"; exit 1; }
+          echo "PASS"

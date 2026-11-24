@@ -1,0 +1,62 @@
+name: Test S3 upload failure is best-effort
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure jq is available
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y && sudo apt-get install -y jq || (apt-get update -y && apt-get install -y jq)
+          fi
+          jq --version
+      - name: Install failing fake aws CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<EOF
+          #!/bin/sh
+          echo "\$@" > "$RUNNER_TEMP/aws-args.txt"
+          echo "upload failed: access denied" >&2
+          exit 1
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f "$RUNNER_TEMP/aws-args.txt"
+      - name: Create metrics file (minimal result, missing fields)
+        run: |
+          echo '[{"type":"result","duration_ms":"500"}]' > "$RUNNER_TEMP/minimal.json"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/minimal.json
+      - name: Assert step succeeded despite upload failure
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ ! -f "$RUNNER_TEMP/aws-args.txt" ]; then
+            echo "FAIL: aws was never invoked"
+            exit 1
+          fi
+          ARGS="$(cat "$RUNNER_TEMP/aws-args.txt")"
+          echo "aws args: $ARGS"
+          case "$ARGS" in
+            "s3 cp /tmp/claude_usage.json s3://ossci-raw-job-status/claude_code_usage/"*) ;;
+            *) echo "FAIL: default bucket/prefix not used"; exit 1 ;;
+          esac
+          cat /tmp/claude_usage.json
+          D=$(jq -c '.duration_ms' /tmp/claude_usage.json)
+          T=$(jq -c '.output_tokens' /tmp/claude_usage.json)
+          M=$(jq -c '.model' /tmp/claude_usage.json)
+          echo "duration_ms=$D output_tokens=$T model=$M"
+          if [ "$D" != "500" ] || [ "$T" != "0" ] || [ "$M" != '""' ]; then
+            echo "FAIL: unexpected defaults/coercion in payload"
+            exit 1
+          fi
+          echo "PASS"

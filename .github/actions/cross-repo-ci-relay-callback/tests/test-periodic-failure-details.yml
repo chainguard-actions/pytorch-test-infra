@@ -1,0 +1,60 @@
+name: Test periodic failure with failed tests detail
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Start mock OIDC + relay server
+        run: |
+          mkdir -p /tmp/mock-relay
+          rm -f /tmp/mock-relay/requests.jsonl
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" > /tmp/mock-relay/server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8765/health >/dev/null; then echo "server up"; break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8765/health || { cat /tmp/mock-relay/server.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:8765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+          echo "NO_PROXY=127.0.0.1,localhost" >> "$GITHUB_ENV"
+          echo "no_proxy=127.0.0.1,localhost" >> "$GITHUB_ENV"
+
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: failure
+          delivery-id: abcdef0123456789abcdef0123456789abcdef01
+          event-type: periodic
+          failed-tests-detail: '[{"name":"test_foo","classname":"TestBar","message":"AssertionError"}]'
+          # Not an object: the action must warn and drop it, not fail.
+          triage-verdict: '["not", "an", "object"]'
+          callback-url: http://127.0.0.1:8765/github/callback
+
+      - name: Assert recorded callback payload
+        run: |
+          cat /tmp/mock-relay/requests.jsonl || true
+          python3 - <<'EOF'
+          import json, sys
+          reqs = [json.loads(l) for l in open("/tmp/mock-relay/requests.jsonl") if l.strip()]
+          posts = [r for r in reqs if r["method"] == "POST"]
+          def fail(msg):
+              print("FAIL: " + msg); sys.exit(1)
+          if len(posts) != 1: fail(f"expected 1 POST, got {len(posts)}")
+          body = json.loads(posts[0]["body"])
+          print(json.dumps(body, indent=2))
+          if body.get("event_type") != "periodic": fail("event_type")
+          w = body["workflow"]
+          if w.get("status") != "completed": fail("status")
+          if w.get("conclusion") != "failure": fail("conclusion")
+          if w.get("job_name") != "test": fail(f"job_name should default to github.job, got {w.get('job_name')!r}")
+          d = w.get("failed_tests_detail")
+          if not isinstance(d, list) or len(d) != 1 or d[0].get("name") != "test_foo": fail("failed_tests_detail")
+          if "triage_verdict" in w: fail("invalid triage_verdict should have been dropped")
+          if "test_results" in w: fail("test_results should be absent")
+          if "artifact_url" in w: fail("artifact_url should be absent")
+          print("PASS")
+          EOF

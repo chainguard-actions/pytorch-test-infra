@@ -1,0 +1,37 @@
+name: Test activate-with-label skips outside pull_request
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Seed existing authorized_keys
+        run: |
+          mkdir -p ~/.ssh
+          echo "ssh-ed25519 AAAASENTINELKEY sentinel@test" > ~/.ssh/authorized_keys
+          cat ~/.ssh/authorized_keys
+      - id: action
+        uses: .
+        with:
+          github-secret: ${{ github.token }}
+          activate-with-label: true
+          label: with-ssh
+          remove-existing-keys: true
+          fail-silently: false
+      - name: Assert action succeeded and left keys untouched
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          echo "authorized_keys:"
+          cat ~/.ssh/authorized_keys || true
+          if ! grep -q "AAAASENTINELKEY" ~/.ssh/authorized_keys; then
+            echo "FAIL: existing key was removed although action should have skipped (no label / not a PR)"
+            exit 1
+          fi
+          echo "PASS"

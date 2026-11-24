@@ -1,0 +1,58 @@
+name: Test basic build and push
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/usr/bin/env bash
+          log=/tmp/fake-docker.log
+          { echo "---CALL---"; printf '%s\n' "$@"; } >> "$log"
+          if [[ "$1 $2" == "buildx build" ]]; then
+            echo "#1 [internal] load build definition from Dockerfile"
+            echo "fake build ok"
+          fi
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          rm -f /tmp/fake-docker.log
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: "ghcr.io/example/img:abc123, ghcr.io/example/img:latest"
+          connect-delay: '0'
+      - name: Assert image output is first tag
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/img:abc123" ]; then
+            echo "FAIL: expected ghcr.io/example/img:abc123"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert docker invocations
+        run: |
+          cat /tmp/fake-docker.log
+          log=/tmp/fake-docker.log
+          fail=0
+          grep -Fxq "create" "$log" || { echo "FAIL: buildx create not called"; fail=1; }
+          grep -Fxq -- "--driver" "$log" || { echo "FAIL: --driver missing"; fail=1; }
+          grep -Fxq "ghcr.io/example/img:abc123" "$log" || { echo "FAIL: first tag missing"; fail=1; }
+          grep -Fxq "ghcr.io/example/img:latest" "$log" || { echo "FAIL: second tag missing"; fail=1; }
+          [ "$(grep -Fxc -- "--tag" "$log")" = "2" ] || { echo "FAIL: expected 2 --tag"; fail=1; }
+          grep -Fxq -- "--push" "$log" || { echo "FAIL: --push missing"; fail=1; }
+          grep -Fxq -- "--platform" "$log" || { echo "FAIL: --platform missing"; fail=1; }
+          grep -Eq '^linux/(amd64|arm64)$' "$log" || { echo "FAIL: platform value missing"; fail=1; }
+          [ "$(tail -n1 "$log")" = "." ] || { echo "FAIL: context should be last arg '.'"; fail=1; }
+          grep -Fxq -- "--file" "$log" && { echo "FAIL: --file should not be set"; fail=1; }
+          grep -Fxq -- "--target" "$log" && { echo "FAIL: --target should not be set"; fail=1; }
+          [ "$(grep -Fxc -- "---CALL---" "$log")" = "2" ] || { echo "FAIL: expected exactly 2 docker calls"; fail=1; }
+          [ "$fail" = "0" ] || exit 1
+          echo "PASS"

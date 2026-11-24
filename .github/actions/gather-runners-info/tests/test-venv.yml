@@ -1,0 +1,45 @@
+name: Test with venv input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create virtual environment
+        run: |
+          set -eux
+          VENV_DIR="$RUNNER_TEMP/test-venv"
+          if ! python3 -m venv "$VENV_DIR"; then
+            rm -rf "$VENV_DIR"
+            PIP_BREAK_SYSTEM_PACKAGES=1 python3 -m pip install virtualenv
+            python3 -m virtualenv "$VENV_DIR"
+          fi
+          test -f "$VENV_DIR/bin/activate"
+          echo "VENV_ACTIVATE=$VENV_DIR/bin/activate" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          venv: ${{ env.VENV_ACTIVATE }}
+      - name: Assert runners-info output is non-empty valid JSON
+        env:
+          ACTUAL: ${{ steps.action.outputs.runners-info }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "FAIL: runners-info is empty"
+            exit 1
+          fi
+          if ! printf '%s' "$ACTUAL" | python3 -c 'import json,sys; json.load(sys.stdin)'; then
+            echo "FAIL: runners-info is not valid JSON"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert psutil installed into the venv
+        run: |
+          . "$VENV_ACTIVATE"
+          if ! python3 -c 'import psutil; assert psutil.__version__ == "7.0.0", psutil.__version__'; then
+            echo "FAIL: psutil 7.0.0 not installed in venv"
+            exit 1
+          fi
+          echo "PASS"

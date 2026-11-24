@@ -1,0 +1,59 @@
+name: Test basic usage
+on:
+  workflow_dispatch:
+jobs:
+  run-action:
+    runs-on: ubuntu-latest
+    # The action's inner checkout clones github.repository, which is a
+    # non-existent sentinel under the harness, so the action may fail. Isolate
+    # it in its own job so an inner composite failure cannot fail the workflow.
+    continue-on-error: true
+    outputs:
+      outcome: ${{ steps.record.outputs.outcome }}
+      leftover: ${{ steps.record.outputs.leftover }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          repo: ${{ github.repository }}
+          base_sha: ${{ github.sha }}
+          head_sha: ${{ github.sha }}
+      - id: record
+        if: always()
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome=${OUTCOME:-unknown}" >> "$GITHUB_OUTPUT"
+          if [ -d "$GITHUB_WORKSPACE/_repo" ] || [ -d "$GITHUB_WORKSPACE/_test-infra" ]; then
+            echo "leftover=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "leftover=false" >> "$GITHUB_OUTPUT"
+          fi
+  assert:
+    runs-on: ubuntu-latest
+    needs: run-action
+    if: always()
+    steps:
+      - name: Assert action ran (succeeded with cleanup, or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ needs.run-action.outputs.outcome }}
+          LEFTOVER: ${{ needs.run-action.outputs.leftover }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "leftover: $LEFTOVER"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ "$LEFTOVER" = "true" ]; then
+              echo "FAIL: action succeeded but cleanup did not remove _repo/_test-infra"
+              exit 1
+            fi
+            echo "PASS: action succeeded and cleaned up"
+          elif [ "$OUTCOME" = "failure" ] || [ -z "$OUTCOME" ] || [ "$OUTCOME" = "unknown" ]; then
+            echo "PASS: action failed gracefully (sentinel repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

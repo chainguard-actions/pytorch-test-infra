@@ -1,0 +1,30 @@
+name: Test script runs on cache miss
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare build env file and cache dir
+        run: |
+          printf 'export CONDA_RUN=""\n' > "$RUNNER_TEMP/build.env"
+          echo "BUILD_ENV_FILE=$RUNNER_TEMP/build.env" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/marker.txt"
+          mkdir -p "$GITHUB_WORKSPACE/cache-dir"
+          echo "cached" > "$GITHUB_WORKSPACE/cache-dir/data.txt"
+          echo "UNIQUE_KEY=test-cache-miss-$(date +%s%N)-$RANDOM" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          cache-path: cache-dir
+          cache-key: ${{ env.UNIQUE_KEY }}
+          script: tests/fixtures/write-marker.sh
+      - name: Assert script ran on cache miss
+        run: |
+          if [ ! -f "$RUNNER_TEMP/marker.txt" ]; then
+            echo "FAIL: marker file not created (script should run on cache miss)"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/marker.txt"
+          echo "PASS"

@@ -1,0 +1,47 @@
+name: Test pull failure retries and fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock aws and docker
+        run: |
+          MOCK_DIR="$RUNNER_TEMP/mockbin"
+          mkdir -p "$MOCK_DIR"
+          rm -f /tmp/mock-calls.log /tmp/mock-local-image
+          touch /tmp/mock-pull-fail
+          cat > "$MOCK_DIR/aws" <<'EOF'
+          #!/bin/bash
+          echo "aws $*" >> /tmp/mock-calls.log
+          echo "fake-ecr-password"
+          EOF
+          cat > "$MOCK_DIR/docker" <<'EOF'
+          #!/bin/bash
+          echo "docker $*" >> /tmp/mock-calls.log
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) echo '{"config":{"size":1048576},"layers":[{"size":2097152}]}'; exit 0 ;;
+            inspect) [ -f /tmp/mock-local-image ] && exit 0 || exit 1 ;;
+            pull) [ -f /tmp/mock-pull-fail ] && exit 1; touch /tmp/mock-local-image; exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x "$MOCK_DIR/aws" "$MOCK_DIR/docker"
+          echo "$MOCK_DIR" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          docker-image: example.com/missing/image:nope
+      - name: Assert action failed after 3 pull attempts
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/mock-calls.log
+          if [ "$OUTCOME" != "failure" ]; then echo "FAIL: expected failure"; exit 1; fi
+          N=$(grep -c "^docker pull example.com/missing/image:nope$" /tmp/mock-calls.log || true)
+          if [ "$N" != "3" ]; then echo "FAIL: expected 3 pull attempts, got $N"; exit 1; fi
+          echo "PASS"

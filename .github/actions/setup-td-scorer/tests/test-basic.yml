@@ -1,0 +1,49 @@
+name: Test basic setup of TD scorer
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide tools/torchci (fixture) if the checkout lacks it
+        run: |
+          if [ ! -f tools/torchci/requirements.txt ]; then
+            mkdir -p tools
+            rm -rf tools/torchci
+            cp -r tests/fixtures/torchci tools/torchci
+            echo "USING_FIXTURE=true" >> "$GITHUB_ENV"
+          else
+            echo "USING_FIXTURE=false" >> "$GITHUB_ENV"
+          fi
+          ls -R tools/torchci | head -50
+      - id: action
+        uses: .
+      - name: Assert python 3.11 is active
+        run: |
+          v="$(python -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
+          echo "python version: $v"
+          if [ "$v" != "3.11" ]; then
+            echo "FAIL: expected python 3.11"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert torchci is installed editable with its requirements
+        run: |
+          python -m pip show torchci || { echo "FAIL: torchci not installed"; exit 1; }
+          if [ "$USING_FIXTURE" = "true" ]; then
+            python -c 'import six; print("six", six.__version__)' || { echo "FAIL: requirement six not installed"; exit 1; }
+            # Run from a different directory to confirm installation (not cwd import)
+            cd /tmp
+            out="$(python -c 'import torchci; print(torchci.FIXTURE_MARKER); print(torchci.__file__)')"
+            echo "$out"
+            if ! echo "$out" | grep -q "td-scorer-fixture"; then
+              echo "FAIL: torchci fixture module not importable"
+              exit 1
+            fi
+            if ! echo "$out" | grep -q "tools/torchci"; then
+              echo "FAIL: torchci not installed in editable mode from tools/torchci"
+              exit 1
+            fi
+          fi
+          echo "PASS"

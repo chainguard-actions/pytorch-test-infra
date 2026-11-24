@@ -1,0 +1,2 @@
+# Minimal requirements fixture for the setup-td-scorer action test
+six

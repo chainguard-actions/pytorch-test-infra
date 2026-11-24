@@ -1,0 +1,34 @@
+name: Test export matrix variables (linux)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install stub export script at test-infra/.github/scripts
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/test-infra/.github/scripts"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/export_matrix_variables.py" \
+             "$GITHUB_WORKSPACE/test-infra/.github/scripts/export_matrix_variables.py"
+          rm -f "$RUNNER_TEMP/matrix_to_export.json" "$RUNNER_TEMP/github_env_${GITHUB_RUN_ID}" "$RUNNER_TEMP/stub_args.txt"
+      - id: action
+        uses: .
+        with:
+          binary-matrix: '{"python_version": "3.10", "gpu_arch_type": "cpu"}'
+          target-os: linux
+      - name: Assert results
+        run: |
+          set -u
+          echo "--- matrix_to_export.json"; cat "$RUNNER_TEMP/matrix_to_export.json" || { echo "FAIL: matrix json missing"; exit 1; }
+          python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['python_version']=='3.10' and d['gpu_arch_type']=='cpu'" "$RUNNER_TEMP/matrix_to_export.json" || { echo "FAIL: matrix json content wrong"; exit 1; }
+          ARGS="$(cat "$RUNNER_TEMP/stub_args.txt")"
+          echo "args: $ARGS"
+          if echo "$ARGS" | grep -q -- "--add-quotes-around-value"; then
+            echo "FAIL: linux should not add quotes flag"; exit 1
+          fi
+          ENVF="$RUNNER_TEMP/github_env_${GITHUB_RUN_ID}"
+          echo "--- env file"; cat "$ENVF" || { echo "FAIL: env file missing"; exit 1; }
+          grep -qx 'PYTHON_VERSION=3.10' "$ENVF" || { echo "FAIL: PYTHON_VERSION line missing"; exit 1; }
+          grep -qx 'GPU_ARCH_TYPE=cpu' "$ENVF" || { echo "FAIL: GPU_ARCH_TYPE line missing"; exit 1; }
+          echo "PASS"

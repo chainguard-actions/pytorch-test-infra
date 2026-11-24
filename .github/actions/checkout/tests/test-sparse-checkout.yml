@@ -1,0 +1,33 @@
+name: Test sparse checkout
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          path: sparse-target
+          sparse-checkout: |
+            src
+      - name: Assert sparse checkout contents
+        run: |
+          D="$GITHUB_WORKSPACE/sparse-target"
+          ls -la "$D"
+          if [ ! -d "$D/src" ]; then
+            echo "FAIL: src directory missing"
+            exit 1
+          fi
+          if [ -d "$D/dist" ]; then
+            echo "FAIL: dist directory should not be checked out"
+            exit 1
+          fi
+          if [ ! -f "$D/action.yml" ]; then
+            echo "FAIL: root files should be present in cone mode"
+            exit 1
+          fi
+          echo "PASS"

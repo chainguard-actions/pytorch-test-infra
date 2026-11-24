@@ -1,0 +1,76 @@
+name: Test nightly completed callback
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Start mock OIDC + relay server
+        run: |
+          mkdir -p /tmp/mock-relay
+          rm -f /tmp/mock-relay/requests.jsonl
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" > /tmp/mock-relay/server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8765/health >/dev/null; then echo "server up"; break; fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8765/health || { cat /tmp/mock-relay/server.log; exit 1; }
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:8765/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=mock-request-token" >> "$GITHUB_ENV"
+          echo "NO_PROXY=127.0.0.1,localhost" >> "$GITHUB_ENV"
+          echo "no_proxy=127.0.0.1,localhost" >> "$GITHUB_ENV"
+
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0e797b5a6acf1234567890abcdef1234567890ab
+          event-type: nightly
+          job-name: build-cpu
+          artifact-url: https://example.com/artifacts/123
+          test-results: '{"passed": 10, "failed": 0, "skipped": 2}'
+          triage-verdict: '{"schema_version": 1, "category": "unknown", "confidence": "low", "summary": "nothing failed"}'
+          callback-url: http://127.0.0.1:8765/github/callback/
+
+      - name: Assert recorded callback payload
+        run: |
+          cat /tmp/mock-relay/requests.jsonl || true
+          python3 - <<'EOF'
+          import json, sys
+          reqs = [json.loads(l) for l in open("/tmp/mock-relay/requests.jsonl") if l.strip()]
+          gets = [r for r in reqs if r["method"] == "GET"]
+          posts = [r for r in reqs if r["method"] == "POST"]
+          def fail(msg):
+              print("FAIL: " + msg); sys.exit(1)
+          if not gets: fail("OIDC token endpoint was never called")
+          if len(posts) != 1: fail(f"expected 1 POST, got {len(posts)}")
+          p = posts[0]
+          if p["path"] != "/github/callback": fail(f"unexpected path {p['path']!r} (trailing slash should be stripped)")
+          if p["authorization"] != "Bearer mock-oidc-token-12345": fail("authorization header does not carry the OIDC token")
+          body = json.loads(p["body"])
+          print(json.dumps(body, indent=2))
+          if body.get("event_type") != "nightly": fail("event_type")
+          if body.get("delivery_id") != "0e797b5a6acf1234567890abcdef1234567890ab": fail("delivery_id")
+          if body["payload"]["head_sha"] != body["delivery_id"]: fail("head_sha")
+          if body["payload"]["repository"]["full_name"] != "pytorch/pytorch": fail("repository full_name")
+          w = body["workflow"]
+          checks = {
+              "schema_version": "1",
+              "status": "completed",
+              "conclusion": "success",
+              "job_name": "build-cpu",
+              "name": "Test nightly completed callback",
+              "artifact_url": "https://example.com/artifacts/123",
+          }
+          for k, v in checks.items():
+              if w.get(k) != v: fail(f"workflow.{k} = {w.get(k)!r}, expected {v!r}")
+          if w.get("test_results") != {"passed": 10, "failed": 0, "skipped": 2}: fail("test_results")
+          if w.get("triage_verdict", {}).get("category") != "unknown": fail("triage_verdict")
+          if not w.get("started_at") or not w.get("completed_at"): fail("started_at/completed_at should be set for nightly completed")
+          if not w.get("check_run_id"): fail("check_run_id empty")
+          if "/actions/runs/" not in w.get("url", ""): fail("workflow url")
+          print("PASS")
+          EOF

@@ -1,0 +1,36 @@
+name: Test basic usage (system python)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Allow pip installs into system python on PEP 668 images
+      PIP_BREAK_SYSTEM_PACKAGES: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert runners-info output is non-empty valid JSON
+        env:
+          ACTUAL: ${{ steps.action.outputs.runners-info }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ -z "$ACTUAL" ]; then
+            echo "FAIL: runners-info is empty"
+            exit 1
+          fi
+          if ! printf '%s' "$ACTUAL" | python3 -c 'import json,sys; json.load(sys.stdin)'; then
+            echo "FAIL: runners-info is not valid JSON"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert DEVICE_NAME and DEVICE_TYPE exported
+        run: |
+          echo "DEVICE_NAME=$DEVICE_NAME"
+          echo "DEVICE_TYPE=$DEVICE_TYPE"
+          case "$DEVICE_NAME" in
+            cpu|arm64-cpu|cuda|rocm|hpu) ;;
+            *) echo "FAIL: unexpected DEVICE_NAME '$DEVICE_NAME'"; exit 1 ;;
+          esac
+          echo "PASS"

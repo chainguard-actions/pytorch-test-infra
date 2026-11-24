@@ -1,0 +1,71 @@
+name: Test all buildx inputs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/usr/bin/env bash
+          log=/tmp/fake-docker.log
+          { echo "---CALL---"; printf '%s\n' "$@"; } >> "$log"
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          rm -f /tmp/fake-docker.log
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: |
+            ghcr.io/example/full:v1
+
+            ghcr.io/example/full:v1-extra
+          context: some/ctx
+          file: some/ctx/Dockerfile.custom
+          target: runtime
+          build-args: |
+            FOO=bar
+            BAZ=qux quux
+          labels: |
+            org.opencontainers.image.title=full
+            maintainer=test
+          cache-from: |
+            type=registry,ref=ghcr.io/example/full:cache
+          cache-to: |
+            type=registry,ref=ghcr.io/example/full:cache,mode=max
+          connect-delay: '0'
+      - name: Assert image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/full:v1" ]; then
+            echo "FAIL: expected ghcr.io/example/full:v1"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert buildx arguments
+        run: |
+          log=/tmp/fake-docker.log
+          cat "$log"
+          fail=0
+          check() { grep -Fxq -- "$1" "$log" || { echo "FAIL: missing '$1'"; fail=1; }; }
+          check "--file"; check "some/ctx/Dockerfile.custom"
+          check "--target"; check "runtime"
+          check "--build-arg"; check "FOO=bar"; check "BAZ=qux quux"
+          check "--label"; check "org.opencontainers.image.title=full"; check "maintainer=test"
+          check "--cache-from"; check "type=registry,ref=ghcr.io/example/full:cache"
+          check "--cache-to"; check "type=registry,ref=ghcr.io/example/full:cache,mode=max"
+          check "--push"
+          check "ghcr.io/example/full:v1-extra"
+          [ "$(grep -Fxc -- "--tag" "$log")" = "2" ] || { echo "FAIL: expected 2 --tag"; fail=1; }
+          [ "$(grep -Fxc -- "--build-arg" "$log")" = "2" ] || { echo "FAIL: expected 2 --build-arg"; fail=1; }
+          [ "$(grep -Fxc -- "--label" "$log")" = "2" ] || { echo "FAIL: expected 2 --label"; fail=1; }
+          [ "$(tail -n1 "$log")" = "some/ctx" ] || { echo "FAIL: context should be last arg"; fail=1; }
+          [ "$fail" = "0" ] || exit 1
+          echo "PASS"

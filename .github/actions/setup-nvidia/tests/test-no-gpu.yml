@@ -1,0 +1,45 @@
+name: Test no GPU runner
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure no container markers
+        run: |
+          if [ "$(id -u)" = 0 ]; then rm -f /.inarc /.incontainer; else sudo rm -f /.inarc /.incontainer || true; fi
+      - id: action
+        uses: .
+      - name: Assert has-nvidia is false
+        env:
+          ACTUAL: ${{ steps.action.outputs.has-nvidia }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "false" ]; then
+            echo "FAIL: expected 'false'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert in-container-runner is false
+        env:
+          ACTUAL: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "false" ]; then
+            echo "FAIL: expected 'false'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert exported env
+        run: |
+          echo "HAS_NVIDIA_GPU=${HAS_NVIDIA_GPU:-<unset>} GPU_FLAG=${GPU_FLAG:-<unset>}"
+          if [ "${HAS_NVIDIA_GPU:-}" != "false" ]; then
+            echo "FAIL: expected HAS_NVIDIA_GPU=false"
+            exit 1
+          fi
+          if [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG should be unset"
+            exit 1
+          fi
+          echo "PASS"

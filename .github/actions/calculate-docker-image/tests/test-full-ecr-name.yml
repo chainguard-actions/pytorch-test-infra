@@ -1,0 +1,33 @@
+name: Test full ECR image name passthrough
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs (no real ECR under act)
+        run: |
+          mkdir -p /tmp/fakebin
+          printf '#!/bin/sh\necho fake-password\nexit 0\n' > /tmp/fakebin/aws
+          printf '#!/bin/sh\necho "docker $*" >> /tmp/fake-docker-calls.txt\nexit 0\n' > /tmp/fakebin/docker
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: example.registry.local/my-repo/myimage:abc123
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: example.registry.local
+          repo-name: my-repo
+          always-rebuild: "true"
+      - name: Assert full name returned unchanged
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "example.registry.local/my-repo/myimage:abc123" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"
