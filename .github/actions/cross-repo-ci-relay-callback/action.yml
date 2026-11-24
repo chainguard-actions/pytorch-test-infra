@@ -183,7 +183,7 @@ runs:
           "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
     - name: Mint OIDC token
       id: oidc
-      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+      uses: chainguard-actions/actions-github-script@5ae8e66bc55d3cfc641b4dd912088e3996b815c2 # v9
       with:
         script: |
           // NB: Retry here because the ID token endpoint can fail with
