@@ -10,49 +10,39 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--setup-linux/v20261027-001733** was hardened automatically. 3 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--setup-linux/v20261027-001733** was hardened automatically. 2 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-The composite step uses a branch ref instead of a full commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Pin it to a 40-character commit SHA.
+Composite step references an action by a mutable branch instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`.
 
 Locations:
 
-- `action.yml:95`
+- `action.yml:90`
 
 ### github-env-injection (severity: high)
 
-The 'Setup useful environment variables' step writes values built from the inherited process env var RUNNER_TEMP to $GITHUB_ENV. The script does not set RUNNER_TEMP itself. The writes are `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"` and the same pattern for RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR. None of them run `printf '%s' ... | tr -d '\n\r'` first. RUNNER_TEMP is normally set by the runner. The check treats any env var a composite action inherits as workflow-controlled, so these writes need the sanitization step.
+Step 'Setup useful environment variables' writes values built from the inherited process env var RUNNER_TEMP (RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR, RUNNER_DOCS_DIR) to $GITHUB_ENV, e.g. `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"`. RUNNER_TEMP is not set by this script, and the values are not run through `printf '%s' ... | tr -d '\n\r'` before the write.
 
 Locations:
 
-- `action.yml:63`
-- `action.yml:68`
-- `action.yml:73`
-
-### static-arg-collapse (severity: medium)
-
-argument collapse in step "Set GPU_FLAG if in a container that has a NVIDIA GPU": a flag and its value are stored together in one variable and written to GITHUB_OUTPUT/GITHUB_ENV; when expanded double-quoted they become a single argument and the command never sees the bare flag. Build the command with a bash array (e.g. args=(); [ -n "$VAL" ] && args+=(--flag "$VAL"); cmd "${args[@]}") so each token stays a separate, quoted argument
-
-Locations:
-
-- `action.yml:99`
+- `action.yml:66`
+- `action.yml:71`
+- `action.yml:76`
 
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses, github-env-injection, static-arg-collapse
+**Fixes applied:** unpinned-uses, github-env-injection
 
 **Notes:**
 
-I fixed all three findings in action.yml.
+I fixed both findings in action.yml. I haven't run the action or any tests on these changes.
 
-1. unpinned-uses: `pytorch/test-infra/.github/actions/setup-nvidia@main` is now pinned to the upstream commit this mirror was built from, `9206d491d3a5507163cb9d5b77040d4c3ef5e038` (checked with lookup_action_sha). The `# main` comment is kept for readability.
+1. Unpinned action: the step `pytorch/test-infra/.github/actions/setup-nvidia@main` now points at the full commit SHA 9206d491d3a5507163cb9d5b77040d4c3ef5e038, with a comment saying it was upstream main at build time. I took that SHA from the request's upstream_commit, which is the commit this setup-linux action was built from. I didn't use lookup_action_sha, because today's main may no longer match that build. The NVIDIA setup no longer follows upstream main and stays fixed at that commit.
 
-2. github-env-injection: the step now strips newlines from RUNNER_TEMP once, using `printf '%s' | tr -d '\n\r'`, and strips them again from each directory path just before it is written to GITHUB_ENV. The paths are unchanged under normal conditions.
-
-3. static-arg-collapse: GPU_FLAG is now built from a bash array (`--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all`) and joined with spaces when written to GITHUB_ENV, so the value is exactly what it was. I did not split it into separate env vars: workflows that call this action expect one GPU_FLAG and expand it unquoted in `docker run`, which splits it into separate arguments, so changing its form would break them. A rerun of the check may still flag this, since the written value is the same flag-plus-value string.
+2. Unsafe writes to GITHUB_ENV: in the 'Setup useful environment variables' step, RUNNER_TEMP now has newlines and carriage returns removed before it is used. RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR are each cleaned the same way just before they are written to $GITHUB_ENV. Each value is captured in a plain assignment, so if a command fails the step still stops as before. On a normal runner the paths and directories created are the same as before.
 
