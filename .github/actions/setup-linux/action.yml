@@ -80,20 +80,20 @@ runs:
         RUNNER_ARTIFACT_DIR="${RUNNER_TEMP}/artifacts"
         sudo rm -rf "${RUNNER_ARTIFACT_DIR}"
         mkdir -p "${RUNNER_ARTIFACT_DIR}"
-        safe_dir=$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')
-        echo "RUNNER_ARTIFACT_DIR=${safe_dir}" >> "${GITHUB_ENV}"
+        safe_artifact_dir=$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')
+        echo "RUNNER_ARTIFACT_DIR=${safe_artifact_dir}" >> "${GITHUB_ENV}"
 
         RUNNER_TEST_RESULTS_DIR="${RUNNER_TEMP}/test-results"
         sudo rm -rf "${RUNNER_TEST_RESULTS_DIR}"
         mkdir -p "${RUNNER_TEST_RESULTS_DIR}"
-        safe_dir=$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')
-        echo "RUNNER_TEST_RESULTS_DIR=${safe_dir}" >> "${GITHUB_ENV}"
+        safe_test_results_dir=$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')
+        echo "RUNNER_TEST_RESULTS_DIR=${safe_test_results_dir}" >> "${GITHUB_ENV}"
 
         RUNNER_DOCS_DIR="${RUNNER_TEMP}/docs"
         sudo rm -rf "${RUNNER_DOCS_DIR}"
         mkdir -p "${RUNNER_DOCS_DIR}"
-        safe_dir=$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')
-        echo "RUNNER_DOCS_DIR=${safe_dir}" >> "${GITHUB_ENV}"
+        safe_docs_dir=$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')
+        echo "RUNNER_DOCS_DIR=${safe_docs_dir}" >> "${GITHUB_ENV}"
 
     - name: Needs nvidia driver?
       if: ${{ steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false' }}
