@@ -77,21 +77,20 @@ runs:
       shell: bash
       working-directory: ${{ inputs.repository }}
       run: |
-        SAFE_RUNNER_TEMP=$(printf '%s' "${RUNNER_TEMP}" | tr -d '\n\r')
-        RUNNER_ARTIFACT_DIR="${SAFE_RUNNER_TEMP}/artifacts"
+        RUNNER_ARTIFACT_DIR="${RUNNER_TEMP}/artifacts"
         sudo rm -rf "${RUNNER_ARTIFACT_DIR}"
         mkdir -p "${RUNNER_ARTIFACT_DIR}"
-        printf 'RUNNER_ARTIFACT_DIR=%s\n' "$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')" >> "${GITHUB_ENV}"
+        echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"
 
-        RUNNER_TEST_RESULTS_DIR="${SAFE_RUNNER_TEMP}/test-results"
+        RUNNER_TEST_RESULTS_DIR="${RUNNER_TEMP}/test-results"
         sudo rm -rf "${RUNNER_TEST_RESULTS_DIR}"
         mkdir -p "${RUNNER_TEST_RESULTS_DIR}"
-        printf 'RUNNER_TEST_RESULTS_DIR=%s\n' "$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')" >> "${GITHUB_ENV}"
+        echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR}" >> "${GITHUB_ENV}"
 
-        RUNNER_DOCS_DIR="${SAFE_RUNNER_TEMP}/docs"
+        RUNNER_DOCS_DIR="${RUNNER_TEMP}/docs"
         sudo rm -rf "${RUNNER_DOCS_DIR}"
         mkdir -p "${RUNNER_DOCS_DIR}"
-        printf 'RUNNER_DOCS_DIR=%s\n' "$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')" >> "${GITHUB_ENV}"
+        echo "RUNNER_DOCS_DIR=${RUNNER_DOCS_DIR}" >> "${GITHUB_ENV}"
 
     - name: Needs nvidia driver?
       if: ${{ steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false' }}
@@ -105,7 +104,7 @@ runs:
         echo "does=${needs}" >> $GITHUB_OUTPUT
 
     - name: Install nvidia driver, nvidia-docker runtime, set GPU_FLAG
-      uses: pytorch/test-infra/.github/actions/setup-nvidia@bd1d492a2fc0fbc2310fe4ebc4c4250abdbbf25c # main (upstream commit this version was built from)
+      uses: pytorch/test-infra/.github/actions/setup-nvidia@bd1d492a2fc0fbc2310fe4ebc4c4250abdbbf25c # main
       if: ${{ steps.needs-nvidia-driver.outputs.does == 1 && steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false'}}
 
     - name: Set GPU_FLAG if in a container that has a NVIDIA GPU

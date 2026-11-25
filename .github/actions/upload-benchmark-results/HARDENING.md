@@ -16,20 +16,20 @@ Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v202611
 
 ### unpinned-uses (severity: high)
 
-action.yml has composite steps that point at a mutable branch instead of a full 40-character commit SHA: (1) 'uses: pytorch/test-infra/.github/actions/setup-uv@main' (2) 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main'. Anyone who can push to that branch can change the code these steps run. Pin each one to a commit SHA.
+action.yml has composite steps that point at a mutable branch ref instead of a full 40-character commit SHA: line 31 'uses: pytorch/test-infra/.github/actions/setup-uv@main' and line 115 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main'.
 
 Locations:
 
-- `action.yml:30`
-- `action.yml:114`
+- `action.yml:31`
+- `action.yml:115`
 
 ### github-env-injection (severity: high)
 
-The 'Install dependencies' step writes 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. RUNNER_TEMP is an inherited process env var that this run script reads but does not set, so under this check it counts as workflow-controlled. The value goes into $GITHUB_ENV without the printf '%s' ... | tr -d '\n\r' cleanup, so a value containing a newline could inject extra env lines. Clean it first, e.g. safe=$(printf '%s' "${RUNNER_TEMP}/benchmark-upload-venv" | tr -d '\n\r'); echo "VIRTUAL_ENV=$safe" >> "$GITHUB_ENV".
+The 'Install dependencies' step runs 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. RUNNER_TEMP is inherited from the process environment, not set in this run: script, and it goes into $GITHUB_ENV without the printf '%s' ... | tr -d '\n\r' sanitization step. The runner normally sets RUNNER_TEMP, so the real risk is low, but the check counts any inherited env var as untrusted. Fix: compute the value, sanitize it (safe=$(printf '%s' "$VIRTUAL_ENV" | tr -d '\n\r')), then write it to "$GITHUB_ENV".
 
 Locations:
 
-- `action.yml:40`
+- `action.yml:41`
 
 ## Iteration Notes
 
@@ -39,5 +39,5 @@ Locations:
 
 **Notes:**
 
-Pinned both pytorch/test-infra sub-actions (setup-uv, get-workflow-job-id) to bd1d492a2fc0fbc2310fe4ebc4c4250abdbbf25c, the upstream commit this version was built from (verified with lookup_action_sha). The VIRTUAL_ENV value now has newlines stripped with printf | tr -d '\n\r' before it is written to $GITHUB_ENV, which is now quoted.
+Pinned pytorch/test-infra setup-uv and get-workflow-job-id to the upstream commit bd1d492a2fc0fbc2310fe4ebc4c4250abdbbf25c, the commit this action version was built from, which keeps the sub-actions in step with the scripts used here. The VIRTUAL_ENV value now has newlines stripped (printf | tr -d '\n\r') before it is written to the quoted "$GITHUB_ENV". Not tested by running the action. The DEVICE_NAME and DEVICE_TYPE writes to $GITHUB_ENV were not flagged and still go in unsanitized; DEVICE_TYPE comes from command output, so it could get the same newline stripping if a later check flags it.
 
