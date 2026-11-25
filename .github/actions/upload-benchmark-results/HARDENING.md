@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v202610
 
 ### unpinned-uses (severity: high)
 
-action.yml has composite steps that pin actions to a mutable branch instead of a full 40-character commit SHA: line 31 `uses: pytorch/test-infra/.github/actions/setup-uv@main` and line 115 `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
+Two composite steps in action.yml point at a branch instead of a full 40-character commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main'. Whoever controls that branch can change the code these steps run.
 
 Locations:
 
@@ -25,7 +25,7 @@ Locations:
 
 ### github-env-injection (severity: high)
 
-The 'Install dependencies' step writes `echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV`. RUNNER_TEMP is an inherited process env var that the script reads but does not set. This check treats any such var in a composite action as untrusted. It is written to $GITHUB_ENV without first running it through `printf '%s' ... | tr -d '\n\r'`. The fix is to sanitize the value into a local variable and write that to "$GITHUB_ENV".
+The 'Install dependencies' step writes 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. RUNNER_TEMP comes from the process environment this composite action inherits; the script reads it rather than computing it. Nothing strips newlines before the write (no printf '%s' ... | tr -d '\n\r'), so the check's rule for inherited env vars applies. The runner normally sets RUNNER_TEMP itself, so the real-world risk is low, but the check's criterion is not met.
 
 Locations:
 
@@ -41,8 +41,8 @@ Locations:
 
 I fixed both findings in action.yml.
 
-- unpinned-uses: the two sub-actions (setup-uv and get-workflow-job-id) were on @main. They are now pinned to 9206d491d3a5507163cb9d5b77040d4c3ef5e038, the upstream commit this mirror version was built from, with a '# main' comment. That keeps them in step with the rest of the action. Current main (058f82ec7cd2fb6cbe66f44cccd28a8c8861b072) was not used.
-- github-env-injection: in the 'Install dependencies' step, the VIRTUAL_ENV value is now passed through printf '%s' ... | tr -d '\n\r' before it is written to "$GITHUB_ENV", and $GITHUB_ENV is now quoted.
+- unpinned-uses: The setup-uv and get-workflow-job-id steps used to point at @main. Both now point at pytorch/test-infra@9206d491d3a5507163cb9d5b77040d4c3ef5e038 with a '# main (v20261027-001733)' comment. I checked with lookup_action_sha that this commit exists. It is the upstream commit this action version was built from, so the two sub-actions run at the same snapshot as the action itself. The current tip of main is a different, newer commit (d50cbade).
+- github-env-injection: In 'Install dependencies', the VIRTUAL_ENV value now goes through printf '%s' | tr -d '\n\r' before it is written to $GITHUB_ENV, and $GITHUB_ENV is now quoted.
 
-Nothing was run to test these changes.
+Nothing else in the action was changed. The DEVICE_NAME and DEVICE_TYPE writes to $GITHUB_ENV were not flagged, so I left them as they were. DEVICE_TYPE comes from command output and is not stripped of newlines.
 

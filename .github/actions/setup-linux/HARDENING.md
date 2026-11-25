@@ -16,19 +16,19 @@ Action **pytorch--test-infra--.github--actions--setup-linux/v20261027-001733** w
 
 ### unpinned-uses (severity: high)
 
-The composite step points to a branch, not a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Whatever is on that branch runs, so a change upstream changes what this action does. Pin it to a commit SHA.
+action.yml uses a branch ref instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Pin it to a commit SHA.
 
 Locations:
 
-- `action.yml:90`
+- `action.yml:91`
 
 ### github-env-injection (severity: high)
 
-The 'Setup useful environment variables' step builds RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR from the inherited process env var RUNNER_TEMP. The script reads RUNNER_TEMP but does not set it, so the check treats it as coming from the calling workflow. These values are written to $GITHUB_ENV (e.g. `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"`) without first running `printf '%s' ... | tr -d '\n\r'`.
+The 'Setup useful environment variables' step builds RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR from the inherited env var RUNNER_TEMP. This script does not set RUNNER_TEMP, so the calling workflow controls it. The values are written to $GITHUB_ENV without the `printf '%s' ... | tr -d '\n\r'` step first, e.g. `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"`.
 
 Locations:
 
-- `action.yml:66`
+- `action.yml:63`
 
 ## Iteration Notes
 
@@ -38,5 +38,5 @@ Locations:
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/setup-nvidia from @main to 9206d491d3a5507163cb9d5b77040d4c3ef5e038, the commit this mirror version (v20261027-001733) was built from; lookup_action_sha confirmed the tag resolves to that commit. In 'Setup useful environment variables', RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR now have newlines and carriage returns stripped (printf '%s' | tr -d '\n\r') before being written to $GITHUB_ENV. The shell variables used for rm and mkdir are unchanged. Not tested; I only edited action.yml.
+Pinned pytorch/test-infra/.github/actions/setup-nvidia to 9206d491d3a5507163cb9d5b77040d4c3ef5e038 (# main), the upstream commit this mirror version comes from. The three RUNNER_*_DIR values are now stripped of newlines with printf '%s' | tr -d '\n\r' before being written to $GITHUB_ENV.
 
