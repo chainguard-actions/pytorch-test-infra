@@ -10,34 +10,34 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v20261125-022556** was hardened automatically. 1 finding(s) were identified and resolved across 2 iteration(s).
+Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v20261125-022556** was hardened automatically. 2 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-Two composite steps in action.yml point at a mutable branch (@main) instead of a full 40-character commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' (line 31) and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main' (line 115). Whoever controls that branch can change the code these steps run, which makes this a supply-chain risk. The second step also receives inputs.github-token.
+action.yml has composite steps whose uses: refs point to a mutable branch instead of a 40-char commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' (line 31) and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main' (line 115).
 
 Locations:
 
 - `action.yml:31`
 - `action.yml:115`
 
+### github-env-injection (severity: high)
+
+The 'Install dependencies' step writes a value built from the inherited process env var RUNNER_TEMP to $GITHUB_ENV without sanitizing it first: 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. The script reads RUNNER_TEMP but does not set it, and a composite action inherits its env from the calling workflow, so the check treats it as workflow-controlled. Fix: run it through printf '%s' ... | tr -d '\n\r' before the write, and quote "$GITHUB_ENV".
+
+Locations:
+
+- `action.yml:41`
+
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses
+**Fixes applied:** unpinned-uses, github-env-injection
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/setup-uv and get-workflow-job-id from @main to 13fc79c71b9a7c86a46d898782991a6418778f0b, the upstream commit this version was built from. I checked the SHA with lookup_action_sha, and each line keeps a trailing comment naming the ref. Nothing else in the file was changed.
-
-### Iteration 2
-
-**Fixes applied:** github-env-injection
-
-**Notes:**
-
-In action.yml, the 'Install dependencies' step no longer writes VIRTUAL_ENV straight to $GITHUB_ENV. It now runs the value through printf '%s' ... | tr -d '\n\r', saves it as safe_venv, and writes that to the quoted "$GITHUB_ENV". I also changed one write the finding didn't list: 'Get device type' puts command output into DEVICE_TYPE before writing it to $GITHUB_ENV, so it now strips newlines in the same way. I quoted $GITHUB_ENV in the DEVICE_NAME write too; that value is always one of a few fixed words. Each command still runs in its own assignment, so a failing command still stops the step. I didn't test any of these changes.
+Pinned both pytorch/test-infra sub-action uses: refs (setup-uv, get-workflow-job-id) to the upstream commit 13fc79c71b9a7c86a46d898782991a6418778f0b, which I checked with lookup_action_sha. That's the same commit this mirror version was built from. In the 'Install dependencies' step, the VIRTUAL_ENV value now goes through printf '%s' | tr -d '\n\r' before it's written, and "$GITHUB_ENV" is quoted. Nothing was run to test the edited action.yml.
 

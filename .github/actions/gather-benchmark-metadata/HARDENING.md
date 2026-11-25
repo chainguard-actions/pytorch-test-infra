@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Gather the metadata' step puts the expression ${{ inputs.venv }} straight into the run: script, in `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script text before the shell runs it, so a crafted venv input can break out of the quotes and run commands. Fix: pass it in through env (for example VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
+Rule (a): the 'Gather the metadata' step puts the expression ${{ inputs.venv }} straight into the run: script. The lines are `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script text before the shell parses it, so a crafted venv input can break out of the quotes and run arbitrary commands. Fix: move it into env (VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
 
 Locations:
 
@@ -25,7 +25,7 @@ Locations:
 
 ### unpinned-uses (severity: high)
 
-A composite step uses a mutable branch ref instead of a full commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
+A composite step references an action by a mutable branch instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
 
 Locations:
 
@@ -55,5 +55,5 @@ Locations:
 
 **Notes:**
 
-I moved inputs.venv into the step's env block as VENV. The script now uses "${VENV}" for both the -n check and the source line. I pinned pytorch/test-infra/.github/actions/get-workflow-job-id to commit 13fc79c71b9a7c86a46d898782991a6418778f0b, with a '# main' comment. That commit is the one this version was built from (upstream_commit), so the sub-action matches the release. Current main resolves to 8cd319865066bf94e5be2b0180d081175095c980, but I didn't use it so the pin wouldn't move ahead of the release. Nothing was run to test the changes.
+Moved inputs.venv into the step env as VENV and referenced as "${VENV}". Pinned pytorch/test-infra/.github/actions/get-workflow-job-id to the upstream commit 13fc79c71b9a7c86a46d898782991a6418778f0b (verified via lookup), matching the version this mirror was built from.
 
