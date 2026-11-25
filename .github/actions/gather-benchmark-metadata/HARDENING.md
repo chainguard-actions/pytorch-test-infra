@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ### unpinned-uses (severity: high)
 
-action.yml has a composite step that points to a branch instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
+action.yml references an action by a mutable branch instead of a full commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a), direct expression interpolation: the 'Gather the metadata' run block puts `${{ inputs.venv }}` straight into the shell script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script text before the shell runs, so a crafted input can inject commands. Fix: pass the input through an env var (for example `VENV: ${{ inputs.venv }}`) and use "$VENV" in quotes.
+Rule (a) violation in the 'Gather the metadata' step: the expression `${{ inputs.venv }}` is placed directly inside the run: script, at `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script before the shell parses it, so a crafted input can run arbitrary commands. Fix: add `VENV: ${{ inputs.venv }}` to the step's env: block and use "$VENV" in the script.
 
 Locations:
 
@@ -55,8 +55,5 @@ Locations:
 
 **Notes:**
 
-I fixed all four findings in action.yml. I haven't run the action to test the changes.
-
-- **Unpinned action:** `pytorch/test-infra/.github/actions/get-workflow-job-id@main` now points at commit `8c9ea89f444b15c5ce4bb833a0cfed044a2667f7`, with a `# main` comment kept for readability. That is the upstream commit this version was built from. I confirmed the commit exists with lookup_action_sha.
-- **Script injection (one script-injection finding and both static-inline-injection findings):** `inputs.venv` now goes into the step's `env:` block as `VENV`. The script uses `"${VENV}"` in quotes in both the empty check and the `source` line, so the input can no longer be run as shell code.
+Pinned the get-workflow-job-id action to the upstream commit 8c9ea89f444b15c5ce4bb833a0cfed044a2667f7, which lookup_action_sha confirmed exists. This is the commit this version was built from, used in place of the moving main branch. In the 'Gather the metadata' step, moved inputs.venv into the step's env: block as VENV, and the script now uses "${VENV}" in both the -n check and the source line. Not tested at runtime.
 
