@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v202611
 
 ### unpinned-uses (severity: high)
 
-Two composite action steps reference another action by the `main` branch instead of a full 40-character commit SHA. Whoever controls that branch can change the code these steps run. Failing lines: `uses: pytorch/test-infra/.github/actions/setup-uv@main` (line 31) and `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main` (line 115).
+Two composite steps in action.yml point at a mutable branch (@main) instead of a full 40-character commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' (line 31) and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main' (line 115). Whoever controls that branch can change the code these steps run, which makes this a supply-chain risk. The second step also receives inputs.github-token.
 
 Locations:
 
@@ -31,7 +31,7 @@ Locations:
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/setup-uv and get-workflow-job-id from @main to the upstream commit 13fc79c71b9a7c86a46d898782991a6418778f0b (the commit this action version was built from), keeping a '# main' comment.
+Pinned pytorch/test-infra/.github/actions/setup-uv and get-workflow-job-id from @main to 13fc79c71b9a7c86a46d898782991a6418778f0b, the upstream commit this version was built from. I checked the SHA with lookup_action_sha, and each line keeps a trailing comment naming the ref. Nothing else in the file was changed.
 
 ### Iteration 2
 
@@ -39,5 +39,5 @@ Pinned pytorch/test-infra/.github/actions/setup-uv and get-workflow-job-id from 
 
 **Notes:**
 
-In action.yml, the 'Install dependencies' step now strips newlines and carriage returns from the VIRTUAL_ENV value (${RUNNER_TEMP}/benchmark-upload-venv) using tr -d '\n\r' before writing it to "$GITHUB_ENV", and $GITHUB_ENV is now quoted. I made the same change to the DEVICE_TYPE write in 'Get device type' because that value comes from command output. No other behaviour changed. I haven't run the action or any tests.
+In action.yml, the 'Install dependencies' step no longer writes VIRTUAL_ENV straight to $GITHUB_ENV. It now runs the value through printf '%s' ... | tr -d '\n\r', saves it as safe_venv, and writes that to the quoted "$GITHUB_ENV". I also changed one write the finding didn't list: 'Get device type' puts command output into DEVICE_TYPE before writing it to $GITHUB_ENV, so it now strips newlines in the same way. I quoted $GITHUB_ENV in the DEVICE_NAME write too; that value is always one of a few fixed words. Each command still runs in its own assignment, so a failing command still stops the step. I didn't test any of these changes.
 
