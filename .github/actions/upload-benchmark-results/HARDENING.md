@@ -10,34 +10,26 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v20261112-155209** was hardened automatically. 2 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v20261112-155209** was hardened automatically. 1 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-Two composite action steps point to a mutable branch instead of a full 40-character commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' (line 31) and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main' (line 115). Pin each one to a commit SHA.
+action.yml has composite steps whose `uses:` refs point at a mutable branch instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-uv@main` (line 31) and `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main` (line 115). The second step is passed `inputs.github-token`. Pin both to a commit SHA.
 
 Locations:
 
 - `action.yml:31`
 - `action.yml:115`
 
-### github-env-injection (severity: high)
-
-The 'Install dependencies' step runs 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. RUNNER_TEMP comes from the process environment and is not set inside this run: script. A composite action inherits its environment from the calling workflow, so under this check RUNNER_TEMP counts as workflow-controlled. It is written to $GITHUB_ENV without the required sanitization (printf '%s' ... | tr -d '\n\r'). Strip CR/LF from the value first, and quote "$GITHUB_ENV".
-
-Locations:
-
-- `action.yml:41`
-
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses, github-env-injection
+**Fixes applied:** unpinned-uses
 
 **Notes:**
 
-Pinned both pytorch/test-infra sub-actions (setup-uv, get-workflow-job-id) from @main to commit 6f7274a0eff04dd4f8ada574e4e144610cece2c8, the upstream commit this version was built from, so the sub-actions match the release. The commit SHA was checked with lookup_action_sha. In the 'Install dependencies' step, CR/LF are now stripped from the VIRTUAL_ENV value (printf | tr -d '\n\r') before it is written to "$GITHUB_ENV", which is now quoted.
+I pinned both pytorch/test-infra sub-action references in action.yml (setup-uv and get-workflow-job-id) to commit 6f7274a0eff04dd4f8ada574e4e144610cece2c8, with a '# main' comment to show the original ref. I used the request's upstream_commit rather than looking up the SHA. It is a real commit in pytorch/test-infra, and it is the one this version was built from, so the sub-actions match the rest of the action instead of the current tip of main. Nothing else was changed and nothing was run to test it.
 
