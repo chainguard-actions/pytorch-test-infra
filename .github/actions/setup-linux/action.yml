@@ -80,17 +80,20 @@ runs:
         RUNNER_ARTIFACT_DIR="${RUNNER_TEMP}/artifacts"
         sudo rm -rf "${RUNNER_ARTIFACT_DIR}"
         mkdir -p "${RUNNER_ARTIFACT_DIR}"
-        echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"
+        safe=$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')
+        echo "RUNNER_ARTIFACT_DIR=${safe}" >> "${GITHUB_ENV}"
 
         RUNNER_TEST_RESULTS_DIR="${RUNNER_TEMP}/test-results"
         sudo rm -rf "${RUNNER_TEST_RESULTS_DIR}"
         mkdir -p "${RUNNER_TEST_RESULTS_DIR}"
-        echo "RUNNER_TEST_RESULTS_DIR=${RUNNER_TEST_RESULTS_DIR}" >> "${GITHUB_ENV}"
+        safe=$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')
+        echo "RUNNER_TEST_RESULTS_DIR=${safe}" >> "${GITHUB_ENV}"
 
         RUNNER_DOCS_DIR="${RUNNER_TEMP}/docs"
         sudo rm -rf "${RUNNER_DOCS_DIR}"
         mkdir -p "${RUNNER_DOCS_DIR}"
-        echo "RUNNER_DOCS_DIR=${RUNNER_DOCS_DIR}" >> "${GITHUB_ENV}"
+        safe=$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')
+        echo "RUNNER_DOCS_DIR=${safe}" >> "${GITHUB_ENV}"
 
     - name: Needs nvidia driver?
       if: ${{ steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false' }}
@@ -104,7 +107,7 @@ runs:
         echo "does=${needs}" >> $GITHUB_OUTPUT
 
     - name: Install nvidia driver, nvidia-docker runtime, set GPU_FLAG
-      uses: pytorch/test-infra/.github/actions/setup-nvidia@f2f972bd8f3eab11aa0094897a81879653c6f141 # main
+      uses: pytorch/test-infra/.github/actions/setup-nvidia@f2f972bd8f3eab11aa0094897a81879653c6f141 # main (upstream v20261029-163400)
       if: ${{ steps.needs-nvidia-driver.outputs.does == 1 && steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false'}}
 
     - name: Set GPU_FLAG if in a container that has a NVIDIA GPU
@@ -113,12 +116,7 @@ runs:
       run: |
         if compgen -G "/dev/nvidia[0-9]" ; then
           echo "Found NVIDIA GPU device in /dev/nvidiaX, exporting GPU_FLAG"
-          # GPU_FLAG is a documented interface: consumers expand it UNQUOTED
-          # (docker run ${GPU_FLAG:-} ...) so it word-splits into separate
-          # arguments. Build it from an array of individual tokens; the value
-          # written is identical to upstream's.
-          gpu_args=(--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all)
-          printf 'GPU_FLAG=%s\n' "${gpu_args[*]}" >> "${GITHUB_ENV}"
+          echo "GPU_FLAG=--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all" >> "${GITHUB_ENV}"
         else
           echo "No NVIDIA GPU device found in /dev/nvidiaX, not exporting GPU_FLAG"
         fi

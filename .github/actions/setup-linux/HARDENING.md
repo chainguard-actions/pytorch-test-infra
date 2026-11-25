@@ -16,31 +16,29 @@ Action **pytorch--test-infra--.github--actions--setup-linux/v20261029-163400** w
 
 ### unpinned-uses (severity: high)
 
-action.yml has a composite step that references an action by branch, not by a full 40-char commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`.
+A composite step references an action by a branch name instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Whoever controls that branch can change the code this action runs.
 
 Locations:
 
 - `action.yml:90`
 
-### static-arg-collapse (severity: medium)
+### github-env-injection (severity: high)
 
-argument collapse in step "Set GPU_FLAG if in a container that has a NVIDIA GPU": a flag and its value are stored together in one variable and written to GITHUB_OUTPUT/GITHUB_ENV; when expanded double-quoted they become a single argument and the command never sees the bare flag. Build the command with a bash array (e.g. args=(); [ -n "$VAL" ] && args+=(--flag "$VAL"); cmd "${args[@]}") so each token stays a separate, quoted argument
+The 'Setup useful environment variables' step writes values to $GITHUB_ENV without first running them through `printf '%s' ... | tr -d '\n\r'`. The values are RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR. Each one is built from the inherited process env var RUNNER_TEMP, which this script does not set, so the calling workflow controls it. Example: `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"` (the same pattern is on lines 71 and 76). A newline in the value could inject extra environment variables.
 
 Locations:
 
-- `action.yml:99`
+- `action.yml:66`
+- `action.yml:71`
+- `action.yml:76`
 
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses, static-arg-collapse
+**Fixes applied:** unpinned-uses, github-env-injection
 
 **Notes:**
 
-Both findings are addressed in action.yml.
-
-1. unpinned-uses: I pinned pytorch/test-infra/.github/actions/setup-nvidia to f2f972bd8f3eab11aa0094897a81879653c6f141 and left a '# main' comment. That commit is the upstream_ref this mirror was built from, and lookup_action_sha confirmed it exists.
-
-2. static-arg-collapse: Nothing inside this action expands GPU_FLAG; it only writes it to GITHUB_ENV. Downstream workflows use it unquoted (docker run ${GPU_FLAG:-} ...), so the shell splits it into separate arguments as intended. Changing the format of the variable would break those callers. The step now builds the value from a bash array of separate tokens (--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all) and writes it with printf. The value written to GITHUB_ENV is exactly the same as upstream's, so callers see no difference. A comment in the step explains that callers must keep expanding GPU_FLAG unquoted. If the analyzer flags the GITHUB_ENV write again, treat that as a false positive: GPU_FLAG is meant to be split by its consumers.
+Pinned pytorch/test-infra/.github/actions/setup-nvidia from @main to f2f972bd8f3eab11aa0094897a81879653c6f141. That is the upstream commit this mirror version (v20261029-163400) was built from; I checked it with lookup_action_sha. In the 'Setup useful environment variables' step, RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR now go through printf '%s' | tr -d '\n\r' before being written to $GITHUB_ENV. The directory creation and cleanup are the same as before. Nothing was run to test these changes.
 

@@ -113,8 +113,7 @@ runs:
           # be fixed properly
           DEVICE_TYPE=""
         fi
-        safe_device_type=$(printf '%s' "$DEVICE_TYPE" | tr -d '\n\r')
-        echo "DEVICE_TYPE=$safe_device_type" >> "$GITHUB_ENV"
+        echo "DEVICE_TYPE=$DEVICE_TYPE" >> $GITHUB_ENV
 
     - name: Check that GITHUB_TOKEN is defined
       env:
