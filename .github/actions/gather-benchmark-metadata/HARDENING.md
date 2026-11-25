@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ### unpinned-uses (severity: high)
 
-action.yml has a composite step that points to a branch instead of a full 40-character commit SHA: 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main'. Whoever controls that branch can change the code this action runs.
+action.yml uses a branch ref, not a 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a), direct expression interpolation, in the 'Gather the metadata' step. The run: block puts the input expression straight into the shell script: 'if [[ -n "${{ inputs.venv }}" ]]; then' and 'source "${{ inputs.venv }}"'. GitHub substitutes the value into the script text before bash runs it, so a crafted venv value can break out of the quotes and run its own commands. Fix: map inputs.venv to an env: variable (e.g. VENV) and use "$VENV" in the script.
+Rule (a) violated in the 'Gather the metadata' step: the expression `${{ inputs.venv }}` is placed directly in the run: script, at `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. Move it into an env: variable (e.g. VENV: ${{ inputs.venv }}) and use "$VENV" with double quotes.
 
 Locations:
 
@@ -55,5 +55,5 @@ Locations:
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/get-workflow-job-id to commit 0569df511711f70601c984fe3a93dac324afc9ce (the upstream commit this mirror was built from), with a '# main' comment. Moved inputs.venv into the step's env: block as VENV, and the script now reads "${VENV}" in both places.
+Pinned pytorch/test-infra/.github/actions/get-workflow-job-id to commit 0569df511711f70601c984fe3a93dac324afc9ce, the upstream commit this mirror version was built from (# main). I didn't resolve the current main with lookup_action_sha; I used this commit so the nested action matches the rest of the release. Moved ${{ inputs.venv }} into the step's env: block as VENV, and the script now uses "${VENV}" in the -n check and the source line. Nothing has been run or tested.
 
