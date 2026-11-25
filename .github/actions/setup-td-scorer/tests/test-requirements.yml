@@ -1,0 +1,44 @@
+name: Test requirements.txt dependencies are installed
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide tools/torchci from committed fixture if missing
+        id: prep
+        run: |
+          if [ -f tools/torchci/requirements.txt ]; then
+            echo "fake=false" >> "$GITHUB_OUTPUT"
+          else
+            mkdir -p tools
+            rm -rf tools/torchci
+            cp -r tests/fixtures/torchci tools/torchci
+            echo "fake=true" >> "$GITHUB_OUTPUT"
+          fi
+      - id: action
+        uses: .
+      - name: Assert every requirement is installed
+        run: |
+          cat tools/torchci/requirements.txt
+          python -m pip check || echo "(pip check reported issues; continuing)"
+          # every non-comment, non-option requirement name must be installed
+          FAILED=0
+          grep -vE '^\s*(#|-|$)' tools/torchci/requirements.txt \
+            | sed -E 's/[;<>=!~\[ @].*//' | while read -r pkg; do
+              [ -z "$pkg" ] && continue
+              if python -m pip show "$pkg" >/dev/null 2>&1; then
+                echo "installed: $pkg"
+              else
+                echo "FAIL: requirement $pkg not installed"
+                exit 1
+              fi
+            done || FAILED=1
+          if [ "$FAILED" -ne 0 ]; then exit 1; fi
+          echo "PASS"
+      - name: Assert fixture requirement importable
+        if: steps.prep.outputs.fake == 'true'
+        run: |
+          python -c 'import six; print("six", six.__version__)' || { echo "FAIL: six not importable"; exit 1; }
+          echo "PASS"

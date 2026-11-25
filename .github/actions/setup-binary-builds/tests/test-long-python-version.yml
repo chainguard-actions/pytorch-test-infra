@@ -1,0 +1,57 @@
+name: Test long python version is shortened in artifact name
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: pytorch/test-infra
+      REF: main
+      PACKAGE_TYPE: wheel
+      PYTHON_VERSION: "3.12"
+      GPU_ARCH_TYPE: cpu
+      GPU_ARCH_VERSION: ""
+      CU_VERSION: cpu
+      CHANNEL: nightly
+      ARCH: x86_64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # The action installs ${GITHUB_WORKSPACE}/test-infra/tools/pkg-helpers
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          submodules: "false"
+          setup-miniconda: "true"
+          python-version: "3.12.4"
+          cuda-version: cpu
+          arch: x86_64
+      - name: Assert ARTIFACT_NAME uses short python version
+        run: |
+          echo "actual: ${ARTIFACT_NAME:-<unset>}"
+          if [ "${ARTIFACT_NAME:-}" != "pytorch_test-infra_main_3.12_cpu_x86_64" ]; then
+            echo "FAIL: expected 'pytorch_test-infra_main_3.12_cpu_x86_64'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda build environment has full python version
+        shell: bash -l {0}
+        run: |
+          echo "CONDA_ENV: ${CONDA_ENV:-<unset>}"
+          if [ -z "${CONDA_ENV:-}" ] || [ ! -d "$CONDA_ENV" ]; then
+            echo "FAIL: CONDA_ENV not set or missing"
+            exit 1
+          fi
+          PYV="$(${CONDA_RUN} python -c 'import platform; print(platform.python_version())')"
+          echo "python in env: $PYV"
+          if [ "$PYV" != "3.12.4" ]; then
+            echo "FAIL: expected python 3.12.4 in build env"
+            exit 1
+          fi
+          echo "PASS"

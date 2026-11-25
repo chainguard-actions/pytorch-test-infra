@@ -1,0 +1,60 @@
+name: Test image name with custom tag prefix
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          rm -f /tmp/build-args.txt
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo fake-password
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) exit 1 ;;
+            *) exit 0 ;;
+          esac
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+      - name: Compute expected hash
+        id: hash
+        run: echo "hash=$(git rev-parse HEAD:tests/fixtures/docker)" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: my-image:cuda12
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: registry.example.com
+          repo-name: myrepo
+          always-rebuild: "true"
+      - name: Assert docker-image output includes custom prefix
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          EXPECTED="registry.example.com/myrepo/my-image:cuda12-${HASH}"
+          echo "actual: $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ -z "$HASH" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert build script got custom tag prefix
+        env:
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          cat /tmp/build-args.txt || { echo "FAIL: build script not invoked"; exit 1; }
+          # The build step strips "${registry}/${github.event.repository.name}/" (not the
+          # repo-name input), so under act the prefix may remain. Accept either form.
+          grep -qE "^IMAGE_NAME=(.*/)?my-image:cuda12$" /tmp/build-args.txt || { echo "FAIL: wrong image name arg"; exit 1; }
+          grep -qx "DOCKER_IMAGE=registry.example.com/myrepo/my-image:cuda12-${HASH}" /tmp/build-args.txt || { echo "FAIL: wrong tag"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,52 @@
+name: Test basic usage without S3 upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake check_s3 interceptor (avoid network S3 access)
+        run: |
+          REAL_PY="$(command -v python3 || echo /usr/bin/python3)"
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/python3" <<EOF
+          #!/bin/sh
+          if [ "\$1" = "tools/clang-tidy-checks/check_s3.py" ]; then
+            shift
+            echo "\$*" >> /tmp/check_s3_calls.log
+            exit \${FAKE_CHECK_EXIT:-0}
+          fi
+          exec "$REAL_PY" "\$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/python3"
+          rm -f /tmp/check_s3_calls.log
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          # No binaries present: GHA uploads only warn (if-no-files-found: warn)
+          rm -f clang-tidy clang-format
+      - id: action
+        uses: .
+        with:
+          platform: linux64
+          version: "17.0.6"
+          upload-to-s3: "false"
+      - name: Assert check_s3 invoked with expected keys
+        run: |
+          echo "--- calls ---"
+          cat /tmp/check_s3_calls.log || { echo "FAIL: check_s3 never called"; exit 1; }
+          COUNT=$(wc -l < /tmp/check_s3_calls.log)
+          if [ "$COUNT" -ne 2 ]; then
+            echo "FAIL: expected 2 calls, got $COUNT"; exit 1
+          fi
+          grep -qx -- "--s3-key linux64/17.0.6/clang-tidy --local-file clang-tidy" /tmp/check_s3_calls.log \
+            || { echo "FAIL: clang-tidy call missing"; exit 1; }
+          grep -qx -- "--s3-key linux64/17.0.6/clang-format --local-file clang-format" /tmp/check_s3_calls.log \
+            || { echo "FAIL: clang-format call missing"; exit 1; }
+          echo "PASS"
+      - name: Assert step succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          [ "$OUTCOME" = "success" ] || { echo "FAIL"; exit 1; }
+          echo "PASS"

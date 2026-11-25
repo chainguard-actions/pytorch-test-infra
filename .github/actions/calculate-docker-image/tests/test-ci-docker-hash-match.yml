@@ -1,0 +1,50 @@
+name: Test matching ci-docker-hash is accepted
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          rm -f /tmp/build-args.txt
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo fake-password
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) exit 1 ;;
+            *) exit 0 ;;
+          esac
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+      - name: Compute expected hash
+        id: hash
+        run: echo "hash=$(git rev-parse HEAD:tests/fixtures/docker)" >> "$GITHUB_OUTPUT"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: my-image
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: registry.example.com
+          repo-name: myrepo
+          always-rebuild: "true"
+          ci-docker-hash: ${{ steps.hash.outputs.hash }}
+      - name: Assert docker-image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+          HASH: ${{ steps.hash.outputs.hash }}
+        run: |
+          EXPECTED="registry.example.com/myrepo/my-image:${HASH}"
+          echo "actual: $ACTUAL"
+          if [ -z "$HASH" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: expected '$EXPECTED'"
+            exit 1
+          fi
+          echo "PASS"

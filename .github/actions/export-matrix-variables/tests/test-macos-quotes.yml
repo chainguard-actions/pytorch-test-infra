@@ -1,0 +1,27 @@
+name: Test non-linux export (quotes added)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide export script at expected relative path
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/test-infra/.github/scripts"
+          cp "$GITHUB_WORKSPACE/tests/fixtures/export_matrix_variables.py" \
+            "$GITHUB_WORKSPACE/test-infra/.github/scripts/export_matrix_variables.py"
+          rm -f "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+      - id: action
+        uses: .
+        with:
+          binary-matrix: '{"python_version":"3.11","desired_cuda":"cu121"}'
+          target-os: macos
+      - name: Assert env file contents with quotes
+        run: |
+          F="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          if [ ! -f "$F" ]; then echo "FAIL: $F missing"; exit 1; fi
+          cat "$F"
+          grep -qx 'PYTHON_VERSION="3.11"' "$F" || { echo "FAIL: PYTHON_VERSION quoted line"; exit 1; }
+          grep -qx 'DESIRED_CUDA="cu121"' "$F" || { echo "FAIL: DESIRED_CUDA quoted line"; exit 1; }
+          echo "PASS"

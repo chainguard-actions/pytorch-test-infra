@@ -1,0 +1,47 @@
+name: Test basic pull (image not present locally)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/docker-calls.log /tmp/aws-calls.log /tmp/fake-inspect-exit /tmp/fake-pull-exit /tmp/fake-aws-exit
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/aws-calls.log
+          if [ -f /tmp/fake-aws-exit ]; then exit "$(cat /tmp/fake-aws-exit)"; fi
+          echo "fake-password"
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/docker-calls.log
+          case "$1" in
+            login) cat >/dev/null; echo "Login Succeeded"; exit 0 ;;
+            manifest) echo '{"config":{"size":1048576},"layers":[{"size":1048576},{"size":2097152}]}'; exit 0 ;;
+            inspect) if [ -f /tmp/fake-inspect-exit ]; then exit "$(cat /tmp/fake-inspect-exit)"; fi; exit 1 ;;
+            pull) if [ -f /tmp/fake-pull-exit ]; then exit "$(cat /tmp/fake-pull-exit)"; fi; echo "pulled $2"; exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: 308535385114.dkr.ecr.us-east-1.amazonaws.com/test/image:latest
+      - name: Assert login and pull happened
+        run: |
+          echo "--- docker calls ---"; cat /tmp/docker-calls.log
+          echo "--- aws calls ---"; cat /tmp/aws-calls.log || true
+          grep -q "ecr get-login-password --region us-east-1" /tmp/aws-calls.log || { echo "FAIL: aws ecr login not called"; exit 1; }
+          grep -qx "login -u AWS --password-stdin 308535385114.dkr.ecr.us-east-1.amazonaws.com" /tmp/docker-calls.log || { echo "FAIL: docker login to default registry missing"; exit 1; }
+          grep -qx "manifest inspect 308535385114.dkr.ecr.us-east-1.amazonaws.com/test/image:latest" /tmp/docker-calls.log || { echo "FAIL: manifest inspect missing"; exit 1; }
+          grep -qx "inspect --type=image 308535385114.dkr.ecr.us-east-1.amazonaws.com/test/image:latest" /tmp/docker-calls.log || { echo "FAIL: local inspect missing"; exit 1; }
+          N=$(grep -cx "pull 308535385114.dkr.ecr.us-east-1.amazonaws.com/test/image:latest" /tmp/docker-calls.log)
+          echo "pull count: $N"
+          if [ "$N" != "1" ]; then echo "FAIL: expected exactly 1 pull"; exit 1; fi
+          echo "PASS"

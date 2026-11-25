@@ -1,0 +1,29 @@
+name: Test basic script run without cache
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      BUILD_ENV_FILE: ${{ github.workspace }}/tests/fixtures/build_env.sh
+      CONDA_RUN: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Clean marker
+        run: rm -f "$GITHUB_WORKSPACE/script-marker.txt"
+      - id: action
+        uses: .
+        with:
+          script: tests/fixtures/scripts/write-marker.sh
+      - name: Assert script ran and build env was sourced
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/script-marker.txt" ]; then
+            echo "FAIL: marker file not created; script did not run"
+            exit 1
+          fi
+          cat "$GITHUB_WORKSPACE/script-marker.txt"
+          if ! grep -q '^buildvar=from-build-env$' "$GITHUB_WORKSPACE/script-marker.txt"; then
+            echo "FAIL: BUILD_ENV_FILE variables not visible to script"
+            exit 1
+          fi
+          echo "PASS"

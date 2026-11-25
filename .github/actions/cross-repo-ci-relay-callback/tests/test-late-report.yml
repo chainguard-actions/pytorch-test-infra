@@ -1,0 +1,58 @@
+name: Test late report
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8765/token?api-version=2.0
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: mock-oidc-request-token
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local OIDC + relay stand-in
+        run: |
+          rm -rf /tmp/mock-captures && mkdir -p /tmp/mock-captures
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay_server.py" 8765 /tmp/mock-captures > /tmp/mock-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8765/health >/dev/null; then echo "server up"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/mock-server.log
+          echo "FAIL: mock server did not start"
+          exit 1
+      - id: action
+        uses: .
+        with:
+          event-type: late-report
+          callback-url: http://127.0.0.1:8765/github/callback/
+          triage-verdict-list: >-
+            [{"delivery_id": "d1", "workflow_name": "wf", "job_name": "build-npu", "check_run_id": 123456789,
+              "triage_verdict": {"schema_version": 1, "category": "flake", "confidence": "low", "summary": "flaky"}},
+             {"delivery_id": "d2", "workflow_name": "wf", "job_name": "test-npu",
+              "triage_verdict": {"schema_version": 1, "category": "backend", "confidence": "medium", "summary": "bug"}}]
+      - name: Assert late-report request
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: action did not succeed"; exit 1; fi
+          python3 - <<'EOF'
+          import glob, json, sys
+          files = sorted(glob.glob("/tmp/mock-captures/*.json"))
+          if len(files) != 1:
+              sys.exit(f"FAIL: expected exactly 1 request, got {len(files)}")
+          cap = json.load(open(files[0]))
+          print(json.dumps(cap, indent=2))
+          b = cap["body"]
+          def check(cond, msg):
+              if not cond:
+                  sys.exit("FAIL: " + msg)
+          check(cap["auth"] == "Bearer fake-oidc-jwt", "auth")
+          check(b["event_type"] == "late-report", "event_type")
+          check("workflow" not in b, "late report must not carry workflow info")
+          check(len(b["reports"]) == 2, "reports count")
+          check(b["reports"][0]["job_name"] == "build-npu", "first report")
+          check(b["reports"][0]["check_run_id"] == 123456789, "check_run_id")
+          check(b["reports"][1]["triage_verdict"]["category"] == "backend", "second verdict")
+          print("PASS")
+          EOF

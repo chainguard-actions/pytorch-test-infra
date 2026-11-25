@@ -1,0 +1,40 @@
+name: Test basic teardown (waits for ssh, then cleans docker)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker and who on PATH
+        run: |
+          BIN="$RUNNER_TEMP/fakebin"
+          LOG="$RUNNER_TEMP/calls.log"
+          mkdir -p "$BIN"
+          : > "$LOG"
+          cat > "$BIN/docker" <<EOF
+          #!/bin/sh
+          echo "docker \$*" >> "$LOG"
+          case "\$1" in
+            ps) echo "abc123"; echo "def456" ;;
+          esac
+          exit 0
+          EOF
+          cat > "$BIN/who" <<EOF
+          #!/bin/sh
+          echo "who" >> "$LOG"
+          exit 0
+          EOF
+          chmod +x "$BIN/docker" "$BIN/who"
+          echo "$BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert wait step ran and docker cleanup was invoked
+        run: |
+          LOG="$RUNNER_TEMP/calls.log"
+          echo "--- calls ---"; cat "$LOG"
+          grep -qx "who" "$LOG" || { echo "FAIL: who was not called (wait step skipped?)"; exit 1; }
+          grep -q "^docker ps -q$" "$LOG" || { echo "FAIL: docker ps -q not called"; exit 1; }
+          grep -q "^docker stop abc123 def456$" "$LOG" || { echo "FAIL: docker stop not called with container ids"; exit 1; }
+          grep -q "^docker system prune -af$" "$LOG" || { echo "FAIL: docker system prune -af not called"; exit 1; }
+          echo "PASS"

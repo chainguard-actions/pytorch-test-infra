@@ -1,0 +1,42 @@
+name: Test default upload-to-s3 (false) with macOS platform
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake check_s3 interceptor (avoid network S3 access)
+        run: |
+          REAL_PY="$(command -v python3 || echo /usr/bin/python3)"
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/python3" <<EOF
+          #!/bin/sh
+          if [ "\$1" = "tools/clang-tidy-checks/check_s3.py" ]; then
+            shift
+            echo "\$*" >> /tmp/check_s3_calls.log
+            exit \${FAKE_CHECK_EXIT:-0}
+          fi
+          exec "$REAL_PY" "\$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/python3"
+          rm -f /tmp/check_s3_calls.log
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f clang-tidy clang-format
+      - id: action
+        uses: .
+        with:
+          platform: macos-arm
+          version: "15.0.0"
+      - name: Assert keys reflect platform/version
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/check_s3_calls.log || { echo "FAIL: check_s3 never called"; exit 1; }
+          [ "$OUTCOME" = "success" ] || { echo "FAIL: action did not succeed"; exit 1; }
+          grep -qx -- "--s3-key macos-arm/15.0.0/clang-tidy --local-file clang-tidy" /tmp/check_s3_calls.log \
+            || { echo "FAIL: clang-tidy call missing"; exit 1; }
+          grep -qx -- "--s3-key macos-arm/15.0.0/clang-format --local-file clang-format" /tmp/check_s3_calls.log \
+            || { echo "FAIL: clang-format call missing"; exit 1; }
+          echo "PASS"

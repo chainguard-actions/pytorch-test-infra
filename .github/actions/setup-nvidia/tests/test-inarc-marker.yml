@@ -1,0 +1,29 @@
+name: Test in-container detection via /.inarc
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create /.inarc marker
+        run: |
+          if [ "$(id -u)" = 0 ]; then S=""; else S="sudo"; fi
+          $S rm -f /.incontainer
+          $S touch /.inarc
+      - id: action
+        uses: .
+      - name: Cleanup marker
+        if: always()
+        run: |
+          if [ "$(id -u)" = 0 ]; then S=""; else S="sudo"; fi
+          $S rm -f /.inarc || true
+      - name: Assert in-container-runner is true
+        env:
+          INC: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "in-container-runner: $INC"
+          if [ "$INC" != "true" ]; then
+            echo "FAIL: expected in-container-runner=true"; exit 1
+          fi
+          echo "PASS"

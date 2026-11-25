@@ -1,0 +1,39 @@
+name: Test teardown waits for ssh sessions to drain
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FAKE_SSH_COUNT_FILE: /tmp/fake-ssh-count-drain
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up powershell shim with one active fake session
+        run: |
+          bash tests/fixtures/setup-powershell.sh
+          echo 1 > "$FAKE_SSH_COUNT_FILE"
+      - name: Record start time
+        run: echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+      - name: Assert action waited for the session to drain
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          end=$(date +%s)
+          elapsed=$((end - START_TS))
+          remaining="$(tr -d '[:space:]' < "$FAKE_SSH_COUNT_FILE")"
+          echo "outcome: $OUTCOME elapsed: ${elapsed}s remaining: $remaining"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ "$remaining" != "0" ]; then
+            echo "FAIL: session poll was not consumed"
+            exit 1
+          fi
+          if [ "$elapsed" -lt 5 ]; then
+            echo "FAIL: expected the action to wait at least one 5s poll interval"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,36 @@
+name: Test basic usage (no GPU, not in container)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure no container markers
+        run: |
+          if [ "$(id -u)" = 0 ]; then S=""; else S="sudo"; fi
+          $S rm -f /.inarc /.incontainer || true
+      - id: action
+        uses: .
+      - name: Assert outputs
+        env:
+          HAS: ${{ steps.action.outputs.has-nvidia }}
+          INC: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "has-nvidia: $HAS"
+          echo "in-container-runner: $INC"
+          echo "HAS_NVIDIA_GPU env: $HAS_NVIDIA_GPU"
+          echo "GPU_FLAG env: ${GPU_FLAG:-}"
+          if [ "$INC" != "false" ]; then
+            echo "FAIL: expected in-container-runner=false"; exit 1
+          fi
+          if [ "$HAS" != "true" ] && [ "$HAS" != "false" ]; then
+            echo "FAIL: has-nvidia must be true/false"; exit 1
+          fi
+          if [ "$HAS_NVIDIA_GPU" != "$HAS" ]; then
+            echo "FAIL: HAS_NVIDIA_GPU env does not match output"; exit 1
+          fi
+          if [ "$HAS" = "false" ] && [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG should not be set without a GPU"; exit 1
+          fi
+          echo "PASS"

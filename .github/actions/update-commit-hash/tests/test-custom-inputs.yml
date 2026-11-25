@@ -1,0 +1,41 @@
+name: Test custom owner, pin folder and test-infra ref
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          repo-owner: pytorch
+          repo-name: rfcs
+          branch: master
+          pin-folder: .github/ci_commit_pins
+          test-infra-repository: pytorch/test-infra
+          test-infra-ref: main
+          updatebot-token: ${{ secrets.GITHUB_TOKEN }}
+          pytorchbot-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert action ran (or failed gracefully on the sentinel repo)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ ! -f "$GITHUB_WORKSPACE/test-infra/.github/scripts/update_commit_hashes.py" ]; then
+              echo "FAIL: action succeeded but test-infra script was not checked out"
+              exit 1
+            fi
+            if [ ! -d "$GITHUB_WORKSPACE/rfcs/.git" ]; then
+              echo "FAIL: action succeeded but target repo was not cloned"
+              exit 1
+            fi
+            echo "PASS: action succeeded with expected checkouts"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel source repo is not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

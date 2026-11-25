@@ -1,0 +1,48 @@
+name: Test setup-windows with a cuda version
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Windows-tool shims (powershell, cygpath, EC2-metadata curl)
+        run: |
+          SHIMS="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIMS"
+          cat > "$SHIMS/powershell" <<'EOF'
+          #!/bin/sh
+          echo "powershell $*" >> "${RUNNER_TEMP}/powershell-calls.log"
+          exit 0
+          EOF
+          cat > "$SHIMS/cygpath" <<'EOF'
+          #!/bin/sh
+          for a in "$@"; do last="$a"; done
+          echo "$last"
+          EOF
+          cat > "$SHIMS/curl" <<'EOF'
+          #!/bin/sh
+          case "$*" in
+            *169.254.169.254/latest/api/token*) echo "fake-token"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/*)
+              for a in "$@"; do last="$a"; done
+              echo "fake-${last##*/}"; exit 0 ;;
+          esac
+          exec /usr/bin/curl "$@"
+          EOF
+          chmod +x "$SHIMS"/*
+          echo "$SHIMS" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: "12.1"
+      - name: Assert setup completed
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          [ -n "$RUNNER_ARTIFACT_DIR" ] && [ -d "$RUNNER_ARTIFACT_DIR" ] || { echo "FAIL: RUNNER_ARTIFACT_DIR not set/created"; exit 1; }
+          [ -n "$RUNNER_TEST_RESULTS_DIR" ] && [ -d "$RUNNER_TEST_RESULTS_DIR" ] || { echo "FAIL: RUNNER_TEST_RESULTS_DIR not set/created"; exit 1; }
+          v="$(git config --global --get core.longpaths || true)"
+          echo "core.longpaths=$v"
+          [ "$v" = "true" ] || { echo "FAIL: core.longpaths not true"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,251 @@
+import {
+  fetchPrStatusState,
+  getPrStatusStage,
+  PR_STATUS_LABEL_MISSING_ACTIONABLE_ISSUE,
+  PR_STATUS_LABEL_READY_FOR_REVIEW,
+} from "lib/prStatus";
+import { Octokit } from "octokit";
+import pLimit from "p-limit";
+
+// The daily list of PRs waiting on each reviewer, read by Meta's internal
+// notification job, which DMs each reviewer a digest. It holds only public
+// GitHub data.
+
+export type ReviewStage = "final_review";
+
+// Added by Meta's labeler to PRs whose author isn't a Meta employee
+const OPEN_SOURCE_LABEL = "open source";
+
+export interface ManifestPr {
+  title: string;
+  url: string;
+  author: string;
+  // From an open source contributor rather than a maintainer
+  open_source: boolean;
+  stage: ReviewStage;
+  // When the PR got the label for its current stage, null if not found
+  stage_since: string | null;
+}
+
+export interface ReviewerEntry {
+  pr: number;
+  // The team ("org/team") the reviewer was asked through, when it was a team
+  via?: string;
+}
+
+export interface PrNotificationsManifest {
+  generated_at: string;
+  prs: Record<number, ManifestPr>;
+  // Keyed by lowercase GitHub login, since logins are case-insensitive
+  reviewers: Record<string, Record<ReviewStage, ReviewerEntry[]>>;
+  // PRs that could not be checked, so their reviewers are missing above
+  failed_prs: number[];
+}
+
+type SearchItem = {
+  number: number;
+  title: string;
+  html_url: string;
+  user?: { login?: string } | null;
+  labels: (string | { name?: string })[];
+};
+
+type WaitingPr = {
+  pr: ManifestPr;
+  reviewers: { login: string; via?: string }[];
+};
+
+const CONCURRENCY = 10;
+
+// review-logs/ is the bucket's publicly readable prefix, which the internal job
+// reads through fwdproxy
+export function getManifestKey(generatedAt: Date): string {
+  const date = generatedAt.toISOString().slice(0, 10);
+  return `review-logs/pr-notifications/manifest-${date}.json`;
+}
+
+async function searchOpenPrs(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  qualifier: string
+): Promise<SearchItem[]> {
+  return (await octokit.paginate(octokit.rest.search.issuesAndPullRequests, {
+    q: `repo:${owner}/${repo} is:pr is:open draft:false ${qualifier}`,
+    per_page: 100,
+  })) as SearchItem[];
+}
+
+async function getStageSince(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  prNumber: number,
+  label: string
+): Promise<string | null> {
+  const events = await octokit.paginate(octokit.rest.issues.listEvents, {
+    owner,
+    repo,
+    issue_number: prNumber,
+    per_page: 100,
+  });
+  const labeled = events.filter(
+    (event: any) => event.event === "labeled" && event.label?.name === label
+  );
+  return labeled[labeled.length - 1]?.created_at ?? null;
+}
+
+/**
+ * Lists who each open PR in final review is waiting on: its requested
+ * reviewers. Teams are expanded so every member except the author gets the PR.
+ */
+export async function buildPrNotificationsManifest(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  now: Date = new Date()
+): Promise<PrNotificationsManifest> {
+  const prs = await searchOpenPrs(
+    octokit,
+    owner,
+    repo,
+    `label:"${PR_STATUS_LABEL_READY_FOR_REVIEW}"`
+  );
+
+  const teamMembers = new Map<string, Promise<string[]>>();
+  function getTeamMembers(team: string): Promise<string[]> {
+    if (!teamMembers.has(team)) {
+      const [org, teamSlug] = team.split("/");
+      const members = octokit
+        .paginate(octokit.rest.teams.listMembersInOrg, {
+          org,
+          team_slug: teamSlug,
+          per_page: 100,
+        })
+        .then((list) => list.map((member) => member.login));
+      // Let the next PR retry rather than reuse a transient failure
+      members.catch(() => teamMembers.delete(team));
+      teamMembers.set(team, members);
+    }
+    return teamMembers.get(team)!;
+  }
+
+  async function getWaitingPr(pr: SearchItem): Promise<WaitingPr | null> {
+    const author = pr.user?.login;
+    if (!author) {
+      return null;
+    }
+    const labels = pr.labels.map((label) =>
+      typeof label === "string" ? label : label.name ?? ""
+    );
+    // The PR is waiting on its author to link an actionable issue, not on reviewers
+    if (labels.includes(PR_STATUS_LABEL_MISSING_ACTIONABLE_ISSUE)) {
+      return null;
+    }
+    const state = await fetchPrStatusState(
+      octokit,
+      owner,
+      repo,
+      pr.number,
+      labels,
+      author
+    );
+    if (state === null) {
+      throw new Error("review lookup failed");
+    }
+
+    // Approved PRs are skipped. An insufficient approval must not hide
+    // outstanding final-review requests.
+    const stage = getPrStatusStage(state);
+    if (
+      (stage !== "readyForReview" && stage !== "needsAdditionalApproval") ||
+      !state.labels.includes(PR_STATUS_LABEL_READY_FOR_REVIEW)
+    ) {
+      return null;
+    }
+    if (state.reviewerLookupFailed) {
+      throw new Error("reviewer lookup failed");
+    }
+    const pending = state.requestedReviewers ?? [];
+    if (pending.length === 0) {
+      return null;
+    }
+
+    const reviewers: WaitingPr["reviewers"] = [];
+    for (const reviewer of pending) {
+      if (!reviewer.includes("/")) {
+        reviewers.push({ login: reviewer });
+        continue;
+      }
+      for (const member of await getTeamMembers(reviewer)) {
+        if (member !== author) {
+          reviewers.push({ login: member, via: reviewer });
+        }
+      }
+    }
+    return {
+      pr: {
+        title: pr.title,
+        url: pr.html_url,
+        author,
+        open_source: labels.includes(OPEN_SOURCE_LABEL),
+        stage: "final_review",
+        stage_since: await getStageSince(
+          octokit,
+          owner,
+          repo,
+          pr.number,
+          PR_STATUS_LABEL_READY_FOR_REVIEW
+        ),
+      },
+      reviewers,
+    };
+  }
+
+  const manifest: PrNotificationsManifest = {
+    generated_at: now.toISOString(),
+    prs: {},
+    reviewers: {},
+    failed_prs: [],
+  };
+  const limit = pLimit(CONCURRENCY);
+  await Promise.all(
+    prs.map((pr) =>
+      limit(async () => {
+        let waiting: WaitingPr | null;
+        try {
+          waiting = await getWaitingPr(pr);
+        } catch (error) {
+          console.error(
+            `Failed to check reviewers for ${owner}/${repo}#${pr.number}`,
+            error
+          );
+          manifest.failed_prs.push(pr.number);
+          return;
+        }
+        if (waiting === null) {
+          return;
+        }
+        manifest.prs[pr.number] = waiting.pr;
+        for (const { login, via } of waiting.reviewers) {
+          const key = login.toLowerCase();
+          manifest.reviewers[key] ??= { final_review: [] };
+          const entries = manifest.reviewers[key][waiting.pr.stage];
+          const existing = entries.find((entry) => entry.pr === pr.number);
+          if (!existing) {
+            entries.push(via ? { pr: pr.number, via } : { pr: pr.number });
+          } else if (!via) {
+            // Asked directly as well as through a team
+            delete existing.via;
+          }
+        }
+      })
+    )
+  );
+
+  manifest.failed_prs.sort((a, b) => a - b);
+  for (const stages of Object.values(manifest.reviewers)) {
+    stages.final_review.sort((a, b) => a.pr - b.pr);
+  }
+  return manifest;
+}

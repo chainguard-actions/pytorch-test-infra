@@ -1,0 +1,76 @@
+name: Test nightly completed callback
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8765/token?api-version=2.0
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: mock-oidc-request-token
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local OIDC + relay stand-in
+        run: |
+          rm -rf /tmp/mock-captures && mkdir -p /tmp/mock-captures
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay_server.py" 8765 /tmp/mock-captures > /tmp/mock-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8765/health >/dev/null; then echo "server up"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/mock-server.log
+          echo "FAIL: mock server did not start"
+          exit 1
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0e797b5a6acf1234567890abcdef1234567890ab
+          event-type: nightly
+          job-name: build-npu
+          callback-url: http://127.0.0.1:8765/github/callback/
+          artifact-url: https://example.com/artifacts/123
+          test-results: '{"passed": 10, "failed": 1, "skipped": 2}'
+          failed-tests-detail: '[{"name":"test_foo","classname":"TestBar","message":"AssertionError"}]'
+          triage-verdict: '{"schema_version":1,"category":"upstream","confidence":"high","summary":"aten::foo changed"}'
+      - name: Assert callback payload
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/mock-server.log || true
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: action did not succeed"; exit 1; fi
+          python3 - <<'EOF'
+          import glob, json, sys
+          files = sorted(glob.glob("/tmp/mock-captures/*.json"))
+          print("captures:", files)
+          if len(files) != 1:
+              sys.exit(f"FAIL: expected exactly 1 callback, got {len(files)}")
+          cap = json.load(open(files[0]))
+          print(json.dumps(cap, indent=2))
+          def check(cond, msg):
+              if not cond:
+                  sys.exit("FAIL: " + msg)
+          b = cap["body"]
+          w = b["workflow"]
+          check(cap["path"] == "/github/callback", f"path {cap['path']!r}")
+          check(cap["auth"] == "Bearer fake-oidc-jwt", f"auth {cap['auth']!r}")
+          check(cap["content_type"] == "application/json", "content type")
+          check(b["event_type"] == "nightly", "event_type")
+          check(b["delivery_id"] == "0e797b5a6acf1234567890abcdef1234567890ab", "delivery_id")
+          check(b["payload"]["head_sha"] == b["delivery_id"], "head_sha")
+          check(b["payload"]["repository"]["full_name"] == "pytorch/pytorch", "repository")
+          check(w["schema_version"] == "1", "schema_version")
+          check(w["status"] == "completed", "status")
+          check(w["conclusion"] == "success", "conclusion")
+          check(w["job_name"] == "build-npu", "job_name")
+          check(w["name"] == "Test nightly completed callback", f"name {w['name']!r}")
+          check(w["started_at"] and w["completed_at"], "timestamps")
+          check(str(w["check_run_id"]).strip() != "", "check_run_id")
+          check("/actions/runs/" in w["url"], "url")
+          check(w["test_results"] == {"passed": 10, "failed": 1, "skipped": 2}, "test_results")
+          check(w["failed_tests_detail"][0]["name"] == "test_foo", "failed_tests_detail")
+          check(w["triage_verdict"]["category"] == "upstream", "triage_verdict")
+          check(w["artifact_url"] == "https://example.com/artifacts/123", "artifact_url")
+          print("PASS")
+          EOF

@@ -1,0 +1,34 @@
+name: Test basic teardown (no ssh sessions)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FAKE_SSH_COUNT_FILE: /tmp/fake-ssh-count-basic
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up powershell shim
+        run: |
+          echo 0 > "$FAKE_SSH_COUNT_FILE"
+          bash tests/fixtures/setup-powershell.sh
+      - name: Record start time
+        run: echo "START_TS=$(date +%s)" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+      - name: Assert action completed promptly
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          end=$(date +%s)
+          elapsed=$((end - START_TS))
+          echo "outcome: $OUTCOME elapsed: ${elapsed}s"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ "$elapsed" -ge 60 ]; then
+            echo "FAIL: action should not wait when no sessions exist"
+            exit 1
+          fi
+          echo "PASS"

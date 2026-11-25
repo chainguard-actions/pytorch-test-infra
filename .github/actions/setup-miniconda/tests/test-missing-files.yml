@@ -1,0 +1,26 @@
+name: Test nonexistent environment and pip files are skipped with warnings
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          default-packages: "wheel"
+          environment-file: tests/fixtures/does-not-exist.txt
+          pip-requirements-file: tests/fixtures/does-not-exist-requirements.txt
+      - name: Assert action succeeded and environment usable
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          [ "$OUTCOME" = "success" ] || { echo "FAIL: action did not succeed"; exit 1; }
+          [ -d "$CONDA_PREFIX" ] || { echo "FAIL: CONDA_PREFIX missing"; exit 1; }
+          $CONDA_RUN python -c "import wheel; print('wheel ok')" || { echo "FAIL: wheel missing"; exit 1; }
+          if $CONDA_RUN python -c "import six" 2>/dev/null; then
+            echo "note: six present (transitively), not an error"
+          fi
+          echo "PASS"

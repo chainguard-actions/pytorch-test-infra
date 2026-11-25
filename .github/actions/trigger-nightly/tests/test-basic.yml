@@ -1,0 +1,84 @@
+name: Test basic nightly commit creation
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create a local fake "GitHub" remote with main and nightly branches
+        run: |
+          set -euo pipefail
+          git config --global user.email "test@example.com"
+          git config --global user.name "Test User"
+          rm -rf /tmp/fakegh /tmp/seed
+          mkdir -p /tmp/fakegh/fake-owner
+          git init --bare /tmp/fakegh/fake-owner/fake-repo
+          ln -s /tmp/fakegh/fake-owner/fake-repo /tmp/fakegh/fake-owner/fake-repo.git
+          git init /tmp/seed
+          cd /tmp/seed
+          git checkout -b main
+          echo "hello main" > file.txt
+          git add file.txt
+          git commit -m "main commit"
+          git push /tmp/fakegh/fake-owner/fake-repo main:refs/heads/main
+          git checkout --orphan nightly
+          git rm -rf . >/dev/null
+          echo "old nightly" > nightly.txt
+          git add nightly.txt
+          git commit -m "old nightly"
+          git push /tmp/fakegh/fake-owner/fake-repo nightly:refs/heads/nightly
+          echo "MAIN_SHA=$(git -C /tmp/fakegh/fake-owner/fake-repo rev-parse refs/heads/main)" >> "$GITHUB_ENV"
+          echo "OLD_NIGHTLY_SHA=$(git -C /tmp/fakegh/fake-owner/fake-repo rev-parse refs/heads/nightly)" >> "$GITHUB_ENV"
+          # Redirect github.com to the local fake remote so nothing real is touched
+          git config --global url."file:///tmp/fakegh/".insteadOf "https://github.com/"
+
+      - id: action
+        uses: .
+        with:
+          token: ${{ github.token }}
+          repository: fake-owner/fake-repo
+          ref: main
+          path: nightly-target
+
+      - name: Assert checkout landed in the subdirectory
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/nightly-target/file.txt" ]; then
+            echo "FAIL: nightly-target/file.txt not found"
+            exit 1
+          fi
+          echo "PASS: checkout present"
+
+      - name: Assert new nightly commit was pushed
+        run: |
+          set -euo pipefail
+          REMOTE=/tmp/fakegh/fake-owner/fake-repo
+          NEW=$(git -C "$REMOTE" rev-parse refs/heads/nightly)
+          echo "main: $MAIN_SHA old nightly: $OLD_NIGHTLY_SHA new nightly: $NEW"
+          if [ "$NEW" = "$OLD_NIGHTLY_SHA" ]; then
+            echo "FAIL: nightly branch was not updated"
+            exit 1
+          fi
+          PARENT=$(git -C "$REMOTE" rev-parse "$NEW^1")
+          if [ "$PARENT" != "$OLD_NIGHTLY_SHA" ]; then
+            echo "FAIL: parent $PARENT != old nightly $OLD_NIGHTLY_SHA"
+            exit 1
+          fi
+          NEW_TREE=$(git -C "$REMOTE" rev-parse "$NEW^{tree}")
+          MAIN_TREE=$(git -C "$REMOTE" rev-parse "$MAIN_SHA^{tree}")
+          if [ "$NEW_TREE" != "$MAIN_TREE" ]; then
+            echo "FAIL: nightly tree does not match main tree"
+            exit 1
+          fi
+          MSG=$(git -C "$REMOTE" log -1 --format=%s "$NEW")
+          echo "message: $MSG"
+          if ! echo "$MSG" | grep -qE "^[0-9]{4}-[0-9]{2}-[0-9]{2} nightly release \(${MAIN_SHA}\)$"; then
+            echo "FAIL: unexpected commit message"
+            exit 1
+          fi
+          echo "PASS: nightly commit created correctly"
+
+      - name: Cleanup git url rewrite
+        if: always()
+        run: git config --global --unset-all url."file:///tmp/fakegh/".insteadOf || true

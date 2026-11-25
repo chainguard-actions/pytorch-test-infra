@@ -1,0 +1,153 @@
+param(
+  [string] $cudaVersion = $env:CUDA_VERSION
+)
+
+function New-TemporaryDirectory() {
+  New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
+}
+
+$windowsS3BaseUrl = "https://ossci-windows.s3.amazonaws.com"
+$cudnnBaseUrl = "https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/windows-x86_64"
+$ProgressPreference = 'SilentlyContinue'
+
+# installerArgs
+$installerArgs = "nvcc_$cudaVersion cuobjdump_$cudaVersion nvprune_$cudaVersion nvprof_$cudaVersion cupti_$cudaVersion cublas_$cudaVersion cublas_dev_$cudaVersion cudart_$cudaVersion cufft_$cudaVersion cufft_dev_$cudaVersion curand_$cudaVersion curand_dev_$cudaVersion cusolver_$cudaVersion cusolver_dev_$cudaVersion cusparse_$cudaVersion cusparse_dev_$cudaVersion npp_$cudaVersion npp_dev_$cudaVersion nvrtc_$cudaVersion nvrtc_dev_$cudaVersion nvml_dev_$cudaVersion nvjpeg_$cudaVersion nvjpeg_dev_$cudaVersion cuda_profiler_api_$cudaVersion nvjitlink_$cudaVersion thrust_$cudaVersion"
+
+# Switch statement for specfic CUDA versions.
+# No defaults are set before the switch: every supported version assigns all
+# three values, and an unrecognised version must fail rather than silently
+# install whatever the defaults happened to be. The previous defaults were the
+# 12.6 toolkit and a cuda12 cuDNN, so dropping 12.x without this would have
+# left an unknown version installing CUDA 12.6.
+$cudnn_lib_folder="lib\x64"
+
+Switch ($cudaVersion) {
+  "13.2" {
+    $cudnn_subfolder="cudnn-windows-x86_64-9.26.0.51_cuda13-archive"
+    $toolkitBaseUrl = "https://developer.download.nvidia.com/compute/cuda/13.2.2/local_installers"
+    $toolkitInstaller = "cuda_13.2.2_windows.exe"
+    $installerArgs = ""
+  }
+  "13.4" {
+    $cudnn_subfolder="cudnn-windows-x86_64-9.26.0.51_cuda13-archive"
+    $toolkitBaseUrl = "https://developer.download.nvidia.com/compute/cuda/13.4.2/local_installers"
+    $toolkitInstaller = "cuda_13.4.2_windows_x86_64.exe"
+    $installerArgs = ""
+  }
+  "13.5" {
+    $cudnn_subfolder="cudnn-windows-x86_64-9.28.1.4_cuda13-archive"
+    $toolkitBaseUrl = "https://developer.download.nvidia.com/compute/cuda/13.5.0/local_installers"
+    $toolkitInstaller = "cuda_13.5.0_windows_x86_64.exe"
+    $installerArgs = ""
+  }
+  default {
+    Write-Error "Unsupported CUDA_VERSION '$cudaVersion'. This AMI builds 13.2, 13.4 and 13.5 only."
+    exit 1
+  }
+}
+
+$cudnnZip = "$cudnn_subfolder.zip"
+$cudnn_lib_folder="lib"
+
+Write-Output "Downloading ZLIB DLL, $windowsS3BaseUrl/zlib123dllx64.zip"
+$tmpZlibDll = New-TemporaryFile
+Invoke-WebRequest -Uri "$windowsS3BaseUrl/zlib123dllx64.zip" -OutFile "$tmpZlibDll"
+$tmpExtractedZlibDll = New-TemporaryDirectory
+7z x "$tmpZlibDll" -o"$tmpExtractedZlibDll"
+Get-ChildItem -Path $tmpExtractedZlibDll
+if (-Not (Test-Path -Path "$tmpExtractedZlibDll\dll_x64\zlibwapi.dll" -PathType Leaf)) {
+  Write-Error "zlib installation failed $tmpExtractedZlibDll\dll_x64\zlibwapi.dll"
+  exit 1
+}
+Copy-Item -Force -Verbose -Recurse "$tmpExtractedZlibDll\dll_x64\zlibwapi.dll" "c:\windows\system32\"
+
+
+function Install-CudaToolkit() {
+  $expectedInstallLocation = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$cudaVersion"
+  if (Test-Path -Path "$expectedInstallLocation\bin\nvcc.exe" -PathType Leaf) {
+    Write-Output "Existing cudatoolkit installation already found at '$expectedInstallLocation', continuing..."
+    return
+  }
+
+  Write-Output "Downloading toolkit installer, $toolkitBaseUrl/$toolkitInstaller"
+  $tmpToolkitInstaller = New-TemporaryFile
+  Invoke-WebRequest -Uri "$toolkitBaseUrl/$toolkitInstaller" -OutFile "$tmpToolkitInstaller"
+  $tmpExtractedInstaller = New-TemporaryDirectory
+  7z x "$tmpToolkitInstaller" -o"$tmpExtractedInstaller"
+  $cudaInstallLogs = New-TemporaryDirectory
+
+  Write-Output "Running installer for CUDA v$cudaVersion..."
+  $argsList = "-s $installerArgs -loglevel:6 -log:$cudaInstallLogs"
+  Write-Output "setup.exe: $tmpExtractedInstaller\setup.exe"
+  Write-Output "Args: $argsList"
+  Start-Process -FilePath "$tmpExtractedInstaller\setup.exe" -ArgumentList "$argsList" -Wait -NoNewWindow -PassThru
+  if (-Not (Test-Path -Path "$expectedInstallLocation\bin\nvcc.exe" -PathType Leaf)) {
+    Write-Error "CUDA installation failed for CUDA version $cudaVersion, nvcc not found at $expectedInstallLocation\bin\nvcc.exe"
+    Write-Error "==== LOG.RunDll32.exe.log ===="
+    Get-Content -Path "$cudaInstallLogs\LOG.RunDll32.exe.log"
+    Write-Error "==== Log.setup.exe.log ===="
+    Get-Content -Path "$cudaInstallLogs\LOG.setup.exe.log"
+    exit 1
+  }
+
+  Write-Output "Installing VS 2019 integration"
+  New-Item -Path  "$expectedInstallLocation\MSBuildExtensions\" -Type Directory -Force
+  Copy-Item -Force -Verbose -Recurse "$tmpExtractedInstaller\visual_studio_integration\CUDAVisualStudioIntegration\extras\visual_studio_integration\MSBuildExtensions\*.*" "$expectedInstallLocation\MSBuildExtensions\"
+}
+
+function Install-Cudnn() {
+  $expectedInstallLocation = "$env:ProgramFiles\NVIDIA GPU Computing Toolkit\CUDA\v$cudaVersion\"
+  if (Test-Path -Path "$expectedInstallLocation\include\cudnn.h" -PathType Leaf) {
+    Write-Output "Existing cudnn installation already found at '$expectedInstallLocation', continuing..."
+    return
+  }
+
+  Write-Output "Downloading cudnnArchive, $cudnnBaseUrl/$cudnnZip"
+  $tmpCudnnInstall = New-TemporaryFile
+  Invoke-WebRequest -Uri "$cudnnBaseUrl/$cudnnZip" -OutFile "$tmpCudnnInstall"
+  $tmpCudnnExtracted = New-TemporaryDirectory
+  7z x "$tmpCudnnInstall" -o"$tmpCudnnExtracted"
+
+  Write-Output "Copying cudnn to $expectedInstallLocation"
+
+  Copy-Item -Force -Verbose -Recurse "$tmpCudnnExtracted\$cudnn_subfolder\bin\*" "$expectedInstallLocation\bin"
+  # Newer cuDNN archives place DLLs under bin\x64\. Flatten them into bin\
+  # so they are found via PATH (which only includes bin\, not bin\x64\).
+  # Mirrors the same step in pytorch/pytorch:.ci/pytorch/windows/internal/cuda_install.bat.
+  $cudnnBinX64 = "$tmpCudnnExtracted\$cudnn_subfolder\bin\x64"
+  if (Test-Path -Path $cudnnBinX64 -PathType Container) {
+    Copy-Item -Force -Verbose "$cudnnBinX64\*.*" "$expectedInstallLocation\bin"
+  }
+  Copy-Item -Force -Verbose -Recurse "$tmpCudnnExtracted\$cudnn_subfolder\$cudnn_lib_folder\x64\*" "$expectedInstallLocation\lib\x64"
+  Copy-Item -Force -Verbose -Recurse "$tmpCudnnExtracted\$cudnn_subfolder\include\*" "$expectedInstallLocation\include"
+
+  if (-Not (Test-Path -Path "$expectedInstallLocation\include\cudnn.h" -PathType Leaf)) {
+    Write-Error "cudnn installation failed for CUDA version $cudaVersion, cudnn.h not found at $expectedInstallLocation\include\cudnn.h"
+    exit 1
+  }
+}
+
+function Install-NvTools() {
+  $nvToolsLocalPath = "C:\Program Files\NVIDIA Corporation\NvToolsExt"
+  # Check if we actually need to do the install
+  if (Test-Path -Path "$nvToolsLocalPath" -PathType Container) {
+    Write-Output "Existing nvtools installation already found, continuing..."
+    return
+  }
+  $nvToolsUrl = "https://ossci-windows.s3.amazonaws.com/NvToolsExt.7z"
+  $tmpToolsDl = New-TemporaryFile
+  Write-Output "Downloading NvTools, $nvToolsUrl"
+  Invoke-WebRequest -Uri "$nvToolsUrl" -OutFile "$tmpToolsDl"
+  $tmpExtractedNvTools = New-TemporaryDirectory
+  7z x "$tmpToolsDl" -o"$tmpExtractedNvTools"
+
+  Write-Output "Copying NvTools, '$tmpExtractedNvTools' -> '$nvToolsLocalPath'"
+  New-Item -Path "$nvToolsLocalPath "-ItemType "directory" -Force
+  Copy-Item -Recurse -Path "$tmpExtractedNvTools\*" -Destination "$nvToolsLocalPath"
+}
+
+Install-CudaToolkit
+Install-Cudnn
+Install-NvTools
+# Clear out temp files
+Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue

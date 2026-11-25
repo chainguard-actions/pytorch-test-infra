@@ -1,0 +1,45 @@
+name: Test comma-separated tags with push=false
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker
+        run: |
+          mkdir -p /tmp/fake-docker/bin
+          rm -f /tmp/fake-docker/*.log /tmp/fake-docker/*.txt
+          cat > /tmp/fake-docker/bin/docker <<'EOF'
+          #!/usr/bin/env bash
+          echo "$*" >> /tmp/fake-docker/calls.log
+          if [ "$1" = "buildx" ] && [ "$2" = "build" ]; then
+            printf '%s\n' "$@" > /tmp/fake-docker/build-args.txt
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fake-docker/bin/docker
+          echo "/tmp/fake-docker/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: 'ghcr.io/example/a:1, ghcr.io/example/b:2'
+          push: 'false'
+          connect-attempts: '1'
+          connect-delay: '0'
+      - name: Assert outputs and args
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: $ACTUAL"
+          cat /tmp/fake-docker/build-args.txt
+          [ "$ACTUAL" = "ghcr.io/example/a:1" ] || { echo "FAIL: wrong image output"; exit 1; }
+          f=/tmp/fake-docker/build-args.txt
+          grep -qxF "ghcr.io/example/a:1" "$f" || { echo "FAIL: tag a missing"; exit 1; }
+          grep -qxF "ghcr.io/example/b:2" "$f" || { echo "FAIL: tag b missing"; exit 1; }
+          if grep -qxF -- "--push" "$f"; then echo "FAIL: --push should be absent"; exit 1; fi
+          for opt in --file --target --build-arg --label --cache-from --cache-to; do
+            if grep -qxF -- "$opt" "$f"; then echo "FAIL: unexpected $opt"; exit 1; fi
+          done
+          [ "$(tail -n1 "$f")" = "." ] || { echo "FAIL: default context should be '.'"; exit 1; }
+          echo "PASS"

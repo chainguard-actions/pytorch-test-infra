@@ -1,0 +1,57 @@
+name: Test basic setup (python 3.11 + editable torchci install)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide tools/torchci from committed fixture if missing
+        id: prep
+        run: |
+          if [ -f tools/torchci/requirements.txt ]; then
+            echo "Using existing tools/torchci"
+            echo "fake=false" >> "$GITHUB_OUTPUT"
+          else
+            mkdir -p tools
+            rm -rf tools/torchci
+            cp -r tests/fixtures/torchci tools/torchci
+            echo "fake=true" >> "$GITHUB_OUTPUT"
+          fi
+          ls -la tools/torchci
+      - id: action
+        uses: .
+      - name: Assert python is 3.11
+        run: |
+          V="$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          echo "python version: $V"
+          if [ "$V" != "3.11" ]; then
+            echo "FAIL: expected python 3.11"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert torchci installed in editable mode
+        env:
+          FAKE: ${{ steps.prep.outputs.fake }}
+        run: |
+          python -m pip list 2>/dev/null | tee /tmp/piplist.txt
+          if [ "$FAKE" = "true" ]; then
+            OUT="$(python -c 'import torchci; print(torchci.MARKER)')"
+            echo "marker: $OUT"
+            if [ "$OUT" != "torchci-fixture" ]; then
+              echo "FAIL: torchci package not importable"
+              exit 1
+            fi
+            LOC="$(python -c 'import torchci, os; print(os.path.realpath(torchci.__file__))')"
+            echo "location: $LOC"
+            case "$LOC" in
+              *tools/torchci/torchci/__init__.py) ;;
+              *) echo "FAIL: torchci not installed from tools/torchci (editable)"; exit 1 ;;
+            esac
+          else
+            if ! grep -qi "tools/torchci" /tmp/piplist.txt; then
+              echo "FAIL: no editable install from tools/torchci found"
+              exit 1
+            fi
+          fi
+          echo "PASS"

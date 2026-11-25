@@ -1,0 +1,39 @@
+name: Test checkout of a specific tag
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: v4.1.0
+          path: tag-target
+      - name: Assert tag checked out
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+          REF: ${{ steps.action.outputs.ref }}
+        run: |
+          echo "commit: $COMMIT"
+          echo "ref: $REF"
+          cd "$GITHUB_WORKSPACE/tag-target"
+          HEAD_SHA="$(git rev-parse HEAD)"
+          echo "HEAD: $HEAD_SHA"
+          if [ ! -f package.json ]; then
+            echo "FAIL: package.json missing"
+            exit 1
+          fi
+          VERSION="$(grep -m1 '"version"' package.json)"
+          echo "package.json version line: $VERSION"
+          if ! echo "$VERSION" | grep -q '4.1.0'; then
+            echo "FAIL: expected version 4.1.0 at tag v4.1.0"
+            exit 1
+          fi
+          if [ "$HEAD_SHA" != "$COMMIT" ]; then
+            echo "FAIL: commit output mismatch"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,39 @@
+name: Test ref with slashes and free-threaded python version
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Check out test-infra (provides tools/pkg-helpers)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/vision
+          ref: release/0.20
+          python-version: '3.13t'
+          cuda-version: cu124
+          arch: x86_64
+      - name: Assert ARTIFACT_NAME replaces all slashes and keeps 't' suffix
+        run: |
+          echo "actual: $ARTIFACT_NAME"
+          if [ "$ARTIFACT_NAME" != "pytorch_vision_release_0.20_3.13t_cu124_x86_64" ]; then
+            echo "FAIL: expected 'pytorch_vision_release_0.20_3.13t_cu124_x86_64'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert BUILD_ENV_FILE generated
+        run: |
+          echo "BUILD_ENV_FILE: $BUILD_ENV_FILE"
+          if [ -z "$BUILD_ENV_FILE" ] || [ ! -s "$BUILD_ENV_FILE" ]; then
+            echo "FAIL: BUILD_ENV_FILE missing or empty"
+            exit 1
+          fi
+          cat "$BUILD_ENV_FILE"
+          echo "PASS"

@@ -1,0 +1,114 @@
+name: Test container runner path (/.incontainer present, mocked tools)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Mark as container runner and install mock tools
+        run: |
+          set -eu
+          touch /.incontainer 2>/dev/null || sudo touch /.incontainer
+          test -f /.incontainer
+          MOCK="$RUNNER_TEMP/mockbin"
+          mkdir -p "$MOCK"
+          LOG="$RUNNER_TEMP/docker-calls.log"
+          : > "$LOG"
+
+          cat > "$MOCK/curl" <<'EOF'
+          #!/bin/sh
+          out=""; prev=""
+          for arg in "$@"; do
+            case "$prev" in -o|--output) out="$arg" ;; esac
+            prev="$arg"
+          done
+          case "$*" in
+            *169.254.169.254*) payload="fake-value" ;;
+            *) exec /usr/bin/curl "$@" ;;
+          esac
+          if [ -n "$out" ]; then printf '%s' "$payload" > "$out"; else printf '%s' "$payload"; fi
+          exit 0
+          EOF
+
+          cat > "$MOCK/aws" <<'EOF'
+          #!/bin/sh
+          case "$1 $2" in
+            "sts get-caller-identity") printf '{\n    "Account": "210987654321"\n}\n' ;;
+            "ecr get-login-password") printf 'pw' ;;
+            *) exit 1 ;;
+          esac
+          EOF
+
+          cat > "$MOCK/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG"
+          if [ "\$1" = "login" ]; then cat >/dev/null; echo "Login Succeeded"; fi
+          exit 0
+          EOF
+
+          cat > "$MOCK/sudo" <<'EOF'
+          #!/bin/sh
+          exec "$@"
+          EOF
+
+          cat > "$MOCK/lspci" <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+
+          cat > "$MOCK/systemctl" <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+
+          chmod +x "$MOCK"/*
+          echo "$MOCK" >> "$GITHUB_PATH"
+
+      - id: action
+        uses: .
+
+      - name: Assert ECR login still performed
+        run: |
+          LOG="$RUNNER_TEMP/docker-calls.log"
+          cat "$LOG"
+          if ! grep -q "210987654321.dkr.ecr.us-east-1.amazonaws.com" "$LOG"; then
+            echo "FAIL: expected docker login to account registry"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert docker cleanup skipped in container runner
+        run: |
+          LOG="$RUNNER_TEMP/docker-calls.log"
+          if grep -q "system prune" "$LOG"; then
+            echo "FAIL: docker prune should be skipped in container runner"
+            exit 1
+          fi
+          if grep -q "docker version" "$LOG"; then
+            echo "FAIL: docker daemon start check should be skipped in container runner"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Assert env dirs set and GPU_FLAG unset
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR:-}"
+          if [ "${RUNNER_ARTIFACT_DIR:-}" != "${RUNNER_TEMP}/artifacts" ] || [ ! -d "${RUNNER_ARTIFACT_DIR}" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR not set up"
+            exit 1
+          fi
+          if ls /dev/nvidia[0-9] >/dev/null 2>&1; then
+            echo "Host has NVIDIA devices; skipping GPU_FLAG check"
+          elif [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG should not be set without /dev/nvidiaX"
+            exit 1
+          fi
+          echo "PASS"
+
+      - name: Cleanup marker
+        if: always()
+        run: rm -f /.incontainer 2>/dev/null || sudo rm -f /.incontainer || true

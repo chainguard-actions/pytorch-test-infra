@@ -1,0 +1,49 @@
+name: Test full image name with registry prefix is used as-is
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs
+        run: |
+          rm -f /tmp/build-args.txt
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo fake-password
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            login) cat >/dev/null; exit 0 ;;
+            manifest) exit 1 ;;
+            *) exit 0 ;;
+          esac
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image-name: registry.example.com/myrepo/my-image:abc123
+          docker-build-dir: tests/fixtures/docker
+          docker-registry: registry.example.com
+          repo-name: myrepo
+          always-rebuild: "true"
+      - name: Assert docker-image unchanged
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "registry.example.com/myrepo/my-image:abc123" ]; then
+            echo "FAIL: expected full name unchanged"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert build used full image as tag
+        run: |
+          cat /tmp/build-args.txt || { echo "FAIL: build script not invoked"; exit 1; }
+          grep -qx "DOCKER_IMAGE=registry.example.com/myrepo/my-image:abc123" /tmp/build-args.txt || { echo "FAIL: wrong -t value"; exit 1; }
+          echo "PASS"

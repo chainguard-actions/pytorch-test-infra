@@ -1,0 +1,71 @@
+name: Test setup-windows basic (cpu)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Windows-tool shims (powershell, cygpath, EC2-metadata curl)
+        run: |
+          SHIMS="$RUNNER_TEMP/shims"
+          mkdir -p "$SHIMS"
+          cat > "$SHIMS/powershell" <<'EOF'
+          #!/bin/sh
+          # Fake powershell: record the invocation and succeed (Linux runner has no Windows registry/Defender)
+          echo "powershell $*" >> "${RUNNER_TEMP}/powershell-calls.log"
+          exit 0
+          EOF
+          cat > "$SHIMS/cygpath" <<'EOF'
+          #!/bin/sh
+          # Fake cygpath: identity conversion of the last argument
+          for a in "$@"; do last="$a"; done
+          echo "$last"
+          EOF
+          cat > "$SHIMS/curl" <<'EOF'
+          #!/bin/sh
+          # Fake curl for EC2 instance metadata endpoint; real curl otherwise
+          case "$*" in
+            *169.254.169.254/latest/api/token*) echo "fake-token"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/*)
+              for a in "$@"; do last="$a"; done
+              echo "fake-${last##*/}"; exit 0 ;;
+          esac
+          exec /usr/bin/curl "$@"
+          EOF
+          chmod +x "$SHIMS"/*
+          echo "$SHIMS" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          cuda-version: cpu
+      - name: Assert git global config set
+        run: |
+          for key in core.longpaths core.symlinks; do
+            v="$(git config --global --get $key || true)"
+            echo "$key=$v"
+            if [ "$v" != "true" ]; then echo "FAIL: $key expected true"; exit 1; fi
+          done
+          v="$(git config --global --get core.fsmonitor || true)"
+          echo "core.fsmonitor=$v"
+          if [ "$v" != "false" ]; then echo "FAIL: core.fsmonitor expected false"; exit 1; fi
+          echo "PASS"
+      - name: Assert environment variables exported and directories created
+        run: |
+          echo "RUNNER_ARTIFACT_DIR=$RUNNER_ARTIFACT_DIR"
+          echo "RUNNER_TEST_RESULTS_DIR=$RUNNER_TEST_RESULTS_DIR"
+          if [ "$RUNNER_ARTIFACT_DIR" != "$RUNNER_TEMP/artifacts" ]; then
+            echo "FAIL: RUNNER_ARTIFACT_DIR expected $RUNNER_TEMP/artifacts"; exit 1
+          fi
+          if [ "$RUNNER_TEST_RESULTS_DIR" != "$RUNNER_TEMP/test-results" ]; then
+            echo "FAIL: RUNNER_TEST_RESULTS_DIR expected $RUNNER_TEMP/test-results"; exit 1
+          fi
+          [ -d "$RUNNER_ARTIFACT_DIR" ] || { echo "FAIL: artifact dir missing"; exit 1; }
+          [ -d "$RUNNER_TEST_RESULTS_DIR" ] || { echo "FAIL: test-results dir missing"; exit 1; }
+          echo "PASS"
+      - name: Assert powershell steps were invoked
+        run: |
+          cat "$RUNNER_TEMP/powershell-calls.log" || true
+          n="$(wc -l < "$RUNNER_TEMP/powershell-calls.log" 2>/dev/null || echo 0)"
+          if [ "$n" -lt 2 ]; then echo "FAIL: expected 2 powershell invocations, got $n"; exit 1; fi
+          echo "PASS"

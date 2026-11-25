@@ -1,0 +1,41 @@
+name: Test custom bucket and prefix
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI that captures the upload
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/fake-aws-args
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/fake-aws-args
+      - name: Create metrics file (missing optional fields)
+        run: |
+          echo '[{"type":"result","num_turns":"3"}]' > "$RUNNER_TEMP/metrics.json"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+          s3-bucket: my-test-bucket
+          s3-prefix: my/prefix
+      - name: Assert destination and defaulted fields
+        run: |
+          cat /tmp/fake-aws-args || { echo "FAIL: aws not called"; exit 1; }
+          if ! grep -qE "^s3 cp /tmp/claude_usage.json s3://my-test-bucket/my/prefix/.+_[0-9]+\.json$" /tmp/fake-aws-args; then
+            echo "FAIL: unexpected destination"
+            exit 1
+          fi
+          cat /tmp/claude_usage.json
+          [ "$(jq -r .num_turns /tmp/claude_usage.json)" = "3" ] || { echo "FAIL: num_turns"; exit 1; }
+          [ "$(jq -r .duration_ms /tmp/claude_usage.json)" = "0" ] || { echo "FAIL: duration_ms"; exit 1; }
+          [ "$(jq -r .input_tokens /tmp/claude_usage.json)" = "0" ] || { echo "FAIL: input_tokens"; exit 1; }
+          [ "$(jq -r .model /tmp/claude_usage.json)" = "" ] || { echo "FAIL: model"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,24 @@
+name: Test conda environment (spec) file
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          default-packages: "wheel"
+          environment-file: tests/fixtures/conda-spec.txt
+      - name: Assert package from environment file installed
+        run: |
+          VER=$($CONDA_RUN python --version 2>&1)
+          echo "python: $VER"
+          case "$VER" in
+            "Python 3.9"*) ;;
+            *) echo "FAIL: expected Python 3.9"; exit 1 ;;
+          esac
+          $CONDA_RUN python -c "import six; print(six.__version__)" || { echo "FAIL: six not installed"; exit 1; }
+          conda list -p "$CONDA_PREFIX" | grep -E "^six " || { echo "FAIL: six not in conda list"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,81 @@
+name: Test basic binary build setup (cpu, python 3.11)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # The action's "Set artifact name" step reads REPOSITORY and REF from the
+      # caller's environment (as pytorch's build workflows provide them).
+      REPOSITORY: pytorch/test-infra
+      REF: main
+      PACKAGE_TYPE: wheel
+      PYTHON_VERSION: "3.11"
+      GPU_ARCH_TYPE: cpu
+      GPU_ARCH_VERSION: ""
+      CU_VERSION: cpu
+      CHANNEL: nightly
+      ARCH: x86_64
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # The action installs ${GITHUB_WORKSPACE}/test-infra/tools/pkg-helpers
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          submodules: "false"
+          setup-miniconda: "true"
+          python-version: "3.11"
+          cuda-version: cpu
+          arch: x86_64
+      - name: Assert repository checked out into subdirectory
+        run: |
+          ls "$GITHUB_WORKSPACE/pytorch/test-infra" | head -n 20 || true
+          if [ ! -d "$GITHUB_WORKSPACE/pytorch/test-infra/.git" ] && [ ! -f "$GITHUB_WORKSPACE/pytorch/test-infra/.git" ]; then
+            echo "FAIL: pytorch/test-infra was not checked out"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert ARTIFACT_NAME
+        run: |
+          echo "actual: ${ARTIFACT_NAME:-<unset>}"
+          if [ "${ARTIFACT_NAME:-}" != "pytorch_test-infra_main_3.11_cpu_x86_64" ]; then
+            echo "FAIL: expected 'pytorch_test-infra_main_3.11_cpu_x86_64'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert BUILD_ENV_FILE generated
+        run: |
+          echo "BUILD_ENV_FILE: ${BUILD_ENV_FILE:-<unset>}"
+          if [ -z "${BUILD_ENV_FILE:-}" ] || [ ! -f "$BUILD_ENV_FILE" ]; then
+            echo "FAIL: BUILD_ENV_FILE not set or missing"
+            exit 1
+          fi
+          cat "$BUILD_ENV_FILE"
+          echo "PASS"
+      - name: Assert conda build environment created
+        shell: bash -l {0}
+        run: |
+          echo "CONDA_ENV: ${CONDA_ENV:-<unset>}"
+          echo "CONDA_RUN: ${CONDA_RUN:-<unset>}"
+          if [ -z "${CONDA_ENV:-}" ] || [ ! -d "$CONDA_ENV" ]; then
+            echo "FAIL: CONDA_ENV not set or missing"
+            exit 1
+          fi
+          if [ "$CONDA_RUN" != "conda run --no-capture-output -p ${CONDA_ENV}" ]; then
+            echo "FAIL: unexpected CONDA_RUN"
+            exit 1
+          fi
+          PYV="$(${CONDA_RUN} python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          echo "python in env: $PYV"
+          if [ "$PYV" != "3.11" ]; then
+            echo "FAIL: expected python 3.11 in build env"
+            exit 1
+          fi
+          echo "PASS"

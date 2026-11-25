@@ -1,0 +1,42 @@
+name: Test genuine build error is not retried
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker whose build fails after starting
+        run: |
+          mkdir -p /tmp/fake-docker/bin
+          rm -f /tmp/fake-docker/*.log /tmp/fake-docker/count
+          cat > /tmp/fake-docker/bin/docker <<'EOF'
+          #!/usr/bin/env bash
+          echo "$*" >> /tmp/fake-docker/calls.log
+          if [ "$1" = "buildx" ] && [ "$2" = "build" ]; then
+            n=$(cat /tmp/fake-docker/count 2>/dev/null || echo 0)
+            echo "$((n+1))" > /tmp/fake-docker/count
+            echo "#1 [internal] load build definition from Dockerfile"
+            echo "#5 [2/3] RUN make"
+            echo "ERROR: process did not complete successfully: connection reset" >&2
+            exit 7
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fake-docker/bin/docker
+          echo "/tmp/fake-docker/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          tags: ghcr.io/example/broken:1
+          connect-attempts: '5'
+          connect-delay: '0'
+      - name: Assert failed once without retry
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME; attempts: $(cat /tmp/fake-docker/count)"
+          [ "$OUTCOME" = "failure" ] || { echo "FAIL: expected failure"; exit 1; }
+          [ "$(cat /tmp/fake-docker/count)" = "1" ] || { echo "FAIL: expected exactly 1 attempt"; exit 1; }
+          echo "PASS"

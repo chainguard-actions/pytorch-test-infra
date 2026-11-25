@@ -1,0 +1,51 @@
+name: Test waiting until ssh sessions drain
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker, who (session for 2 polls) and sleep on PATH
+        run: |
+          BIN="$RUNNER_TEMP/fakebin"
+          LOG="$RUNNER_TEMP/calls.log"
+          CNT="$RUNNER_TEMP/who.count"
+          mkdir -p "$BIN"
+          : > "$LOG"
+          echo 0 > "$CNT"
+          cat > "$BIN/docker" <<EOF
+          #!/bin/sh
+          echo "docker \$*" >> "$LOG"
+          exit 0
+          EOF
+          cat > "$BIN/who" <<EOF
+          #!/bin/sh
+          n=\$(cat "$CNT"); n=\$((n+1)); echo \$n > "$CNT"
+          echo "who" >> "$LOG"
+          if [ \$n -le 2 ]; then
+            echo "user pts/0 2024-01-01 00:00"
+          fi
+          exit 0
+          EOF
+          cat > "$BIN/sleep" <<EOF
+          #!/bin/sh
+          echo "sleep \$*" >> "$LOG"
+          exit 0
+          EOF
+          chmod +x "$BIN/docker" "$BIN/who" "$BIN/sleep"
+          echo "$BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        timeout-minutes: 3
+      - name: Assert polled until drained, then cleaned up
+        run: |
+          LOG="$RUNNER_TEMP/calls.log"
+          echo "--- calls ---"; cat "$LOG"
+          WHO=$(grep -cx "who" "$LOG" || true)
+          SLEEPS=$(grep -c "^sleep 5$" "$LOG" || true)
+          echo "who calls: $WHO, sleep calls: $SLEEPS"
+          [ "$WHO" = "3" ] || { echo "FAIL: expected 3 who polls"; exit 1; }
+          [ "$SLEEPS" = "2" ] || { echo "FAIL: expected 2 sleeps"; exit 1; }
+          grep -q "^docker system prune -af$" "$LOG" || { echo "FAIL: prune not called"; exit 1; }
+          echo "PASS"

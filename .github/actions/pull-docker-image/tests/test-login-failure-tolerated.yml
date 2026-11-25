@@ -1,0 +1,44 @@
+name: Test login failure is tolerated and pull still runs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws (failing) and docker
+        run: |
+          mkdir -p /tmp/fakebin
+          rm -f /tmp/docker-calls.log /tmp/aws-calls.log /tmp/fake-inspect-exit /tmp/fake-pull-exit /tmp/fake-aws-exit
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/aws-calls.log
+          if [ -f /tmp/fake-aws-exit ]; then exit "$(cat /tmp/fake-aws-exit)"; fi
+          echo "fake-password"
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          echo "$*" >> /tmp/docker-calls.log
+          case "$1" in
+            login) cat >/dev/null; echo "Error: login failed" >&2; exit 1 ;;
+            manifest) echo "manifest unknown" >&2; exit 1 ;;
+            inspect) if [ -f /tmp/fake-inspect-exit ]; then exit "$(cat /tmp/fake-inspect-exit)"; fi; exit 1 ;;
+            pull) if [ -f /tmp/fake-pull-exit ]; then exit "$(cat /tmp/fake-pull-exit)"; fi; echo "pulled $2"; exit 0 ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "1" > /tmp/fake-aws-exit
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: public.example.com/library/alpine:3
+      - name: Assert login retried and pull still ran
+        run: |
+          echo "--- docker calls ---"; cat /tmp/docker-calls.log
+          N=$(grep -c "^login " /tmp/docker-calls.log)
+          echo "login attempts: $N"
+          if [ "$N" != "3" ]; then echo "FAIL: expected 3 login attempts (retry)"; exit 1; fi
+          grep -qx "pull public.example.com/library/alpine:3" /tmp/docker-calls.log || { echo "FAIL: pull missing"; exit 1; }
+          echo "PASS"

@@ -1,0 +1,57 @@
+name: Test periodic callback with invalid triage verdict
+on:
+  workflow_dispatch:
+jobs:
+  periodic-job:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONS_ID_TOKEN_REQUEST_URL: http://127.0.0.1:8765/token?api-version=2.0
+      ACTIONS_ID_TOKEN_REQUEST_TOKEN: mock-oidc-request-token
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start local OIDC + relay stand-in
+        run: |
+          rm -rf /tmp/mock-captures && mkdir -p /tmp/mock-captures
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay_server.py" 8765 /tmp/mock-captures > /tmp/mock-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8765/health >/dev/null; then echo "server up"; exit 0; fi
+            sleep 1
+          done
+          cat /tmp/mock-server.log
+          echo "FAIL: mock server did not start"
+          exit 1
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: failure
+          delivery-id: abcdef0123456789abcdef0123456789abcdef01
+          event-type: periodic
+          callback-url: http://127.0.0.1:8765/github/callback
+          triage-verdict: '["not", "an", "object"]'
+      - name: Assert payload (invalid verdict dropped, default job-name)
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then echo "FAIL: action did not succeed"; exit 1; fi
+          python3 - <<'EOF'
+          import glob, json, sys
+          files = sorted(glob.glob("/tmp/mock-captures/*.json"))
+          if len(files) != 1:
+              sys.exit(f"FAIL: expected exactly 1 callback, got {len(files)}")
+          cap = json.load(open(files[0]))
+          print(json.dumps(cap, indent=2))
+          b = cap["body"]; w = b["workflow"]
+          def check(cond, msg):
+              if not cond:
+                  sys.exit("FAIL: " + msg)
+          check(b["event_type"] == "periodic", "event_type")
+          check(b["delivery_id"] == "abcdef0123456789abcdef0123456789abcdef01", "delivery_id")
+          check(w["conclusion"] == "failure", "conclusion")
+          check(w["job_name"] == "periodic-job", f"job_name {w['job_name']!r}")
+          check("triage_verdict" not in w, "invalid triage_verdict should be dropped")
+          check("test_results" not in w, "no test_results expected")
+          check("artifact_url" not in w, "no artifact_url expected")
+          print("PASS")
+          EOF
