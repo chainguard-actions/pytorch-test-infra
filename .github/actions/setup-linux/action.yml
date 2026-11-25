@@ -109,7 +109,7 @@ runs:
         echo "does=${needs}" >> $GITHUB_OUTPUT
 
     - name: Install nvidia driver, nvidia-docker runtime, set GPU_FLAG
-      uses: chainguard-actions/pytorch-test-infra/.github/actions/setup-nvidia@1f3aa09e66aeaa34ca3a19fd54ee10a0796602f4 # main
+      uses: chainguard-actions/pytorch-test-infra/.github/actions/setup-nvidia@5ca26ef5b501ab50bf9ddbe63e7165a6081591fd # main
       if: ${{ steps.needs-nvidia-driver.outputs.does == 1 && steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false'}}
 
     - name: Set GPU_FLAG if in a container that has a NVIDIA GPU
