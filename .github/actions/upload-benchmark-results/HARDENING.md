@@ -10,13 +10,13 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v20261109-232755** was hardened automatically. 1 finding(s) were identified and resolved across 2 iteration(s).
+Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v20261109-232755** was hardened automatically. 1 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-action.yml has composite steps that point to a branch name instead of a full 40-character commit SHA. Anyone who can push to that branch can change the code this action runs. Failing references: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main'.
+action.yml has composite steps that reference actions by branch instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-uv@main` (line 31) and `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main` (line 115). Whoever controls the main branch of pytorch/test-infra can change the code these steps run. Pin both to a full commit SHA.
 
 Locations:
 
@@ -31,17 +31,5 @@ Locations:
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/setup-uv and get-workflow-job-id from @main to commit 2b58f4db8fb1a4e9ed91bd3bd29d16ec00c3de1f, the upstream commit this version was built from (confirmed with lookup_action_sha). A '# main' comment marks each one. Nothing else was changed.
-
-### Iteration 2
-
-**Fixes applied:** github-env-injection
-
-**Notes:**
-
-I fixed the finding in action.yml, in the 'Install dependencies' step. Before the venv path is written to $GITHUB_ENV, it is now run through printf '%s' ... | tr -d '\n\r', and $GITHUB_ENV is quoted. A normal RUNNER_TEMP path has no newlines, so the value written is the same as before. Nothing else in the file was changed.
-
-Two other steps in the same file also write to $GITHUB_ENV without stripping newlines, and I left both alone because they weren't in the finding. 'Get device name' writes DEVICE_NAME, but that is always one of a few fixed strings set in the script, so there is no risk. 'Get device type' writes DEVICE_TYPE, which comes from the output of tools like nvidia-smi or lscpu. That one is the more likely to come up in a future scan, and the same strip-newlines fix would apply.
-
-Nothing was run or tested.
+Pinned pytorch/test-infra/.github/actions/setup-uv and get-workflow-job-id in action.yml (lines 31 and 115) to commit 2b58f4db8fb1a4e9ed91bd3bd29d16ec00c3de1f instead of @main. That is the upstream commit this version was built from, and lookup_action_sha confirmed it exists. Each line keeps a '# main' comment so it's clear which branch was pinned. Nothing was run to test the change.
 
