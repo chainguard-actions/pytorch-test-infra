@@ -10,34 +10,38 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v20261109-232755** was hardened automatically. 2 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v20261109-232755** was hardened automatically. 1 finding(s) were identified and resolved across 2 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-action.yml references composite steps by mutable branch ref instead of a 40-char commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' (line 31) and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main' (line 122).
+action.yml has composite steps that point to a branch name instead of a full 40-character commit SHA. Anyone who can push to that branch can change the code this action runs. Failing references: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main'.
 
 Locations:
 
 - `action.yml:31`
-- `action.yml:122`
-
-### github-env-injection (severity: high)
-
-Step 'Install dependencies' writes a value derived from the inherited process env var RUNNER_TEMP to $GITHUB_ENV without sanitization: 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. The script reads RUNNER_TEMP but never sets it, so this check treats it as workflow-controlled. It needs the printf '%s' ... | tr -d '\n\r' step before the write, and $GITHUB_ENV should be quoted.
-
-Locations:
-
-- `action.yml:41`
+- `action.yml:115`
 
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses, github-env-injection
+**Fixes applied:** unpinned-uses
 
 **Notes:**
 
-Pinned both pytorch/test-infra sub-action references (setup-uv, get-workflow-job-id) from @main to the upstream commit 2b58f4db8fb1a4e9ed91bd3bd29d16ec00c3de1f (checked with lookup_action_sha) and added the comment '# v20261109-232755'. In 'Install dependencies', the VIRTUAL_ENV value now has newlines stripped with printf '%s' | tr -d '\n\r' before it is written, and "$GITHUB_ENV" is quoted. I also quoted $GITHUB_ENV in the two other writes (DEVICE_NAME, DEVICE_TYPE), which the finding did not flag. Nothing was run to test these changes.
+Pinned pytorch/test-infra/.github/actions/setup-uv and get-workflow-job-id from @main to commit 2b58f4db8fb1a4e9ed91bd3bd29d16ec00c3de1f, the upstream commit this version was built from (confirmed with lookup_action_sha). A '# main' comment marks each one. Nothing else was changed.
+
+### Iteration 2
+
+**Fixes applied:** github-env-injection
+
+**Notes:**
+
+I fixed the finding in action.yml, in the 'Install dependencies' step. Before the venv path is written to $GITHUB_ENV, it is now run through printf '%s' ... | tr -d '\n\r', and $GITHUB_ENV is quoted. A normal RUNNER_TEMP path has no newlines, so the value written is the same as before. Nothing else in the file was changed.
+
+Two other steps in the same file also write to $GITHUB_ENV without stripping newlines, and I left both alone because they weren't in the finding. 'Get device name' writes DEVICE_NAME, but that is always one of a few fixed strings set in the script, so there is no risk. 'Get device type' writes DEVICE_TYPE, which comes from the output of tools like nvidia-smi or lscpu. That one is the more likely to come up in a future scan, and the same strip-newlines fix would apply.
+
+Nothing was run or tested.
 
