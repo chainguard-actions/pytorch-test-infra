@@ -77,24 +77,22 @@ runs:
       shell: bash
       working-directory: ${{ inputs.repository }}
       run: |
-        SAFE_RUNNER_TEMP="$(printf '%s' "${RUNNER_TEMP}" | tr -d '\n\r')"
-
-        RUNNER_ARTIFACT_DIR="${SAFE_RUNNER_TEMP}/artifacts"
+        RUNNER_ARTIFACT_DIR="${RUNNER_TEMP}/artifacts"
         sudo rm -rf "${RUNNER_ARTIFACT_DIR}"
         mkdir -p "${RUNNER_ARTIFACT_DIR}"
-        safe="$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')"
+        safe=$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')
         echo "RUNNER_ARTIFACT_DIR=${safe}" >> "${GITHUB_ENV}"
 
-        RUNNER_TEST_RESULTS_DIR="${SAFE_RUNNER_TEMP}/test-results"
+        RUNNER_TEST_RESULTS_DIR="${RUNNER_TEMP}/test-results"
         sudo rm -rf "${RUNNER_TEST_RESULTS_DIR}"
         mkdir -p "${RUNNER_TEST_RESULTS_DIR}"
-        safe="$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')"
+        safe=$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')
         echo "RUNNER_TEST_RESULTS_DIR=${safe}" >> "${GITHUB_ENV}"
 
-        RUNNER_DOCS_DIR="${SAFE_RUNNER_TEMP}/docs"
+        RUNNER_DOCS_DIR="${RUNNER_TEMP}/docs"
         sudo rm -rf "${RUNNER_DOCS_DIR}"
         mkdir -p "${RUNNER_DOCS_DIR}"
-        safe="$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')"
+        safe=$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')
         echo "RUNNER_DOCS_DIR=${safe}" >> "${GITHUB_ENV}"
 
     - name: Needs nvidia driver?
@@ -109,7 +107,7 @@ runs:
         echo "does=${needs}" >> $GITHUB_OUTPUT
 
     - name: Install nvidia driver, nvidia-docker runtime, set GPU_FLAG
-      uses: pytorch/test-infra/.github/actions/setup-nvidia@9206d491d3a5507163cb9d5b77040d4c3ef5e038 # v20261027-001733 (upstream main at build time)
+      uses: pytorch/test-infra/.github/actions/setup-nvidia@9206d491d3a5507163cb9d5b77040d4c3ef5e038 # v20261027-001733 (was main)
       if: ${{ steps.needs-nvidia-driver.outputs.does == 1 && steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false'}}
 
     - name: Set GPU_FLAG if in a container that has a NVIDIA GPU
