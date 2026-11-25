@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Gather the metadata' step puts the expression ${{ inputs.venv }} straight into the run: script. The lines are `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script text before the shell parses it, so a crafted venv input can break out of the quotes and run arbitrary commands. Fix: move it into env (VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
+Rule (a): the 'Gather the metadata' step puts the expression ${{ inputs.venv }} straight into the run: script, in `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script text before the shell runs, so a crafted value can break out of the quotes and run its own commands. Fix: set it through env (VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
 
 Locations:
 
@@ -25,7 +25,7 @@ Locations:
 
 ### unpinned-uses (severity: high)
 
-A composite step references an action by a mutable branch instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
+A composite step pins an action to a branch instead of a full commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Anyone who can push to that branch changes the code this action runs.
 
 Locations:
 
@@ -55,5 +55,12 @@ Locations:
 
 **Notes:**
 
-Moved inputs.venv into the step env as VENV and referenced as "${VENV}". Pinned pytorch/test-infra/.github/actions/get-workflow-job-id to the upstream commit 13fc79c71b9a7c86a46d898782991a6418778f0b (verified via lookup), matching the version this mirror was built from.
+I fixed all three findings in action.yml.
+
+- **Script injection (`script-injection` and both `static-inline-injection` locations):** the 'Gather the metadata' step no longer puts `inputs.venv` straight into the script. It is now set as `VENV: ${{ inputs.venv }}` in the step's `env:` block, and the script uses `"${VENV}"` in the `-n` check and the `source` call.
+- **Unpinned `uses:` (`unpinned-uses`):** the `pytorch/test-infra/.github/actions/get-workflow-job-id` step was pinned to the `main` branch. It is now pinned to commit 13fc79c71b9a7c86a46d898782991a6418778f0b, with a `# main` comment.
+
+About the pin: I didn't look up where `main` currently points. That commit is the upstream commit this mirror version was built from, given as upstream_commit in the request. The sub-action comes from the same repository, so pinning it there keeps it matched to the rest of this action. Newer changes on upstream's `main` won't be picked up.
+
+Nothing was run or tested after the changes.
 
