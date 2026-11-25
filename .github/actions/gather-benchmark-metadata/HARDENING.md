@@ -14,22 +14,22 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ## Findings Fixed
 
+### unpinned-uses (severity: high)
+
+The composite step points to a branch, not a commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Whoever controls that branch can change the code this action runs. Pin it to a full 40-character commit SHA.
+
+Locations:
+
+- `action.yml:38`
+
 ### script-injection (severity: high)
 
-Rule (a) is broken: the 'Gather the metadata' step puts the `inputs.venv` expression straight into the run: script, so the template text is pasted into the script before the shell parses it. Offending lines: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. A caller-supplied venv value containing quotes or shell metacharacters can run arbitrary commands. Fix: map the input to an env var, e.g. `VENV: ${{ inputs.venv }}`, and use `"$VENV"` in the script.
+Rule (a), direct expression interpolation: the 'Gather the metadata' step puts `${{ inputs.venv }}` straight into the run script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The input is pasted into the script before the shell runs, so a crafted value can inject commands. Pass it through an env variable (e.g. VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
 
 Locations:
 
 - `action.yml:57`
 - `action.yml:58`
-
-### unpinned-uses (severity: high)
-
-A composite step references an action by a mutable branch instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Pin it to a commit SHA.
-
-Locations:
-
-- `action.yml:38`
 
 ### static-inline-injection (severity: high)
 
@@ -51,12 +51,12 @@ Locations:
 
 ### Iteration 1
 
-**Fixes applied:** script-injection, unpinned-uses, static-inline-injection
+**Fixes applied:** unpinned-uses, script-injection, static-inline-injection
 
 **Notes:**
 
-All findings are fixed, all in action.yml. I haven't run the action to test the changes.
+Both findings are fixed in action.yml. I haven't run the action to test the changes.
 
-- **Unpinned action:** `get-workflow-job-id@main` now points to a fixed commit, the upstream commit this mirror was built from (bd1d492a2fc0fbc2310fe4ebc4c4250abdbbf25c). I chose that over the current `main` (8cd319865066bf94e5be2b0180d081175095c980) so the sub-action stays at the same version as the rest of this release. The trailing comment `# main` keeps the original branch name visible.
-- **Script injection (both findings):** the `venv` input is now passed to the 'Gather the metadata' step through `env: VENV`. The script tests and sources it as `"${VENV}"`, so a caller-supplied value can no longer be run as shell code. The step behaves the same as before: it sources the file only when the value is non-empty.
+- **Unpinned action:** `get-workflow-job-id@main` now points to the full commit `bd1d492a2fc0fbc2310fe4ebc4c4250abdbbf25c`, with a `# main` comment. That's the upstream commit this version was built from, not the current tip of `main` (that tip is `058f82ec7cd2fb6cbe66f44cccd28a8c8861b072`). I chose it so the sub-action matches the rest of this release.
+- **Script injection:** in the 'Gather the metadata' step, `inputs.venv` is now passed through the step's `env:` block as `VENV`. The script reads it as a quoted `"${VENV}"` in both the `-n` check and the `source` line, and does the same thing as before.
 
