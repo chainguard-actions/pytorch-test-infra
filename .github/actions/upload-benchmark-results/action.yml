@@ -45,7 +45,7 @@ runs:
           -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
           "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
     - name: Setup uv
-      uses: chainguard-actions/pytorch-test-infra/.github/actions/setup-uv@fa57b22c39d499d7825a9c2ad09226a7d96a08e8 # main
+      uses: chainguard-actions/pytorch-test-infra/.github/actions/setup-uv@00801b2cf7cd2993d1900f8172a93afd02ffb111 # main
 
     - name: Install dependencies
       shell: bash
