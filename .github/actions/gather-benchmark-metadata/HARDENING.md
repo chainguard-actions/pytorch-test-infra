@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ### unpinned-uses (severity: high)
 
-The composite step points to a branch, not a commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Whoever controls that branch can change the code this action runs. Pin it to a full 40-character commit SHA.
+The composite step uses a branch ref instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Pin it to a commit SHA.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a), direct expression interpolation: the 'Gather the metadata' step puts `${{ inputs.venv }}` straight into the run script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The input is pasted into the script before the shell runs, so a crafted value can inject commands. Pass it through an env variable (e.g. VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
+Sub-rule (a): the 'Gather the metadata' step puts a GitHub Actions expression directly inside its run: script. The offending lines are `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. Because the input is substituted into the script before bash runs it, a crafted venv value can run arbitrary shell commands. Fix: add `VENV: ${{ inputs.venv }}` to the step's env: block and use "$VENV" in the script.
 
 Locations:
 
@@ -57,6 +57,6 @@ Locations:
 
 Both findings are fixed in action.yml. I haven't run the action to test the changes.
 
-- **Unpinned action:** `get-workflow-job-id@main` now points to the full commit `bd1d492a2fc0fbc2310fe4ebc4c4250abdbbf25c`, with a `# main` comment. That's the upstream commit this version was built from, not the current tip of `main` (that tip is `058f82ec7cd2fb6cbe66f44cccd28a8c8861b072`). I chose it so the sub-action matches the rest of this release.
-- **Script injection:** in the 'Gather the metadata' step, `inputs.venv` is now passed through the step's `env:` block as `VENV`. The script reads it as a quoted `"${VENV}"` in both the `-n` check and the `source` line, and does the same thing as before.
+- **Unpinned sub-action:** `get-workflow-job-id` was referenced as `@main`. It is now pinned to `bd1d492a2fc0fbc2310fe4ebc4c4250abdbbf25c # main`. That is the upstream test-infra commit this action version was built from, so the sub-action matches it. It is not the current tip of `main`. I confirmed the SHA exists with lookup_action_sha.
+- **Script injection:** `inputs.venv` was pasted straight into the 'Gather the metadata' script. It now goes through the step's env as `VENV`, and the script uses `"${VENV}"` in both the empty check and the `source` line. The behaviour is unchanged: an empty value still skips the `source`.
 
