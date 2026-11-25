@@ -10,26 +10,34 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v20261112-155209** was hardened automatically. 1 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v20261112-155209** was hardened automatically. 2 finding(s) were identified and resolved across 1 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-action.yml has composite steps whose `uses:` refs point at a mutable branch instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-uv@main` (line 31) and `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main` (line 115). The second step is passed `inputs.github-token`. Pin both to a commit SHA.
+action.yml composite steps reference actions by a mutable branch ref instead of a 40-char commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main'.
 
 Locations:
 
 - `action.yml:31`
 - `action.yml:115`
 
+### github-env-injection (severity: high)
+
+Step 'Install dependencies' writes a value derived from an inherited process env var (RUNNER_TEMP, not computed in the same run block) to $GITHUB_ENV without the sanitization step: 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. Apply safe=$(printf '%s' "$VIRTUAL_ENV" | tr -d '\n\r') before writing, and quote "$GITHUB_ENV".
+
+Locations:
+
+- `action.yml:41`
+
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses
+**Fixes applied:** unpinned-uses, github-env-injection
 
 **Notes:**
 
-I pinned both pytorch/test-infra sub-action references in action.yml (setup-uv and get-workflow-job-id) to commit 6f7274a0eff04dd4f8ada574e4e144610cece2c8, with a '# main' comment to show the original ref. I used the request's upstream_commit rather than looking up the SHA. It is a real commit in pytorch/test-infra, and it is the one this version was built from, so the sub-actions match the rest of the action instead of the current tip of main. Nothing else was changed and nothing was run to test it.
+Pinned the two pytorch/test-infra sub-actions (setup-uv, get-workflow-job-id) to 6f7274a0eff04dd4f8ada574e4e144610cece2c8, the upstream commit this version was built from. I took that SHA from the request and did not look up what main points to now. Each pin keeps a '# main' comment. In action.yml, the writes of VIRTUAL_ENV, DEVICE_NAME and DEVICE_TYPE to $GITHUB_ENV now strip newlines with printf | tr -d '\n\r', and $GITHUB_ENV is quoted. Only VIRTUAL_ENV was in the findings; I gave the other two the same treatment. The script's existing set -eux behaviour is unchanged. I haven't run the action to test these changes.
 
