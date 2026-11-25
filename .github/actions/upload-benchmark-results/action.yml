@@ -45,7 +45,7 @@ runs:
           -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
           "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
     - name: Setup uv
-      uses: pytorch/test-infra/.github/actions/setup-uv@e9b5b0a4c36ebfde49dec880ae77705038009471 # main
+      uses: pytorch/test-infra/.github/actions/setup-uv@e9b5b0a4c36ebfde49dec880ae77705038009471 # v20261103-202628
 
     - name: Install dependencies
       shell: bash
@@ -55,8 +55,7 @@ runs:
         uv venv --clear "${RUNNER_TEMP}/benchmark-upload-venv"
 
         export VIRTUAL_ENV="${RUNNER_TEMP}/benchmark-upload-venv"
-        safe=$(printf '%s' "${RUNNER_TEMP}/benchmark-upload-venv" | tr -d '\n\r')
-        echo "VIRTUAL_ENV=$safe" >> "$GITHUB_ENV"
+        echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV
 
         uv pip install boto3==1.35.33 psutil==7.0.0 nvidia-ml-py==13.580.82
 
@@ -130,7 +129,7 @@ runs:
     - name: Get workflow job id
       if: ${{ inputs.github-token != '' }}
       id: get-job-id
-      uses: pytorch/test-infra/.github/actions/get-workflow-job-id@e9b5b0a4c36ebfde49dec880ae77705038009471 # main
+      uses: pytorch/test-infra/.github/actions/get-workflow-job-id@e9b5b0a4c36ebfde49dec880ae77705038009471 # v20261103-202628
       with:
         github-token: ${{ inputs.github-token }}
 
