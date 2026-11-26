@@ -16,20 +16,20 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ### script-injection (severity: high)
 
-Rule (a) is broken in step 'Gather the metadata'. The input expression ${{ inputs.venv }} is placed straight into the run: script, in `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script before bash runs, so a caller-supplied venv value containing quotes or command substitution would run as shell code. Fix: pass it through env (VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
+Rule (a) is violated: the expression ${{ inputs.venv }} is placed directly inside the run: script of the 'Gather the metadata' step. The offending lines are `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script text before bash runs, so a crafted venv input can inject shell commands. To fix it, map the input to an env var (VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
 
 Locations:
 
-- `action.yml:57`
-- `action.yml:58`
+- `action.yml:59`
+- `action.yml:60`
 
 ### unpinned-uses (severity: high)
 
-A composite step references an action by branch instead of a commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Pin it to a full 40-character commit SHA.
+A composite step points to a branch instead of a commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Pin it to a full 40-character commit SHA.
 
 Locations:
 
-- `action.yml:38`
+- `action.yml:39`
 
 ### static-inline-injection (severity: high)
 
@@ -55,5 +55,5 @@ Locations:
 
 **Notes:**
 
-I moved inputs.venv into the env: block of the 'Gather the metadata' step as VENV. The script now uses "${VENV}" in both the -n check and the source line. I pinned pytorch/test-infra/.github/actions/get-workflow-job-id from @main to the upstream_commit (bd1d492a2fc0fbc2310fe4ebc4c4250abdbbf25c), which is the commit this action version was built from, and left '# main' as a comment. The current tip of main is d50cbade0e174f113111122f50b7a814b9b4c61d, but I didn't use it because the pin should match this release. I didn't run the action or re-run the analysis to confirm the findings are gone.
+I made two changes to action.yml in the 'Gather the metadata' step and the job-id step. First, the step no longer pastes ${{ inputs.venv }} into its script. The input now comes in through a VENV entry in the step's env: block, and the script uses "${VENV}" in both the empty check and the source line. Second, pytorch/test-infra/.github/actions/get-workflow-job-id is now pinned to commit bd1d492a2fc0fbc2310fe4ebc4c4250abdbbf25c (marked '# main'). That is the commit this action version was built from, so the sub-action matches it. pytorch/test-infra's main branch is currently at a1a8f075de6859c2130f960ed710871b5f99ac19. I didn't pin to that because it would bring in newer code than this release used. Nothing has been run to test these changes.
 
