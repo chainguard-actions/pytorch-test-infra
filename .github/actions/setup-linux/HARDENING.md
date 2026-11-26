@@ -10,35 +10,33 @@
 
 **Harden Agent Version:** `2`
 
-Action **pytorch--test-infra--.github--actions--setup-linux/v20261119-192116** was hardened automatically. 2 finding(s) were identified and resolved across 1 iteration(s).
+Action **pytorch--test-infra--.github--actions--setup-linux/v20261119-192116** was hardened automatically. 1 finding(s) were identified and resolved across 2 iteration(s).
 
 ## Findings Fixed
 
 ### unpinned-uses (severity: high)
 
-action.yml points to an action by a branch name instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Whatever is on that branch can change at any time and would run inside this action.
+The composite action step 'Install nvidia driver, nvidia-docker runtime, set GPU_FLAG' points to a branch, not a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Anyone who can push to that branch can change the code this action runs. Pin it to a specific commit SHA.
 
 Locations:
 
 - `action.yml:90`
 
-### github-env-injection (severity: high)
-
-The 'Setup useful environment variables' step builds RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR from the inherited process env var ${RUNNER_TEMP}, which this script reads but does not set. It writes them to $GITHUB_ENV without first running `printf '%s' ... | tr -d '\n\r'`, e.g. `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"`. A composite action inherits env from the calling workflow, so a newline in that value could inject extra environment variables.
-
-Locations:
-
-- `action.yml:66`
-- `action.yml:71`
-- `action.yml:76`
-
 ## Iteration Notes
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses, github-env-injection
+**Fixes applied:** unpinned-uses
 
 **Notes:**
 
-Pinned the setup-nvidia step to pytorch/test-infra commit 7f4a746b35c7ac614b8dbfe3eb8a4e25fd23b3a4 instead of the moving `main` branch. I checked that commit with lookup_action_sha; it is the upstream commit this mirror was built from. The three lines in the 'Setup useful environment variables' step that wrote paths built from RUNNER_TEMP to $GITHUB_ENV now remove newline and carriage-return characters first (`printf '%s' ... | tr -d '\n\r'`). A normal path contains neither, so the values written are the same as before. I haven't run the action or re-run the analysis to confirm the findings are cleared.
+Pinned pytorch/test-infra/.github/actions/setup-nvidia@main to commit 7f4a746b35c7ac614b8dbfe3eb8a4e25fd23b3a4 (# main) in action.yml. That is the upstream_commit this release was built from, and it is in the same pytorch/test-infra repo, so the setup-nvidia version matches this setup-linux release. That was the only uses: reference in the action. Nothing was run to test the change.
+
+### Iteration 2
+
+**Fixes applied:** github-env-injection
+
+**Notes:**
+
+In the 'Setup useful environment variables' step, newlines are now stripped from RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR with printf '%s' | tr -d '\n\r' right before each is written to $GITHUB_ENV. The directory create/delete commands and the values written are otherwise unchanged. The step runs under shell: bash, which sets pipefail, so a failure inside the pipe still stops the step.
 
