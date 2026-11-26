@@ -14,22 +14,22 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ## Findings Fixed
 
+### unpinned-uses (severity: high)
+
+The composite step uses an action pinned to a branch, not a full commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. If that branch changes, the new code runs here and receives the github-token input. Pin it to a 40-character commit SHA.
+
+Locations:
+
+- `action.yml:38`
+
 ### script-injection (severity: high)
 
-Rule (a): the 'Gather the metadata' step puts the expression ${{ inputs.venv }} straight into the run: script, in `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script text before the shell runs, so a crafted value can break out of the quotes and run its own commands. Fix: set it through env (VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
+Rule (a), direct expression interpolation. In the 'Gather the metadata' step, `${{ inputs.venv }}` is placed straight into the run script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted before the shell parses the script, so the caller can inject shell commands. Move it into an env variable (e.g. `VENV: ${{ inputs.venv }}`) and use it double-quoted as "$VENV".
 
 Locations:
 
 - `action.yml:57`
 - `action.yml:58`
-
-### unpinned-uses (severity: high)
-
-A composite step pins an action to a branch instead of a full commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Anyone who can push to that branch changes the code this action runs.
-
-Locations:
-
-- `action.yml:38`
 
 ### static-inline-injection (severity: high)
 
@@ -51,16 +51,12 @@ Locations:
 
 ### Iteration 1
 
-**Fixes applied:** script-injection, static-inline-injection, unpinned-uses
+**Fixes applied:** unpinned-uses, script-injection, static-inline-injection
 
 **Notes:**
 
-I fixed all three findings in action.yml.
+Both findings are fixed in action.yml. I haven't run the action to test it.
 
-- **Script injection (`script-injection` and both `static-inline-injection` locations):** the 'Gather the metadata' step no longer puts `inputs.venv` straight into the script. It is now set as `VENV: ${{ inputs.venv }}` in the step's `env:` block, and the script uses `"${VENV}"` in the `-n` check and the `source` call.
-- **Unpinned `uses:` (`unpinned-uses`):** the `pytorch/test-infra/.github/actions/get-workflow-job-id` step was pinned to the `main` branch. It is now pinned to commit 13fc79c71b9a7c86a46d898782991a6418778f0b, with a `# main` comment.
-
-About the pin: I didn't look up where `main` currently points. That commit is the upstream commit this mirror version was built from, given as upstream_commit in the request. The sub-action comes from the same repository, so pinning it there keeps it matched to the rest of this action. Newer changes on upstream's `main` won't be picked up.
-
-Nothing was run or tested after the changes.
+- **Unpinned action:** `pytorch/test-infra/.github/actions/get-workflow-job-id@main` is now pinned to commit 13fc79c71b9a7c86a46d898782991a6418778f0b, with a trailing comment naming the old branch. That commit is the one this mirror was built from (the request's upstream_commit), and lookup_action_sha confirmed it exists in pytorch/test-infra. I used it rather than the current tip of `main` so the sub-action matches this release.
+- **Script injection:** In the 'Gather the metadata' step, `inputs.venv` now goes into the step's env block as `VENV`, and the script uses it double-quoted as `"${VENV}"`. The empty-check and `source` work as before.
 

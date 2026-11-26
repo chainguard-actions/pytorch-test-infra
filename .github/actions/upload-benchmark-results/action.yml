@@ -89,8 +89,7 @@ runs:
               ;;
           esac
         fi
-        safe_device_name=$(printf '%s' "$DEVICE_NAME" | tr -d '\n\r')
-        echo "DEVICE_NAME=$safe_device_name" >> "$GITHUB_ENV"
+        echo "DEVICE_NAME=$DEVICE_NAME" >> $GITHUB_ENV
 
     - name: Get device type
       shell: bash

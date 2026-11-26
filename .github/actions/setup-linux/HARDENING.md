@@ -16,15 +16,15 @@ Action **pytorch--test-infra--.github--actions--setup-linux/v20261125-022556** w
 
 ### unpinned-uses (severity: high)
 
-The composite step pins its action to a branch, not a 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Anyone who can push to that branch can change the code this action runs.
+action.yml has a composite step that references an action by a mutable branch, not a 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Pin it to a full commit SHA.
 
 Locations:
 
-- `action.yml:90`
+- `action.yml:89`
 
 ### github-env-injection (severity: high)
 
-The 'Setup useful environment variables' step builds RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR from the inherited env var RUNNER_TEMP, which this script does not set. It then writes them to $GITHUB_ENV (e.g. `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"`) without the `printf '%s' ... | tr -d '\n\r'` sanitization step first. A calling workflow could set RUNNER_TEMP to a value containing newlines and inject extra environment variables.
+The step 'Setup useful environment variables' builds values from the inherited process env var RUNNER_TEMP and writes them to $GITHUB_ENV without sanitizing them first. The script does not set RUNNER_TEMP itself, so under this check it counts as workflow-controlled. Affected writes: `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"`, and the same pattern for RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR. Pass each value through `printf '%s' ... | tr -d '\n\r'` right before the write.
 
 Locations:
 
@@ -40,9 +40,5 @@ Locations:
 
 **Notes:**
 
-I fixed both findings in action.yml.
-
-1. unpinned-uses: the step used pytorch/test-infra/.github/actions/setup-nvidia@main. It now points at 13fc79c71b9a7c86a46d898782991a6418778f0b, the upstream commit this mirror version was built from. lookup_action_sha confirmed that SHA exists. A comment keeps the original ref name.
-
-2. github-env-injection: in the 'Setup useful environment variables' step, the three directory paths (RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR, RUNNER_DOCS_DIR) now have newlines and carriage returns stripped with printf '%s' | tr -d '\n\r' before they're written to $GITHUB_ENV. The directories are still created the same way as upstream. Each value is a fixed path under RUNNER_TEMP, so a normal value comes out unchanged.
+Pinned pytorch/test-infra/.github/actions/setup-nvidia from @main to the upstream commit 13fc79c71b9a7c86a46d898782991a6418778f0b, the same test-infra commit this action version was built from. I checked the SHA with lookup_action_sha. In 'Setup useful environment variables', each of RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR now goes through printf '%s' | tr -d '\n\r' right before it is written to GITHUB_ENV. The variable names and directory paths have not changed, and the rm and mkdir commands work as before. I didn't run anything to test the change.
 
