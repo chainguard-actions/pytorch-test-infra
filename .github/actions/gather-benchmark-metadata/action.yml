@@ -52,7 +52,7 @@ runs:
     - name: Get workflow job id
       if: ${{ inputs.github-token != '' }}
       id: get-job-id
-      uses: pytorch/test-infra/.github/actions/get-workflow-job-id@f2f972bd8f3eab11aa0094897a81879653c6f141 # main (v20261029-163400)
+      uses: pytorch/test-infra/.github/actions/get-workflow-job-id@f2f972bd8f3eab11aa0094897a81879653c6f141 # v20261029-163400
       with:
         github-token: ${{ inputs.github-token }}
 
@@ -61,7 +61,6 @@ runs:
       shell: bash
       env:
         SCHEMA_VERSION: ${{ inputs.schema-version }}
-        VENV: ${{ inputs.venv }}
         REPO: ${{ github.repository }}
         HEAD_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
         HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -69,6 +68,7 @@ runs:
         RUN_ATTEMPT: ${{ github.run_attempt }}
         JOB_ID: ${{ inputs.github-token != '' && steps.get-job-id.outputs.job-id || '0' }}
         JOB_NAME: ${{ inputs.github-token != '' && steps.get-job-id.outputs.job-name || '' }}
+        VENV: ${{ inputs.venv }}
       run: |
         set -eux
 

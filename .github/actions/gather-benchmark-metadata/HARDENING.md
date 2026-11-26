@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ### unpinned-uses (severity: high)
 
-action.yml references a composite action by a mutable branch instead of a full commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
+action.yml uses an action by a branch name instead of a commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Pin it to a full 40-character commit SHA.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a) violated in the 'Gather the metadata' step: the run block puts the expression `${{ inputs.venv }}` straight into the script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is substituted into the script before the shell runs it, so a crafted input can inject commands. Fix: pass it through env (e.g. `VENV: ${{ inputs.venv }}`) and use "$VENV" in the script.
+Sub-rule (a): the 'Gather the metadata' step puts an expression straight into its run: script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The caller controls inputs.venv, so a crafted value can break out of the quotes and run commands. Pass it through an env: variable (e.g. VENV: ${{ inputs.venv }}) and use "$VENV" in double quotes instead.
 
 Locations:
 
@@ -55,5 +55,10 @@ Locations:
 
 **Notes:**
 
-Pinned `pytorch/test-infra/.github/actions/get-workflow-job-id` to f2f972bd8f3eab11aa0094897a81879653c6f141 (# main (v20261029-163400)). This is the upstream commit this mirror version was built from, not the current main head (d50cbade...), so the sub-action stays in step with this release. Also moved `inputs.venv` into the env var `VENV` in the 'Gather the metadata' step, and the script now uses `"${VENV}"` in place of the inline expression.
+I fixed all four findings in action.yml.
+
+- **Unpinned action:** The `get-workflow-job-id` step used `@main`. It is now pinned to `@f2f972bd8f3eab11aa0094897a81879653c6f141 # v20261029-163400`. I looked up the tag v20261029-163400 in pytorch/test-infra and it points to that commit, which is also the upstream commit this version was built from.
+- **Script injection (3 findings, same cause):** In the 'Gather the metadata' step, `inputs.venv` was written straight into the shell script. It is now passed in through the step's `env:` block as `VENV`, and the script uses `"${VENV}"` in double quotes for both the empty check and the `source`. The script behaves the same: an empty value still skips the `source`.
+
+I didn't run anything to test these changes.
 
