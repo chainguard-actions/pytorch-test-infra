@@ -45,7 +45,7 @@ runs:
           -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
           "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
     - name: Setup uv
-      uses: pytorch/test-infra/.github/actions/setup-uv@f2f972bd8f3eab11aa0094897a81879653c6f141 # main
+      uses: pytorch/test-infra/.github/actions/setup-uv@f2f972bd8f3eab11aa0094897a81879653c6f141 # v20261029-163400
 
     - name: Install dependencies
       shell: bash
@@ -131,7 +131,7 @@ runs:
     - name: Get workflow job id
       if: ${{ inputs.github-token != '' }}
       id: get-job-id
-      uses: pytorch/test-infra/.github/actions/get-workflow-job-id@f2f972bd8f3eab11aa0094897a81879653c6f141 # main
+      uses: pytorch/test-infra/.github/actions/get-workflow-job-id@f2f972bd8f3eab11aa0094897a81879653c6f141 # v20261029-163400
       with:
         github-token: ${{ inputs.github-token }}
 

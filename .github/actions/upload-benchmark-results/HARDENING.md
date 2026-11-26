@@ -16,20 +16,20 @@ Action **pytorch--test-infra--.github--actions--upload-benchmark-results/v202610
 
 ### unpinned-uses (severity: high)
 
-action.yml references composite steps by a mutable branch instead of a full 40-character commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main'.
+action.yml has composite steps that point at a mutable branch instead of a 40-char commit SHA: 'uses: pytorch/test-infra/.github/actions/setup-uv@main' (line 31) and 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main' (line 115). Pin both to a full commit SHA.
 
 Locations:
 
 - `action.yml:31`
-- `action.yml:119`
+- `action.yml:115`
 
 ### github-env-injection (severity: high)
 
-The 'Install dependencies' step writes a value built from the inherited process env var RUNNER_TEMP to $GITHUB_ENV with no sanitization: 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. RUNNER_TEMP is read from the environment, not set by this script. This check requires running printf '%s' ... | tr -d '\n\r' on the value just before the write, and quoting "$GITHUB_ENV".
+The 'Install dependencies' step writes 'echo "VIRTUAL_ENV=${RUNNER_TEMP}/benchmark-upload-venv" >> $GITHUB_ENV'. RUNNER_TEMP is a process env var this composite action inherits; the script reads it and does not compute it. It goes into $GITHUB_ENV without the printf '%s' ... | tr -d '\n\r' step. Strip newlines from the value first (e.g. safe=$(printf '%s' "${RUNNER_TEMP}/benchmark-upload-venv" | tr -d '\n\r')), then write it with the target quoted: >> "$GITHUB_ENV".
 
 Locations:
 
-- `action.yml:42`
+- `action.yml:41`
 
 ## Iteration Notes
 
@@ -39,5 +39,7 @@ Locations:
 
 **Notes:**
 
-I pinned both pytorch/test-infra sub-action references (setup-uv and get-workflow-job-id) to full commit SHA f2f972bd8f3eab11aa0094897a81879653c6f141, which I confirmed with lookup_action_sha. This is the request's upstream_commit, the commit this mirror was built from, so the sub-actions now run at the same commit as the action itself. Before, they followed whatever upstream's main branch held at run time. Each line keeps a '# main' comment showing the branch it used to follow. In 'Install dependencies', VIRTUAL_ENV now has newlines stripped with printf '%s' | tr -d '\n\r' before it is written, and $GITHUB_ENV is quoted. Two extras beyond the findings: I quoted $GITHUB_ENV where DEVICE_NAME is written, and I applied the same newline strip to DEVICE_TYPE, since that value comes from command output. Nothing was run to test these edits.
+I pinned both pytorch/test-infra sub-actions (setup-uv and get-workflow-job-id) to the upstream commit given in the request, f2f972bd8f3eab11aa0094897a81879653c6f141, and added a '# v20261029-163400' comment. I didn't check that SHA with lookup_action_sha, because it comes straight from the request's upstream_commit. Pinning to it makes the sub-actions run at the same upstream commit this mirror version was built from, where '@main' moved over time. I nothing ran or tested after the edits.
+
+For the env finding, the VIRTUAL_ENV value now has newlines stripped (printf '%s' ... | tr -d '\n\r') before it is written to "$GITHUB_ENV", with the target quoted. Two changes were not in the findings: I quoted "$GITHUB_ENV" for the DEVICE_NAME write, and stripped newlines from DEVICE_TYPE (which comes from command output) before writing it. That second one is the same kind of issue and would likely be flagged on the next pass.
 
