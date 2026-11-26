@@ -77,25 +77,25 @@ runs:
       shell: bash
       working-directory: ${{ inputs.repository }}
       run: |
-        SAFE_RUNNER_TEMP="$(printf '%s' "${RUNNER_TEMP}" | tr -d '\n\r')"
+        SAFE_RUNNER_TEMP=$(printf '%s' "${RUNNER_TEMP}" | tr -d '\n\r')
 
         RUNNER_ARTIFACT_DIR="${SAFE_RUNNER_TEMP}/artifacts"
         sudo rm -rf "${RUNNER_ARTIFACT_DIR}"
         mkdir -p "${RUNNER_ARTIFACT_DIR}"
-        SAFE_VALUE="$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')"
-        echo "RUNNER_ARTIFACT_DIR=${SAFE_VALUE}" >> "${GITHUB_ENV}"
+        safe_val=$(printf '%s' "${RUNNER_ARTIFACT_DIR}" | tr -d '\n\r')
+        echo "RUNNER_ARTIFACT_DIR=${safe_val}" >> "${GITHUB_ENV}"
 
         RUNNER_TEST_RESULTS_DIR="${SAFE_RUNNER_TEMP}/test-results"
         sudo rm -rf "${RUNNER_TEST_RESULTS_DIR}"
         mkdir -p "${RUNNER_TEST_RESULTS_DIR}"
-        SAFE_VALUE="$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')"
-        echo "RUNNER_TEST_RESULTS_DIR=${SAFE_VALUE}" >> "${GITHUB_ENV}"
+        safe_val=$(printf '%s' "${RUNNER_TEST_RESULTS_DIR}" | tr -d '\n\r')
+        echo "RUNNER_TEST_RESULTS_DIR=${safe_val}" >> "${GITHUB_ENV}"
 
         RUNNER_DOCS_DIR="${SAFE_RUNNER_TEMP}/docs"
         sudo rm -rf "${RUNNER_DOCS_DIR}"
         mkdir -p "${RUNNER_DOCS_DIR}"
-        SAFE_VALUE="$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')"
-        echo "RUNNER_DOCS_DIR=${SAFE_VALUE}" >> "${GITHUB_ENV}"
+        safe_val=$(printf '%s' "${RUNNER_DOCS_DIR}" | tr -d '\n\r')
+        echo "RUNNER_DOCS_DIR=${safe_val}" >> "${GITHUB_ENV}"
 
     - name: Needs nvidia driver?
       if: ${{ steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false' }}
@@ -109,7 +109,7 @@ runs:
         echo "does=${needs}" >> $GITHUB_OUTPUT
 
     - name: Install nvidia driver, nvidia-docker runtime, set GPU_FLAG
-      uses: pytorch/test-infra/.github/actions/setup-nvidia@0569df511711f70601c984fe3a93dac324afc9ce # v20261109-192709 (upstream main at build)
+      uses: pytorch/test-infra/.github/actions/setup-nvidia@0569df511711f70601c984fe3a93dac324afc9ce # main @ v20261109-192709
       if: ${{ steps.needs-nvidia-driver.outputs.does == 1 && steps.check_container_runner.outputs.IN_CONTAINER_RUNNER == 'false'}}
 
     - name: Set GPU_FLAG if in a container that has a NVIDIA GPU

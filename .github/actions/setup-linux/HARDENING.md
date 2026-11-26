@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-linux/v20261109-192709** w
 
 ### unpinned-uses (severity: high)
 
-The composite step pins its action to a branch, not a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Anyone who can push to that branch can change the code this action runs.
+The composite step pins a branch, not a commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Whoever controls that branch can change the code this action runs. Pin it to a full 40-character commit SHA.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### github-env-injection (severity: high)
 
-The 'Setup useful environment variables' step builds RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR from the inherited process env var RUNNER_TEMP. It then writes them to $GITHUB_ENV (e.g. `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"`) without first running `printf '%s' ... | tr -d '\n\r'`. RUNNER_TEMP is not set inside the script, and a composite action inherits env from the calling workflow. A value containing newlines could therefore add extra environment variables.
+The 'Setup useful environment variables' step builds RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR from the inherited process env var RUNNER_TEMP. It writes them to $GITHUB_ENV (e.g. `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"`) without first running `printf '%s' ... | tr -d '\n\r'`. Under this check, values derived from env vars the caller can set must be sanitized before they are written to environment files.
 
 Locations:
 
@@ -40,9 +40,9 @@ Locations:
 
 **Notes:**
 
-I fixed both findings in hardened/action/action.yml. I haven't run the action since the changes.
+I fixed both findings in hardened/action/action.yml. Nothing has been run or tested.
 
-1. **unpinned-uses:** The step that installs the NVIDIA driver used `pytorch/test-infra/.github/actions/setup-nvidia@main`. I pinned it to `0569df511711f70601c984fe3a93dac324afc9ce`, the upstream commit this mirror was built from. That keeps setup-nvidia on the same code as the rest of this release. I didn't look up the current head of `main`, so the pin is to that build commit, not to whatever `main` points at today.
+1. unpinned-uses: the setup-nvidia step pointed at the `main` branch. It is now pinned to pytorch/test-infra@0569df511711f70601c984fe3a93dac324afc9ce, which is the upstream commit this version (v20261109-192709) was built from. I confirmed that SHA with lookup_action_sha and left a comment saying which version it came from.
 
-2. **github-env-injection:** In the 'Setup useful environment variables' step, `RUNNER_TEMP` now has newlines and carriage returns stripped once at the top. Each of the three values (RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR, RUNNER_DOCS_DIR) is also cleaned with `printf '%s' | tr -d '\n\r'` right before it is written to $GITHUB_ENV. For a normal `RUNNER_TEMP` the directories and the values written are the same as before.
+2. github-env-injection: the 'Setup useful environment variables' step now strips newline and carriage-return characters from RUNNER_TEMP before using it. Each of the three directory paths (RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR, RUNNER_DOCS_DIR) is also cleaned the same way right before it is written to GITHUB_ENV. On a normal runner the paths come out exactly as before.
 

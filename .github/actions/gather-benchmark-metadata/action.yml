@@ -61,6 +61,7 @@ runs:
       shell: bash
       env:
         SCHEMA_VERSION: ${{ inputs.schema-version }}
+        VENV: ${{ inputs.venv }}
         REPO: ${{ github.repository }}
         HEAD_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref }}
         HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
@@ -68,7 +69,6 @@ runs:
         RUN_ATTEMPT: ${{ github.run_attempt }}
         JOB_ID: ${{ inputs.github-token != '' && steps.get-job-id.outputs.job-id || '0' }}
         JOB_NAME: ${{ inputs.github-token != '' && steps.get-job-id.outputs.job-name || '' }}
-        VENV: ${{ inputs.venv }}
       run: |
         set -eux
 
