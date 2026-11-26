@@ -52,7 +52,7 @@ runs:
     - name: Get workflow job id
       if: ${{ inputs.github-token != '' }}
       id: get-job-id
-      uses: pytorch/test-infra/.github/actions/get-workflow-job-id@d50cbade0e174f113111122f50b7a814b9b4c61d # main
+      uses: chainguard-actions/pytorch-test-infra/.github/actions/get-workflow-job-id@94e5f0b1d57f5129bde25028d1f784809ee8a973 # main
       with:
         github-token: ${{ inputs.github-token }}
 
