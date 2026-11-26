@@ -14,22 +14,22 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ## Findings Fixed
 
-### unpinned-uses (severity: high)
-
-Composite step uses a mutable branch ref instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
-
-Locations:
-
-- `action.yml:38`
-
 ### script-injection (severity: high)
 
-Rule (a) violated: the 'Gather the metadata' step puts an expression directly inside its run: script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The input text is pasted into the script before the shell runs, so an attacker-supplied venv value can inject commands. Fix: pass it in through an env: variable (e.g. VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
+Rule (a): the 'Gather the metadata' step puts the inputs.venv expression straight into the run: script, so the value is substituted into the shell source before bash parses it. Offending lines: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. Fix: add `VENV: ${{ inputs.venv }}` to the step's env: block and use `"$VENV"` in the script.
 
 Locations:
 
 - `action.yml:57`
 - `action.yml:58`
+
+### unpinned-uses (severity: high)
+
+The composite step points at a branch instead of a full commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Pin it to a 40-character commit SHA.
+
+Locations:
+
+- `action.yml:38`
 
 ### static-inline-injection (severity: high)
 
@@ -51,9 +51,9 @@ Locations:
 
 ### Iteration 1
 
-**Fixes applied:** unpinned-uses, script-injection, static-inline-injection
+**Fixes applied:** script-injection, static-inline-injection, unpinned-uses
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/get-workflow-job-id to d50cbade0e174f113111122f50b7a814b9b4c61d (resolved main, same as upstream_commit). Moved inputs.venv into env VENV and referenced as "${VENV}" in the run script.
+Moved inputs.venv into the step's env: block as VENV and switched the script to use "${VENV}". Pinned pytorch/test-infra/.github/actions/get-workflow-job-id to d50cbade0e174f113111122f50b7a814b9b4c61d. That is the upstream commit this version was built from, and lookup_action_sha confirmed it exists. The trailing comment still says # main.
 
