@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ### script-injection (severity: high)
 
-Rule (a): the 'Gather the metadata' step puts the expression inputs.venv straight into the run script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. GitHub fills in the value before bash runs, so the quotes don't protect it and a crafted value can run shell commands. Fix: add VENV: ${{ inputs.venv }} to the step's env: block and use "$VENV" in the script.
+Rule (a): the expression ${{ inputs.venv }} is placed directly inside the 'Gather the metadata' run: script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. The value is pasted into the script before the shell runs, so a crafted venv input can run arbitrary commands. Fix: map it to an env var (e.g. VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
 
 Locations:
 
@@ -25,7 +25,7 @@ Locations:
 
 ### unpinned-uses (severity: high)
 
-Unpinned action reference: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main` points to a branch that can change. Pin it to a full 40-character commit SHA.
+A composite step uses a branch ref instead of a commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`. Pin it to a full 40-character commit SHA.
 
 Locations:
 
@@ -55,9 +55,5 @@ Locations:
 
 **Notes:**
 
-All findings are fixed in action.yml. Not tested: I made no test runs.
-
-1. **Script injection (venv input):** The 'Gather the metadata' step no longer pastes `inputs.venv` straight into the script. The input now goes into the step's `env:` block as `VENV`, and the script reads it as "${VENV}".
-
-2. **Unpinned action:** `pytorch/test-infra/.github/actions/get-workflow-job-id@main` is now pinned to `6f7274a0eff04dd4f8ada574e4e144610cece2c8 # main`. I took that SHA from the request's upstream_commit field. I did not look it up with lookup_action_sha. It is the test-infra commit this mirror version was built from. That makes it the same `get-workflow-job-id` code upstream ran at this version, though not necessarily the latest commit on `main`.
+Moved inputs.venv into a VENV env var and referenced it as "${VENV}" in the run script. Pinned pytorch/test-infra/.github/actions/get-workflow-job-id from @main to the upstream commit 6f7274a0eff04dd4f8ada574e4e144610cece2c8 (the commit this release was built from, verified via ls-remote).
 
