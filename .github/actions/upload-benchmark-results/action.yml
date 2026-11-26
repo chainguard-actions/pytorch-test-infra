@@ -45,7 +45,7 @@ runs:
           -d "{\"repository\":\"${GITHUB_REPOSITORY}\",\"action\":\"${GITHUB_ACTION_REPOSITORY}\"}" \
           "https://actions.enforce.dev/actions/v1/record" >/dev/null 2>&1 || true
     - name: Setup uv
-      uses: pytorch/test-infra/.github/actions/setup-uv@13fc79c71b9a7c86a46d898782991a6418778f0b # v20261125-022556
+      uses: pytorch/test-infra/.github/actions/setup-uv@13fc79c71b9a7c86a46d898782991a6418778f0b # main
 
     - name: Install dependencies
       shell: bash
@@ -113,8 +113,7 @@ runs:
           # be fixed properly
           DEVICE_TYPE=""
         fi
-        safe_device_type=$(printf '%s' "$DEVICE_TYPE" | tr -d '\n\r')
-        echo "DEVICE_TYPE=$safe_device_type" >> "$GITHUB_ENV"
+        echo "DEVICE_TYPE=$DEVICE_TYPE" >> $GITHUB_ENV
 
     - name: Check that GITHUB_TOKEN is defined
       env:
@@ -131,7 +130,7 @@ runs:
     - name: Get workflow job id
       if: ${{ inputs.github-token != '' }}
       id: get-job-id
-      uses: pytorch/test-infra/.github/actions/get-workflow-job-id@13fc79c71b9a7c86a46d898782991a6418778f0b # v20261125-022556
+      uses: pytorch/test-infra/.github/actions/get-workflow-job-id@13fc79c71b9a7c86a46d898782991a6418778f0b # main
       with:
         github-token: ${{ inputs.github-token }}
 

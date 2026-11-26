@@ -16,21 +16,19 @@ Action **pytorch--test-infra--.github--actions--setup-linux/v20261125-022556** w
 
 ### unpinned-uses (severity: high)
 
-action.yml has a composite step that references an action by a mutable branch, not a 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Pin it to a full commit SHA.
+action.yml has a composite step that uses a branch ref instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Anyone who can push to that branch can change the code this action runs.
 
 Locations:
 
-- `action.yml:89`
+- `action.yml:93`
 
 ### github-env-injection (severity: high)
 
-The step 'Setup useful environment variables' builds values from the inherited process env var RUNNER_TEMP and writes them to $GITHUB_ENV without sanitizing them first. The script does not set RUNNER_TEMP itself, so under this check it counts as workflow-controlled. Affected writes: `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"`, and the same pattern for RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR. Pass each value through `printf '%s' ... | tr -d '\n\r'` right before the write.
+The 'Setup useful environment variables' step builds values from the inherited process env var RUNNER_TEMP, which this script reads but does not set, so the calling workflow controls it. It writes them to $GITHUB_ENV without first running `printf '%s' ... | tr -d '\n\r'`. Example: `RUNNER_ARTIFACT_DIR="${RUNNER_TEMP}/artifacts"` followed by `echo "RUNNER_ARTIFACT_DIR=${RUNNER_ARTIFACT_DIR}" >> "${GITHUB_ENV}"`. RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR are written the same way.
 
 Locations:
 
-- `action.yml:66`
-- `action.yml:71`
-- `action.yml:76`
+- `action.yml:67`
 
 ## Iteration Notes
 
@@ -40,5 +38,5 @@ Locations:
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/setup-nvidia from @main to the upstream commit 13fc79c71b9a7c86a46d898782991a6418778f0b, the same test-infra commit this action version was built from. I checked the SHA with lookup_action_sha. In 'Setup useful environment variables', each of RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR now goes through printf '%s' | tr -d '\n\r' right before it is written to GITHUB_ENV. The variable names and directory paths have not changed, and the rm and mkdir commands work as before. I didn't run anything to test the change.
+Pinned pytorch/test-infra/.github/actions/setup-nvidia from @main to upstream commit 13fc79c71b9a7c86a46d898782991a6418778f0b (confirmed with lookup_action_sha; it is the commit this release was built from). In the 'Setup useful environment variables' step, RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR now have newlines and carriage returns stripped with printf '%s' | tr -d '\n\r' before they are written to $GITHUB_ENV. The directory create and clean-up commands are unchanged. Nothing was tested or run, and I didn't change anything beyond these two findings.
 
