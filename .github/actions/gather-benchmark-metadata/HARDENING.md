@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--gather-benchmark-metadata/v20261
 
 ### unpinned-uses (severity: high)
 
-action.yml composite step references an action by branch rather than a 40-char commit SHA: `uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main`.
+action.yml points a composite step at a branch, not a full 40-character commit SHA: 'uses: pytorch/test-infra/.github/actions/get-workflow-job-id@main'. Whoever controls that branch can change the code this action runs. Pin it to a commit SHA.
 
 Locations:
 
@@ -24,7 +24,7 @@ Locations:
 
 ### script-injection (severity: high)
 
-Rule (a): in the 'Gather the metadata' step, the expression ${{ inputs.venv }} is placed directly inside the run: script: `if [[ -n "${{ inputs.venv }}" ]]; then` and `source "${{ inputs.venv }}"`. Template substitution happens before the shell parses the script, so a crafted venv input can run arbitrary commands. Move it into env (e.g. VENV: ${{ inputs.venv }}) and use "$VENV" in the script.
+Sub-rule (a), direct expression interpolation, in the 'Gather the metadata' step. The run block puts ${{ inputs.venv }} straight into the shell script: 'if [[ -n "${{ inputs.venv }}" ]]; then' and 'source "${{ inputs.venv }}"'. The value is pasted into the script before the shell parses it, so a crafted input can break out of the quotes and run its own commands. Move inputs.venv into an env: variable (e.g. VENV) and use "$VENV" in the script.
 
 Locations:
 
@@ -55,5 +55,5 @@ Locations:
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/get-workflow-job-id to upstream commit 7f4a746b35c7ac614b8dbfe3eb8a4e25fd23b3a4 (# main), confirmed via lookup_action_sha. Moved inputs.venv into the step env as VENV and referenced it as "${VENV}" in the bash script.
+Pinned pytorch/test-infra/.github/actions/get-workflow-job-id to commit 7f4a746b35c7ac614b8dbfe3eb8a4e25fd23b3a4 (the upstream commit, checked with lookup_action_sha), with a '# main' comment. Moved inputs.venv into a VENV env var in the 'Gather the metadata' step; the script now uses "${VENV}".
 
