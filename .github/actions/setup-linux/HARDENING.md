@@ -16,7 +16,7 @@ Action **pytorch--test-infra--.github--actions--setup-linux/v20261103-202628** w
 
 ### unpinned-uses (severity: high)
 
-A composite action step uses a branch ref instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Whoever controls that branch can change the code this step runs. Pin it to a commit SHA.
+A composite step uses a branch ref instead of a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Whoever controls that branch can change the code this action runs at any time.
 
 Locations:
 
@@ -30,5 +30,5 @@ Locations:
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/setup-nvidia from @main to e9b5b0a4c36ebfde49dec880ae77705038009471 (# main). That is the upstream_commit this mirror version was built from, and it lives in the same repository, so setup-nvidia now comes from the same snapshot as setup-linux. Nothing else in action.yml was changed.
+Pinned pytorch/test-infra/.github/actions/setup-nvidia@main to e9b5b0a4c36ebfde49dec880ae77705038009471 (the upstream commit this release was built from, same repo), with a '# main' comment.
 
