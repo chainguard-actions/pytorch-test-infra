@@ -16,11 +16,11 @@ Action **pytorch--test-infra--.github--actions--setup-linux/v20261027-001733** w
 
 ### unpinned-uses (severity: high)
 
-A composite step pins its action to a branch instead of a commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Anyone who can push to that branch can change the code this step runs. Pin it to a full 40-character commit SHA.
+The composite step refers to an action by branch instead of by a full 40-character commit SHA: `uses: pytorch/test-infra/.github/actions/setup-nvidia@main`. Because `main` can change at any time, whatever is pushed there will run with this action's privileges. Pin it to a commit SHA.
 
 Locations:
 
-- `action.yml:90`
+- `action.yml:92`
 
 ## Iteration Notes
 
@@ -30,7 +30,7 @@ Locations:
 
 **Notes:**
 
-Pinned pytorch/test-infra/.github/actions/setup-nvidia@main to 9206d491d3a5507163cb9d5b77040d4c3ef5e038, the upstream test-infra commit this setup-linux release (v20261027-001733) was built from. Both actions now run from the same commit.
+Pinned pytorch/test-infra/.github/actions/setup-nvidia from @main to the full commit SHA 9206d491d3a5507163cb9d5b77040d4c3ef5e038. That is the upstream commit this version of setup-linux was built from, and both actions live in the same repo. I didn't call lookup_action_sha because it resolves tags or branches, and resolving main would return whatever main points to today. The commit is the one given in the request's upstream_commit. Nothing else in action.yml was changed.
 
 ### Iteration 2
 
@@ -38,5 +38,5 @@ Pinned pytorch/test-infra/.github/actions/setup-nvidia@main to 9206d491d3a550716
 
 **Notes:**
 
-In the 'Setup useful environment variables' step of action.yml, each of RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR now has newlines and carriage returns stripped (printf '%s' | tr -d '\n\r') just before it is written to $GITHUB_ENV. Directory creation and cleanup work as before. I haven't run the action to test the change.
+In the 'Setup useful environment variables' step, RUNNER_ARTIFACT_DIR, RUNNER_TEST_RESULTS_DIR and RUNNER_DOCS_DIR now go through printf '%s' | tr -d '\n\r' before being written to $GITHUB_ENV. The directories are still created and cleaned up as before.
 
