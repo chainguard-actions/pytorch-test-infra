@@ -1,0 +1,7 @@
+#!/bin/sh
+# Fake Homebrew: logs invocations and reports a fake prefix.
+echo "brew $*" >> /tmp/fakebrew/brew.log
+case "$1" in
+  --prefix) echo /tmp/fakebrew/prefix ;;
+esac
+exit 0

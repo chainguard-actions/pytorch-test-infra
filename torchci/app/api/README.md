@@ -1,0 +1,951 @@
+# HUD API
+
+`app/api/` holds the HUD API: endpoints built on `lib/api/` and described by
+the generated [OpenAPI document](https://hud.pytorch.org/api/openapi.json).
+Every route under `app/api/` except the document's own is in that document
+under the `tests` tag, or under the `releases` tag if it is public (see
+[Public routes](#public-routes)), and every path under those tags is a route here. The
+document's `pages` tag lists the HUD pages built on the API, which live under
+`pages/tests/` (see [HUD pages](#hud-pages)). The endpoints under `pages/api/`
+predate it: they are not in the OpenAPI document and follow none of the
+conventions below. New endpoints go here, whatever their domain.
+
+This file is for the people who work on the API: how to evolve it and where
+things go. The OpenAPI document is the reference for parameters, defaults,
+response fields and errors. It is generated from the zod schemas used by the
+handlers; keep those descriptions current instead of repeating them here.
+
+## Best Practice
+
+The API is unversioned. Change an endpoint and its consumers together instead
+of keeping the old behavior next to the new. The document changes with the
+code, and its `info.version` names the deployed commit.
+
+Cursors outlive deploys in open pages: clients treat them as opaque, so their
+internals may change, but a cursor the current code cannot read must be
+rejected with 400, never misread.
+
+## Authentication
+
+Every route under `app/api/` except the OpenAPI document and the [public
+routes](#public-routes) is behind the shared
+HUD GitHub gate in `lib/auth/githubAuth.ts`, the one `gcx-token` uses: the
+caller's GitHub token must belong to a user with write access to
+pytorch/pytorch, or on the allow list in `lib/auth/allowList.json`. The token
+comes from an `Authorization: Bearer <token>` header, else from the HUD
+session a signed-in browser sends. `lib/api/auth.ts` implements this: a route
+exports `GET = requireGithubWriteAccess(handler)`, a token that passed is
+remembered for five minutes, and `test/api/auth.test.ts` checks that every
+route refuses an anonymous request. The gate answers 401 `unauthenticated`
+with a `WWW-Authenticate: Bearer` challenge and 403 `forbidden`, and remembers
+a refusal for a minute so bad tokens do not become GitHub requests; GitHub
+rate limiting HUD is 503 `unavailable` with `Retry-After`, and GitHub being
+otherwise unreachable 500 `internal_error`. On a preview deployment the
+preview login's session passes the gate, since that login has no GitHub token
+and the preview password is the gate there. Under `next dev` the gate stands
+open, so a local checkout works without a sign-in, for whoever can reach the
+dev server (bind it with `-H 127.0.0.1` on a shared machine);
+`HUD_API_REQUIRE_AUTH=1` enforces it locally, any value but an explicit no
+does, and a production build always does. Its refusals are `no-store`, and it marks
+every handler answer `private` (or `no-store` when the handler set no
+`Cache-Control`), so a shared cache never serves one caller's answer to the
+next; a handler that wants the browser to keep its answer says `private` and
+`Vary: Authorization, Cookie` itself, as `/api/tests/options` does. The document declares the scheme once
+under `security`, and `errorResponses()` documents the statuses on every
+operation.
+
+HUD's pages under `pages/tests/[organization]/` are public, so a route that
+one of them reads lets the page's own requests through without a credential:
+it exports `GET = requireGithubWriteAccess(handler, { admitHudPages: true })`.
+A browser sends `Sec-Fetch-Site: same-origin` only with a request that a page
+of HUD's own origin made, and no script can set or change that header; a
+request that carries it and no bearer token passes those routes. The header
+is not a credential. A program can send it too and get what the public pages
+would show it, so open a route to the pages only when a page reads it.
+`GET /api/tests/run/{run_id}` stays closed to them: no page reads it, and
+each lookup scans every retained run. A browser too old to send the header,
+or one that reaches a production build over plain HTTP anywhere but
+localhost, does not send it, and its reader has to sign in.
+`test/api/auth.test.ts` lists the routes open to the pages and fails when the
+routes differ from that list.
+
+CLI and agent callers that the Vercel bot challenge blocks use the same path
+under `/api/authed/` (`pages/api/authed/[...path].ts`), which runs the same
+gate from the same memory and forwards the request, token included, naming
+the caller's path in `x-forwarded-path` so that `handleList` builds page links
+under `/api/authed/` for them; the answer comes back with its cache, challenge
+and retry headers.
+
+## Public routes
+
+The release portal's endpoints, `/api/releases` and everything under it, are public:
+anyone may read them, with no token. They carry the state of a PyTorch release and
+nothing of a caller's, and showing partners and contributors where a release stands is
+their purpose. A route is public by wrapping its handler in `publicRead`
+(`lib/api/public.ts`) instead of `requireGithubWriteAccess`, and by being under a prefix
+in `PUBLIC_API_PREFIXES`; `test/api/auth.test.ts` checks that the public routes are
+exactly the release portal's, and every other route still refuses an anonymous request.
+`publicRead` makes an answer cacheable by shared caches (a handler may set its own
+`Cache-Control`) and an error never, and the operations in the document declare
+`security: []` and the `releases` tag, with no 401, 403 or 503. Make a new route public
+only for data that is public already, and add its prefix on purpose.
+
+## Heavy queries
+
+A few queries cost tens of CPU-seconds each, and a handful of people loading
+the tests page at once could take the database away from the rest of HUD. For
+them ClickHouse has the settings profile `ci_workload_heavy`, defined in
+`clickhouse_db_schema/ci/000003-ci-workload-heavy.sql`. A query that sends
+`SETTINGS profile = 'ci_workload_heavy'` runs with at most 4 threads, 60
+seconds and 8 GB of memory, inside a workload that runs two such queries per
+replica and queues up to 16 more; past that the database refuses the query at
+once with `SERVER_OVERLOADED`. The queue bounds how many queries wait, not for
+how long. A query that does not send the profile is outside the workload and
+behaves as before, so nothing else in HUD changes.
+
+Tag a query when its requests cost about ten CPU-seconds or more in
+production, measured, not guessed. Production `system.query_log` for
+2026-10-23 to 2026-10-27, CPU as user plus system time, puts the tests page at
+a median of 30 CPU-seconds, so it is tagged with its boundary probe, which
+returns one row but reads and sorts as many health rows as the page. Since
+2026-11-03 the page is chosen before the catalogs are joined: measured with
+one thread, the default page fell from 36 to 4.3 CPU-seconds and a page of
+both code sources from 38 to 18 (`lib/api/tests/query-validation.md`), so
+measure production again before deciding whether a one-source page still
+needs the tag. The attempts read, the one read both run lists make, left the
+workload on 2026-11-16. It was tagged for its worst case, up to 34
+CPU-seconds on a big commit when it read every retained attempt of the
+selected bundles through `FINAL`; it now reads a commit's bundles through
+`by_job` and a test's at their own starts, 0.04 to 0.20 server seconds for a
+page of bundles (`lib/api/tests/test/runs/attempts-query-validation.md`), and
+queued, both run lists waited behind tests pages. Leave a query off when it is
+fast: the cost runner-hours read about 0.3 CPU-seconds
+(`lib/api/tests/cost/query-validation.md`), and the catalog, options and test
+detail reads answer in milliseconds. The summary's statements, three in the
+default window and four in another, stay out too: measured with one thread
+on 2026-11-25 they sum to 1.4 CPU-seconds for the default request, 2.3 for
+12 hours and 3.4 for 14 days
+(`lib/api/tests/summary/query-validation.md`), and the server keeps their
+answers for a minute ([Summary](#summary)). The
+commit runs list is left out deliberately although its upper tail reaches the
+bar, with a median of 2.4 CPU-seconds, one request in ten above 9.7 and a
+worst of 50 (before 2026-11-03, when its jobs began coming from the `head_sha`
+view instead of a gigabyte scan of the job table,
+`lib/api/tests/commit/query-validation.md`): its typical request is cheap,
+and queueing it would hold nine
+commit pages in ten behind tests pages for a rare tail; its failing-outcome
+filters, the ones the commit page's default outcomes use, read a pruned
+`FINAL` and cost under a second, and its `worst_status` filter costs no more
+than the grouped read
+(`lib/api/tests/commit/query-validation.md`). The
+commit summary's counts query left the workload on 2026-11-05: it reads every
+retained run of the commit once, which took 22 seconds on one thread for a
+main commit's 9 million bundles before that day's rewrite and about 5 after
+(`lib/api/tests/commit/query-validation.md`), and queued, the commit page's
+header waited behind tests pages. Its other lookups answer in well under a
+second and stay untagged too. Tagged, a fast
+query could only be delayed by the queue, and fails when 16 heavy queries are
+already waiting. Do not tag a query that could not finish in 60 seconds at 4
+threads; make it cheaper first, as the run detail lookup still needs. Measure
+with the validation notes beside the queries, which record the server time of
+every case, or have an administrator rank query kinds by CPU from
+`system.query_log`, grouped on the prefix `queryClickhouse` gives every
+`query_id`; HUD's own database user cannot read those columns, and the
+attempts read shares its prefix across its callers, so attribute each to the
+page query that finished just before it. Check again after a query rewrite or
+a retention change.
+
+In code the profile is the constant `CI_WORKLOAD_HEAVY` beside `CI_DATABASE`
+in `lib/api/tests/database.ts`, passed as the settings argument of
+`queryClickhouse` at the heavy call sites and nowhere else: `queryPage`
+forwards it to both the page query and its probe. Never set it on the shared
+client or in a named query, and
+have the tests assert that each heavy call carries it, so an untagged heavy
+query fails CI.
+
+A refusal answers 429 `overloaded` with `Retry-After`, documented on the tests
+list by `listErrorResponses()`, so that a client backs off instead of retrying into
+a full queue; the tests page shows it as a failure with its Retry button
+rather than retrying by itself. A tagged query that outruns the 60 second cap
+fails like any other query, with 500. A waiter whose client has given up keeps
+its place in the queue, and HUD's client waits 180 seconds, so under load a
+page can wait minutes behind others. The limits change without a deploy:
+`CREATE OR REPLACE WORKLOAD ... SETTINGS` for the queue, `ALTER SETTINGS
+PROFILE` for the caps, and `CREATE OR REPLACE WORKLOAD ci_workload_heavy IN
+all;` removes the queue while code still names the profile. Never drop the
+profile while code names it: every tagged query would fail. The same happens
+on any server without the profile, a local ClickHouse or a preview's: apply
+`000003` there before pointing the lists at it.
+
+## HUD pages
+
+The document lists the HUD pages built on the tests endpoints, the tests
+table, a test's own page, a commit's page, a pull request's, which opens the
+page of its newest commit, and the cost page, as operations tagged `pages`:
+HTML for people, with `security: []`, one `text/html` answer, and a summary
+that starts with "HUD page", so that a caller of the API can give a reader
+the page that shows what it fetched and knows which parameters that page
+takes. The pages are public: the routes they read admit their requests (see
+[Authentication](#authentication)). Nothing under
+`app/api/` serves them; `test/api/openapi.test.ts` checks the `pages` paths
+against the files under `pages/tests/[organization]/` as it checks the
+`tests` paths against the route files.
+
+A page's parameters are not written for the document: `lib/api/tests/pages/parameters.ts`
+defines each page's URL query as parameter definitions, the table page's
+picked by name from the list's own registry (`TESTS_PAGE_PARAMETER_NAMES`),
+the test page's adding the page's own (`TEST_PAGE_PARAMETER_DEFINITIONS`),
+and three things read that one module: the pages, which decode and write
+their URLs with it (`decodePageQuery`, `pageUrlParams` in `lib/tests/table.ts`
+and `lib/tests/grid.ts`), the document (`pages/openapi.ts`, through the same
+`parameterQueryParameters` the endpoints use), and the links below. The module
+is zod and the registry only, nothing of the server, since the pages import it
+into the browser. The list parameters the table page has no equivalent for
+are the complement, `TESTS_PAGE_UNSUPPORTED_PARAMETERS`: the catalog ids and
+`env_vars`, which the page shows only as `test_config`; `limit` and `cursor`
+are paging, which the page does by itself. Give the page a new list parameter
+by adding its name to `TESTS_PAGE_PARAMETER_NAMES` and reading it on the
+page; the document and the links follow.
+
+A response that has a page carries it as `hud_url`, an absolute URL written by
+`lib/api/tests/pages/links.ts` from the same definitions, the page's defaults
+left off, on the origin the `/api/authed/` shim names itself with
+(`HUD_SELF_URL`, else production). `TestRecord.hud_url` is the test's page,
+bare, so every endpoint that returns a test carries it there; a run and the
+options have no page of their own and no other link; the commit's runs,
+summary and GreenLight verdict carry the commit's page, bare, since the page
+chooses its outcomes, filters and sort itself; the pull request lookup
+carries the pull request's
+page, bare, which opens the commit page of whatever head is newest when it
+is opened;
+`TestHealthEntry.hud_url` is that page opened on the runs the entry's health
+was counted over, the list's window and code sources with the entry's
+configuration marked; `TestSummary.hud_url` is the table in the request's
+window and languages, which shows the figures above it, and each
+`TestViewFigure.hud_url` the table showing that view, not narrowed by the
+filters its figure adds; `TestListPage.hud_url` is the table for the request and
+`RunGrid.hud_url` the test page for the grid's `ran_on` and `window`. The last
+two are nullable, and null rather than approximate: a link that shows more than
+the request selected is worse than none. The table's is null when the request
+used an unsupported parameter (an `env_vars` filter on `TEST_CONFIG` is spelled
+as `test_config` instead, narrowed to the values a `test_config` filter beside
+it shares, and null when they share none); the grid's when the grid is empty,
+the test's repository being read with its lanes, or when a filter on the
+configuration narrowed the lanes, any but one `environments_id` with one
+`env_vars_id`, which becomes the page's marked configuration. A filter on the
+test itself or its owner costs no link: one test's lanes all share it, so it
+leaves the grid as it is or empties it. A grid request that left `ran_on` or
+`window` out gets the widest page choice, both code sources and `14d`, which
+the field's description says. The tests are in `test/api/tests/pages/`.
+
+## Moving an endpoint here
+
+A `pages/api/` endpoint joins the API by moving onto `lib/api/`: give it a
+parameter registry, zod response schemas and a handler built on
+`lib/api/handler.ts`, register it in `lib/api/openapi.ts`, and move its route
+from `pages/api/<path>.ts` to `app/api/<path>/route.ts` so its URL stays the
+same. Next.js refuses to build while both routers serve a path, so delete the
+old route in the same change.
+
+## Conventions for new endpoints
+
+- A route is `app/api/<resource>/route.ts`, with a `[name]` folder for each
+  path parameter, and only exports `GET`, the handler wrapped in
+  `requireGithubWriteAccess` (with `{ admitHudPages: true }` when a HUD page
+  reads the route, see [Authentication](#authentication)), and
+  `dynamic = "force-dynamic"`, which keeps
+  Next.js from running it at build time. Next.js answers HEAD by
+  running `GET` and dropping the body, OPTIONS with 204, and the other
+  standard methods with an empty 405.
+  Queries, schemas and handlers go in `lib/api/<resource>/`, so the library
+  tree mirrors the routes without their path parameters:
+  `lib/api/tests/test/runs/` implements `/api/tests/test/{test_id}/runs`.
+- Name a path parameter after what it identifies and keep that name in every
+  path that carries it: `test/[test_id]/route.ts` and
+  `test/[test_id]/runs/route.ts` serve `/api/tests/test/{test_id}` and
+  `/api/tests/test/{test_id}/runs`.
+- Parameters are defined once in `lib/api/<resource>/parameters.ts`:
+  validation, URL encoding, normalization, descriptions, and the allowed SQL
+  column/type mappings. Shared mechanics in `lib/api/parameters.ts` build
+  strict schemas, decode query values, normalize repeated values, validate
+  sort syntax and generate OpenAPI serialization hints.
+  Each resource keeps its own fields, defaults and descriptions in its registry,
+  which also drives exact SQL predicates and cursor query identity. Add or
+  rename a filter there; do not copy parameter lists into handlers or docs.
+  Response schemas live in `types.ts`, with a `describe()` on every field.
+  A detail whose fields cost different reads takes a repeated `fields`
+  parameter, as the commit summary and the commit's jobs do: the fields to
+  answer, every one when absent, so a caller never waits for a read it has no
+  use for. An endpoint keeps a parameter list of its own: one that borrows
+  another's takes on every parameter added to it.
+  TypeScript types are inferred from the schemas, and
+  `lib/api/<resource>/openapi.ts` contributes paths and schemas to
+  `/api/openapi.json` through `lib/api/openapi.ts`. Component names are unique
+  across the document; reuse a schema when endpoints return the same object,
+  and tag each operation with its domain (`tests`).
+- Public filter names map to ClickHouse columns through the parameter
+  registry. 64-bit ids are decimal strings; timestamps are ISO 8601 in UTC.
+- Every documented error includes a human-readable `error` string and a stable
+  `code`. Clients branch on `code`, not message wording. The gate's
+  `unauthenticated` and `forbidden` come before any parameter is read. Validate every parameter
+  and answer 400 with `code: "invalid_parameters"` and
+  `issues: [{ "path": ["parameter", 0], "message": "..." }]`. Each issue path
+  contains parameter or nested field names and numeric array indexes; an empty
+  path describes the request as a whole. Return all collected validation issues,
+  while preserving the first issue, including its path, in `error`. Malformed
+  JSON or another parameter-decoding error can stop validation before other
+  invalid parameters are examined.
+- Answer 400 with `invalid_cursor` when a cursor cannot be decoded or is for
+  another resource, and `cursor_query_mismatch` when its normalized query does
+  not match the request. Use `not_found` for 404. Log query failures and answer
+  500 with `internal_error` and a generic message; a heavy query the
+  database's queue refuses answers 429 `overloaded` with `Retry-After` (see
+  Heavy queries). These errors omit `issues`.
+  `lib/api/handler.ts` reads path and query parameters into one raw query
+  (`requestQuery`), implements these responses, the paginated list flow
+  (`handleList`) and the detail flow (`handleDetail`), and its
+  `errorResponses()` documents them; build handlers on it.
+- Lists are cursor paginated with `limit` and `cursor` in, and
+  `pagination: { "next": { "cursor": "...", "url": "..." }, "previous": null }`
+  out. Both directions are always present: `previous` is null at the beginning,
+  and `next` is null at the end. Clients can follow either link's relative `url`,
+  resolved against the response URL, or pass its `cursor` with the same filters
+  and ordering. Build each URL from the request's path and query, retaining
+  repeated parameters and page size while replacing only `cursor`.
+  Cursors encode their direction and bind the resource and normalized query,
+  excluding page size; `lib/api/cursor.ts` holds the token format and identity
+  rule; `lib/api/seek.ts` builds the keyset predicate and `ORDER BY` from a
+  list's sort keys, and `queryPage` in `lib/api/pagination.ts` runs the page
+  query with its boundary probe. Clients may change `limit` in either direction. A previous-page request
+  returns up to that many entries immediately before the cursor boundary;
+  responses always retain the requested sort order.
+  Pages read current data, so changes between requests may skip or repeat
+  entries; pagination does not enumerate a fixed snapshot. An empty page has
+  both links null; omit `cursor` to restart from the beginning.
+- Tests mirror the code: `test/api/<resource>/<module>.test.ts` for each
+  module, mocking `queryClickhouse`, with shared rows in a `fixtures.ts`
+  beside them. Call a route's `GET` through `callRoute` in
+  `test/api/routes.ts`. Add the endpoint to the list below. The offline
+  replay of every SQL evidence bundle runs under jest too
+  (`test/scripts/validateQueries.test.ts`); a query change re-records its
+  bundle, as the validation notes describe.
+
+## Endpoints
+
+`GET /api/openapi.json` serves the generated OpenAPI 3.1 document from
+`app/api/openapi.json/route.ts`. Register each new resource in
+`lib/api/openapi.ts` so its paths and schemas appear in the document;
+`test/api/openapi.test.ts` fails while a route is missing from it.
+
+| Endpoint                                                 | Scope                                                                                                                                                                 | Implementation                     |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `GET /api/tests`                                         | Repository tests and configuration health in a selected window and code sources                                                                                       | `lib/api/tests/`                   |
+| `GET /api/tests/options`                                 | Values the list offers a reader: fixed and catalog choices, with labels, and views                                                                                    | `lib/api/tests/options/`           |
+| `GET /api/tests/summary`                                 | One figure per view of the options, over a window and languages: how many configurations are failing or flaky, the slowest test, the machine time spent               | `lib/api/tests/summary/`           |
+| `GET /api/tests/test/{test_id}`                          | One catalog test, its owners, and all available configuration health                                                                                                  | `lib/api/tests/test/`              |
+| `GET /api/tests/test/{test_id}/runs`                     | Retained runs of one test, bundled with their attempts; with `group_by=commit`, as a grid by commit and configuration                                                 | `lib/api/tests/test/runs/`         |
+| `GET /api/tests/run/{run_id}`                            | One full run bundle, selected by any retained execution UUID; provisional                                                                                             | `lib/api/tests/run/`               |
+| `GET /api/tests/commit/{sha}?repo=owner/name`            | Retained run bundles across all tests on a repository commit                                                                                                          | `lib/api/tests/commit/`            |
+| `GET /api/tests/commit/{sha}/summary?repo=owner/name`    | The commit as GitHub described it, its test counts by status, and the span of its runs; `fields` names the fields to answer                                           | `lib/api/tests/commit/summary/`    |
+| `GET /api/tests/commit/{sha}/greenlight?repo=owner/name` | GreenLight's verdict on a repository commit: the status of that reviewed pull request head, or of the head that landed as it; or why it has none                      | `lib/api/tests/commit/greenlight/` |
+| `GET /api/tests/commit/{sha}/jobs?repo=owner/name`       | Every GitHub job of a repository commit with its times and, beside them, what the recorded tests of each did, for a timeline of the commit; `fields` names which      | `lib/api/tests/commit/jobs/`       |
+| `GET /api/tests/job/{job_id}`                            | One GitHub job, what its recorded tests did, its steps, and its test files with their runs and their tests by status                                                  | `lib/api/tests/job/`               |
+| `GET /api/tests/pull/{number}?repo=owner/name`           | A pull request's newest head commit as HUD knows it, and the pull request's page                                                                                      | `lib/api/tests/pull/`              |
+| `GET /api/tests/cost`                                    | Test-job runner-hours of the last 1, 3 or 7 whole UTC days by owner, workflow and machine, from the test_cost rollup, with the PR update and merge signals; prototype | `lib/api/tests/cost/`              |
+| `GET /api/tests/cost/trend`                              | Test-job runner-hours by day, week or month, owner and runner label, all and of pushes to main, with daily totals and pushes to main; prototype                       | `lib/api/tests/cost/trend.ts`      |
+| `GET /api/releases`                                      | The releases the release portal tracks, with progress, phase and status, and the ones not out yet; public                                                             | `lib/api/releases/`                |
+| `GET /api/releases/{version}`                            | One release's board: its phases and steps from the release config, the state of each, and the links of the release; public                                            | `lib/api/releases/`                |
+| `GET /api/releases/{version}/config`                     | The release's resolved config (shared steps merged with its own file); public                                                                                         | `lib/api/releases/`                |
+| `GET /api/releases/{version}/artifacts`                  | The release's expected artifacts and whether each is present, missing, size_anomalous or unexpected, problems first, with the counts; public                          | `lib/api/releases/`                |
+| `GET /api/tests/cost/changes`                            | Two periods' test-job runner-hours by test file and workflow, all and of pushes to main, with each day's pushes to main: what changed; prototype                      | `lib/api/tests/cost/changes.ts`    |
+
+The HUD pages in the document, tagged `pages` (see [HUD pages](#hud-pages)):
+
+| Page                                              | Shows                                                                                                                                                                                | Implementation                                                                           |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| `GET /tests/{organization}/{repo}`                | The tests table: `GET /api/tests`, with the list's parameters, under the views' figures from `GET /api/tests/summary`                                                                | `pages/tests/[organization]/[repo].tsx`, parameters in `lib/api/tests/pages/`            |
+| `GET /tests/{organization}/{repo}/test/{test_id}` | One test and its runs by commit: `GET /api/tests/test/{test_id}` and `/runs?group_by=commit`                                                                                         | `pages/tests/[organization]/[repo]/test/[test_id].tsx`                                   |
+| `GET /tests/{organization}/{repo}/commit/{sha}`   | One commit's jobs on a timeline and its runs in outcome order: `GET /api/tests/commit/{sha}`, its `/summary`, `/jobs` and `/greenlight`, and for a job `GET /api/tests/job/{job_id}` | `pages/tests/[organization]/[repo]/commit/[sha].tsx`                                     |
+| `GET /tests/{organization}/{repo}/pull/{number}`  | The commit page of a pull request's newest head, found by `GET /api/tests/pull/{number}`                                                                                             | `pages/tests/[organization]/[repo]/pull/[number].tsx`                                    |
+| `GET /tests/{organization}/{repo}/cost`           | Runner-hours by owner, machine and workflow: `GET /api/tests/cost`                                                                                                                   | `pages/tests/[organization]/[repo]/cost.tsx`, parameters in `lib/api/tests/cost/page.ts` |
+
+## Release endpoints
+
+The release portal reads two kinds of data. The state of each step and the observed
+artifacts are rows the portal's collector writes to `release_event` and
+`release_artifact_observation` in `RELEASE_DATABASE` (`lib/api/releases/database.ts`;
+DDL in `clickhouse_db_schema/`); a step's current state is the latest row for its
+(release, step, RC), read with `argMax`. The release config, the steps, their owners and
+checks, the dates and the links to show, is YAML in `release/portal/config` of
+pytorch/test-infra: `lib/api/releases/config.ts` fetches it from GitHub (`main`), keeps it
+five minutes and resolves it as the collector's `tools/torchci/release_portal_config.py`
+does, so a config change shows without a deploy; `test/api/releases/config.test.ts`
+resolves the committed files. A release's milestone, tracker issue and validation issue
+are the links in the evidence of the steps that check them (`linksFromRows` in
+`lib/api/releases/board.ts`), so the board asks GitHub for nothing; a link the collector
+has not recorded yet is null.
+
+The index is not paginated (a few dozen releases), and says so with null pagination links.
+The artifact list is cursor paginated as the others are, problems first.
+
+## Tests endpoints
+
+The tests endpoints read the test hub tables from the database named by
+`CI_DATABASE` in `lib/api/tests/database.ts`; never hardcode a database name
+in a query. Their queries go through `queryClickhouse` of
+`lib/api/tests/clickhouse.ts`, which keeps one client so that they reuse its
+connections; the rest of HUD opens a connection for each query.
+
+Use `env_vars: { id, values, first_seen_at }` for the shared env-var catalog
+record across health and run responses. Keep variable names and their string
+values inside `values`, separate from the record's metadata. A known empty set
+has `values: {}`; unavailable catalog metadata has `env_vars: null`.
+
+### Options
+
+`GET /api/tests/options` publishes, for the list parameters a person chooses
+from, the accepted values, each with a label for running text, and the default
+that applies when the parameter is absent. The fixed choices (`window`,
+`ran_on`, `language` and `status`) read `WINDOWS`, `RAN_ONS`, `LANGUAGES`,
+`HEALTH_STATUSES` and the
+defaults from `lib/api/tests/parameters.ts`, the same definitions that
+validate `GET /api/tests`, so the two cannot disagree; their labels live
+beside them in `lib/api/tests/options/options.ts`, typed by the value sets, so
+a new value without a label does not compile. The catalog choices, the eleven
+environment fields and `test_config`, are the distinct values of the
+`environments` and `env_vars` catalogs, read on each request with one query
+per catalog (`groupUniqArray` per column, no `FINAL`: rows sharing an id are
+identical in these columns) and put in natural order, versions by number;
+`workflow_path` is every calling workflow path the `health` table has seen in
+its longest window on either code source (`groupUniqArrayArray` over the two
+`14d` partitions, 29 million rows: about 0.2 s alone and up to 2 s beside a
+page's other queries, so the server's query cache keeps the answer for the
+five minutes a browser keeps the options, `WORKFLOW_PATHS_KEPT_SECONDS`), and
+`owner` every label of the `owners`
+catalog (read with `FINAL`, since a file's row is replaced whole when its
+owners change), both read concurrently with them. A value is its
+own label except the proper names the catalogs spell in lowercase (`cuda` is
+`CUDA`, `linux` is `Linux`, `gcc` is `GCC`), a workflow, labelled by its
+file (`.github/workflows/pull.yml` is `pull.yml`), and the empty value,
+labelled `none`; their default is always empty, no filter. The
+tests check every offered value against the list's parser. The endpoint takes
+no parameters, answers 500 with `internal_error` when a source cannot be
+read, and is served with the same short cache lifetime as the OpenAPI
+document. HUD's tests page builds every choice it offers from it instead of
+spelling a value out.
+
+`views` names the questions readers ask most, such as the tests flaky on main
+or the slowest tests, each as `{ id, label, description, params, figure }`,
+where `params` are `GET /api/tests` query parameters as a URL spells them (an
+array for a repeated parameter; never `repo`, `limit` or `cursor`; an absent
+one takes the list's default) and `figure` names the one figure that says how
+the view's question stands, `{ kind, caption, params }`: a `count` of the
+entries the view lists, the `slowest` of them, or the `total_duration` of
+them all, with a few words to set under it. A figure's own `params` are
+filters added to the view's, for a figure of some of the entries its view
+lists; they are empty for every view but the first. [Summary](#summary)
+answers the figures. The views are defined in
+`lib/api/tests/options/views.ts`. The first, Unhealthy, is the list's
+defaults (as Least healthy, the first view until 2026-11-24, was), so the
+page a reader arrives on shows a view; every other view narrows or reorders
+the defaults. The defaults list every entry with the unhealthy ones first,
+the failing and then the flaky, which are the entries ahead of the healthy
+ones (a run of theirs had a failed attempt), and Unhealthy's figure counts
+those: its `figure.params` is `status=failing&status=flaky`. For part of
+2026-11-24 the view was named Failing and its figure counted the failing
+entries alone; the name changed, and the count with it, so that the figure
+counts what its name says. A view of the failing entries alone was tried and
+dropped the same day: its first page was the defaults' first page. Two views
+set a `window`: the first, the list's default, 3 hours (12 until
+2026-11-24), and Blocking viable/strict, 12 hours. The first is the default
+table, and that table is of the default window: when it named no window it
+was the defaults in whatever window the caller was in, and the tests page
+marked its cell at 12 hours or 7 days as if the default table were showing.
+A view that sets a window is read over it whatever window is asked for, so
+its caption says which ("failing or flaky, 3 hours"). The other views leave
+the window, and every view leaves `language`, to the reader. The tests
+parse every view with the list's parser, check that the first parses as the
+list's defaults whatever window it is asked in and that no other view parses
+as the defaults of any window, that a view with its own window names it in
+its caption, that each value of an
+offered choice is offered, that a figure's params add filters only (no sort,
+window, code source or language, so what a figure is of is always among
+what its view lists), and that every view names a figure with a caption
+short enough to set under it. The tests page shows the views as the cells of the band above
+its table; an API caller appends a view's params to its `/api/tests` URL.
+
+### Summary
+
+`GET /api/tests/summary?repo=owner/name` answers every view of the options
+with its figure, without listing a page of any: `views[]` in the options'
+order, each `{ id, kind, window, count, duration_milliseconds, test, hud_url }`
+with the fields of the other kinds null, then the page that shows them
+(`hud_url`), `refreshed_at` and `query_duration_ms`. It takes the two list
+parameters a reader chooses and the views leave alone, `window` and
+`language`, validated and defaulted by the list's own definitions
+(`summary/parameters.ts`); what a view sets is not the caller's to say, and
+any other parameter is rejected. A view that sets its own window keeps it,
+and its figure says which in `window`.
+
+A figure is read over what its view lists, narrowed by the filters its own
+`figure.params` adds: all of it for every view but the first, whose figure
+counts the unhealthy entries, failing or flaky, of a list of every entry. `viewListQuery`
+(`summary/summary.ts`) reads the view's params, in the request's window and
+languages, with the list's own parser, which is the request a figure's
+`hud_url` links; `figureListQuery` adds the figure's params, which is the
+request the figure is read over. The figures are read from
+`buildSelection` (`query.ts`), the part of the list's SQL that selects
+rows: the same `combined_health` rows and the same predicates on them, with
+no page, no sort and no catalog join (`summary/query.ts`). So a `count` is
+the number of entries `GET /api/tests` returns for that request over all its
+pages, one per test, environment and env var set, not a number of tests;
+`total_duration` is their `health.total_duration_milliseconds` summed; and
+`slowest` is the test of the entry a list sorted by
+`-mean_passed_duration_milliseconds` shows first, with its catalog row read
+by id in a second statement (joined in the first, the whole catalog
+would be read to name one test). A repository the catalog does not know has
+zero counts and no slowest test, as its list is an empty page. The tests page
+chooses a view the same way (`chooseView` in `lib/tests/views.ts`), and
+`test/tests/views.test.ts` checks, for every view, window and choice of
+languages, that the list request the page makes is the view's, and that the
+figure was read over that request with the figure's own filters added.
+
+Every reader of the tests page asks for the same figures, and each of their
+statements reads a whole health partition, so the server's query cache keeps
+each statement's answer for a minute (`FIGURES_KEPT_SECONDS`), as it keeps
+the options' workflow paths. A kept answer must not outlive the health
+refresh it was read from, or a figure would disagree with the table under it
+for a minute after every refresh. So the summary first reads the health
+table's refresh timestamp, one row, uncached, and binds it into every
+statement, `{generation: String}`, selected back as a constant: the cache
+keys an answer by the statement with its parameters bound, so after a refresh
+the statements are ones it has no answer for. The constant chooses no rows.
+On production (2026-11-24), a statement asked again at the same refresh
+answered in 3 ms from the one kept row, and at another refresh read its 6.5 M
+rows again. A refresh that lands while the figures are being read is the one
+race left: a figure can then be of the refresh after the one in
+`refreshed_at`, as an empty page of the list can. The tests page relies on
+this: when its table comes to show a later refresh than the figures were read
+at, it asks for them again.
+
+Figures over the same rows share a statement. Two list requests that
+differ only in their filters on the combined rows (the status, the workflow
+paths) select the same `combined_health` rows before those filters, so
+`buildFigureStatements` reads those rows once and answers each figure with
+an aggregate over the rows its own filters keep: `countIf` for a count,
+`sumIf` for a total, and for the slowest `max` of the mean with `argMaxIf`
+for its test, ordered by the mean and then by the test's id turned around
+with `bitNot`, so that the smallest id wins a tie as it does in the list.
+With today's views that is three statements for the six figures in the
+default window: Unhealthy, Flaky on main, Slowest and Most CI time over main;
+Blocking viable/strict; and Flaky on PRs. In any other window Unhealthy,
+which keeps the default window, is no longer over the rows of the other three
+and is read alone (`api_tests_summary_unhealthy`), a fourth statement. Each figure's filters are bound
+under names of its own (`figure_<n>_filter_status`), `<n>` being the view's
+position, which also names its columns in the one row a statement answers
+(`figureColumns`); the query id names the views
+(`api_tests_summary_unhealthy__flaky_main__slowest__most_ci_time`). A figure
+whose filters search an array, Blocking viable/strict's workflow paths, has
+a statement to itself, with its other filters as the `WHERE` and the array
+inside the aggregate. A `WHERE` runs before an aggregate's argument is
+computed, so the paths are read only where a row of that status is; written
+as one `WHERE`, the server tested the paths first, on every row. The list's
+own SQL is untouched: `buildHealthFilters` and `withoutHealthFilters`
+(`query.ts`) give the summary a request's filters on the combined rows and
+the request without them, built by the list's own filter code.
+
+Measured on production on 2026-11-24
+([notes](../../lib/api/tests/summary/query-validation.md), with a recorded
+bundle that `scripts/validateSummaryQueries.cjs` replays and `yarn test`
+checks against the builders), against a
+statement per figure, which is how the endpoint was first written: sent
+together, a 12-hour request's statements (the default then) answer in a
+median of 338 ms instead of 831, for 774 ms of server time instead of 2,013,
+and a 14-day request's in 543 ms instead of 863; Blocking viable/strict's
+count alone fell from 767 ms to about 250. Each statement reads one whole
+health partition (4.3 M rows for main in 3 hours, 5.2 M in 12 hours, 13.1 M
+in 14 days) and matches it against the catalog's ids of the repository,
+which is most of its time and what the six statements each repeated. The
+bundle was recorded again on 2026-11-25, once the default window was 3 hours
+and the first figure counted the flaky entries with the failing, neither of
+which changed a statement's text: the default request's three statements
+answered in a median of 364 ms against 832 for the six, and a 12-hour
+request's in 369 against 747, so the default waits as long at 3 hours as it
+did at 12. It was recorded once more an hour later, when the first view kept
+the default window and a request in another window gained its fourth
+statement: alternated ten times each with the three statements from before,
+the four answered in the same time (350 against 348 ms at 12 hours, 420
+against 417 at 14 days) for about 220 ms more of server time and 5.3 M more
+rows read, the 3-hour partition of main read once more. Every figure equals the statement-per-figure
+baseline for 18 production requests (each window, language choices, a second
+repository and an unknown one) and, on an embedded ClickHouse with synthetic
+rows, equals the list's own statement for 52 requests through both code
+sources and every kind of filter. With one thread the three statements
+summed to 1.9 CPU-seconds for a 12-hour request and 3.2 for 14 days, and on
+2026-11-25 the four to 2.3 and 3.4 and the default request's three to 1.4,
+so none runs
+in the [heavy workload](#heavy-queries). The notes also record what was
+tried and not kept: one `UNION ALL` statement (less server time, the same
+wait), matching the catalog with a semi join (inside the noise once the
+statements are sent together, and no longer the list's own selection), and
+other ways to break the slowest's ties. Measure again when a view is added
+or changed: a view of two code sources would be the first statement over
+grouped rows, which was checked for meaning and never timed.
+
+### Test health
+
+The list returns one entry per test, environment and env var set. Health
+combines only the selected code sources for that configuration. `test_config`
+is the env var set's `TEST_CONFIG`, read out of the map
+(`env_vars['TEST_CONFIG']`, the empty string for a set without it) so that it
+can be offered by the options, filtered on and sorted on like a column; the
+`env_vars` filter still matches any variable. Workflow-path
+filtering selects configurations but does not narrow their aggregated health
+to matching workflows. The detail endpoint reuses the catalog and health
+shapes, returning every observed configuration, window and code source without
+pagination. It keeps windows separate because they overlap, and keeps code
+sources separate. A known test without health is distinct from an unknown test.
+
+`health.status` says in a word how a configuration's runs went, from the
+combined counts: `failing` when a run's last attempt failed (`failed_runs`
+exceeds `flaky_runs`, which counts the failing runs that passed on retry),
+`flaky` when every failing run passed on retry, `healthy` when no run failed,
+and `skipped` when there are no runs. Nothing is stored for it: the health
+view has a row only for a configuration with attempts or skips in the window,
+and the status is derived at query time in `COMBINED_HEALTH_SQL` from the
+summed counts, so the field, the `status` filter (repeatable, applied to the
+combined rows like `workflow_path`) and the sort cannot disagree. Sorting by
+`status` uses a rank derived the same way, healthy 0, flaky 1, failing 2, so
+`-status` puts the worst first; `skipped` has no rank and sorts last either
+way, as the rates of a configuration without runs do.
+
+Health refresh timestamps come from the selected rows. An empty list performs
+a separate lookup of the current refresh timestamp; this fallback does not
+establish a snapshot. Existing cursors remain usable after a health refresh.
+
+### Runs and attempts
+
+The test-runs and commit-runs endpoints share parameter definitions, run record
+schemas, filtering, sorting, pagination and metadata expansion in
+`lib/api/tests/test/runs/`. Keep scope selection in each endpoint: a test ID
+for one, and commit membership for the other. Their cursor resources remain
+distinct, and commit pagination additionally uses the test ID to break ties
+across tests.
+
+One run record bundles executions with the same `tests_id`, `environments_id`,
+`env_vars_id` and `github_workflow_job_id`. Its shared catalog and workflow
+metadata appears once; `attempts` holds the initial execution and every subsequent
+execution, including intentional repetitions. Each attempt keeps its execution
+`id`, `report`, `rerun_number`, outcome, outcome summary and timestamps. Order
+attempts by `started_at`, `ended_at` and `id` ascending. A bundle can span reports,
+and the reporter's `rerun_number` can reset when a new report starts.
+
+`GET /api/tests/run/{run_id}` accepts any retained `attempts[].id` and returns its
+full bundle with the same attempts, catalog and workflow objects, plus query
+timing. An unknown or expired execution UUID returns 404. The detail lookup and
+both lists share metadata expansion in `test/runs/mapping.ts`. `runs.id` is
+neither a key column nor indexed, so the lookup first scans the UUID column of
+every retained run to find the run's primary-key prefix, then reads that prefix
+with `FINAL`. That scan runs outside the heavy workload (see Heavy queries)
+and grows with retention: about 0.2 s over 191 million rows on 2026-10-24,
+about 12 s and 46 GB read over 2.85 billion rows on 2026-10-27, and roughly
+11 GB more a day until the 14-day TTL plateau. The endpoint is documented as
+provisional, and the list descriptions no longer point callers at it, so that
+nobody loops over it. An id-keyed lookup table filled by a materialized view
+is the remedy; it was deferred.
+
+Both lists reuse the test list's catalog shapes and owners. Form bundles before
+pagination so `limit` counts bundles and a bundle never crosses a page boundary.
+Outcome and `rerun_number` filters must match the same deduplicated execution;
+return every attempt in a selected bundle, including those that do not match.
+`last_attempt_outcome` independently filters the last retained attempt, ordered
+by `started_at`, `ended_at` and execution UUID string. It applies before pagination
+and can be repeated to match any supplied outcome. For example,
+`outcome=failed&last_attempt_outcome=passed` selects bundles containing a failure
+whose last retained attempt passed. Adding `rerun_number=0` requires the failure
+to have execution number zero; it does not constrain the last attempt's number.
+The last retained attempt does not establish that a retry chain is complete.
+Configuration and workflow filters select bundles using their shared metadata.
+For sorting, `started_at` is the earliest attempt start and `ended_at` the latest
+attempt end; `outcome` and `rerun_number` come from the last attempt in chronological
+order. Bundle identity fields break ties. Version 2 cursors encode this ordering;
+reject version 1 cursors with 400 because they paginated individual executions.
+
+Return each execution as `FINAL` would: mutable outcome, end-time and cursor
+predicates must apply after replacement deduplication so an older version cannot
+reappear. Missing catalog or workflow metadata must not remove a bundle unless
+a requested filter excludes it.
+
+After selecting a page, three concurrent batched requests load all attempts for
+only the returned bundles, excluding the pagination lookahead, and their catalog
+and workflow details. An empty page skips all three requests.
+The detail endpoint first resolves an execution UUID, then loads its bundle's
+attempts and shared metadata. The commit endpoint's `status` filter and sort
+read a bundle's final outcome: the outcome of its last executed attempt in
+`started_at`, `ended_at` and `id` order, or `skipped` when every attempt was
+skipped. A skip never overrides an executed attempt: a test that timed out or
+failed and was then skipped in its rerun did not recover, so that bundle keeps
+its `timed_out` or `failed` status, as the health view's retry chains count it.
+This is the one way the final outcome differs from the `last_attempt_outcome`
+filter, which reads the last attempt as recorded. The commit's counts by status
+are the summary endpoint's; the commit list carries none.
+The summary's `fields` parameter names the fields to answer, and the summary reads only what they need: the commit page asks for `commit` and `retention_starts_at`, which read no run, and takes its counts from the jobs endpoint.
+Both endpoints measure `query_duration_ms` as the sum of their individually
+rounded request durations, including client, network and decoding overhead. Overlapping requests mean this sum can exceed wall-clock time.
+SQL construction, mapping, cursor encoding and API transport are outside that
+measurement.
+
+Expanded catalogs and owners reflect current data. Workflow metadata uses the
+latest retained record for each job or workflow run; workflow path and SHA are
+shared across attempts, while the job URL and name identify the job that
+produced the run. Metadata is assembled into the shared `github_workflow`
+object. Preserve the partial-metadata behavior when changing the batch lookups:
+known job information remains available even if the workflow run record is
+missing.
+
+`github_workflow.event` records the trigger, such as `pull_request`,
+`pull_request_target`, `push`, `schedule` or `workflow_dispatch`.
+`github_workflow.pull_request` exposes the unique recorded PR as a nullable
+`{ number, url }` object. Its base repository ID must match the workflow's
+repository ID. This keeps contributor PRs targeting the workflow's repository
+and excludes PRs syncing upstream changes into other forks. Duplicate records
+of the same PR collapse into one object. The value is `null` when no matching PR
+is recorded, required metadata is unavailable, or multiple distinct matches make
+the association ambiguous. Use the event to identify a PR trigger: push runs can
+have an associated PR, and GitHub can omit associations for PR-triggered runs.
+These fields share the latest retained workflow record across attempts and do
+not infer PRs from branch names or a commit's current PR membership.
+
+### Runs grouped by commit
+
+`GET /api/tests/test/{test_id}/runs?group_by=commit` answers the same runs as
+a grid for the test page. The OpenAPI document describes the response and the
+parameters (the `RunGrid*` schemas in `lib/api/tests/test/runs/types.ts`;
+`group_by`, `ran_on` and `window` in `parameters.ts`); what it does not say:
+
+- `runsHandler` (`handler.ts`) branches on `group_by`; `parseRunsGridParams`
+  (`parameters.ts`) rejects the page's parameters with 400 and the page
+  rejects the grid's; `queryRunGrid` and `foldCell` (`grid.ts`) fold a cell
+  from its jobs' chains. Jobs with the same name on a commit are one retry
+  sequence whether GitHub re-ran the job or the same workflow ran again on
+  the commit, kept over siblings per workflow run, which would match the
+  health table's count of each job on its own.
+- `ran_on` is classified in SQL (`RAN_ON_SQL` in `grid-query.ts`, mirroring
+  `clickhouse_db_schema/ci/000002-health-materialized-view.sql`), since
+  `github_workflow.event` alone cannot tell a ciflow tag push from main:
+  three in four of one test's timed-out inductor.yml pushes in a week were
+  ciflow's.
+- `window` holds jobs, not attempts: the jobs whose first attempt started in
+  it, with every attempt of theirs, as the health table assigns a run to its
+  windows, so a chain is never cut at the window's start. The handler binds
+  the window's start as Unix milliseconds, so the statement is deterministic.
+- One grouped read of the test's runs by primary key through `FINAL` with the
+  key filters in `PREWHERE`, the window's jobs found first and their chains
+  read from a day before it, joined to the latest retained job and workflow
+  run rows as the bundle pages read them, then one batched catalog lookup;
+  about a second server-side for a week of main, so it is not tagged heavy.
+  Evidence and measurements:
+  [grid notes](../../lib/api/tests/test/runs/grid-query-validation.md).
+
+### Commit membership and performance
+
+Commit membership follows `default.workflow_run.head_sha` and repository through
+workflow job associations. A pull-request job may record a different merge SHA,
+so do not additionally filter by its SHA. Include all matching workflow and job
+attempts, without a branch, event or arbitrary time restriction.
+
+The commit query computes job IDs in a scalar subquery. The old analyzer
+evaluates it once per query block that references it, so a page that reads
+`FINAL` at shared starts evaluates it three times: once for each union branch's
+shared-start set and once for the direct read. A named table CTE would instead
+expand at every reference. This is not an
+application cache, and every request discovers current membership.
+
+The runs table's `by_job` projection stores every replacement version and cannot
+be read with `FINAL`. Bundle selection can use it when replacements cannot change
+group membership or ordering: group IDs, the earliest start, catalog and workflow
+fields, and matching a `rerun_number` filter. Both `outcome` and
+`last_attempt_outcome` filters and ordering by outcome, end time or the last
+attempt's number need replacement resolution. A commit page then resolves it by test
+start: versions of one run share its start, so one `by_job` pass finds the starts
+holding more than one stored row, a `FINAL` read pruned to those starts
+deduplicates them, and every other row is read directly through `by_job`. The
+statistics first group the commit's rows by job and test in one `by_job` pass: a
+key holding one stored row is a one-attempt bundle in its only version and is
+counted there, and only the other keys' rows, pruned by key on `by_job`, go
+through the same start-based resolution before they are grouped into bundles. A job filter alone prunes nothing under `FINAL`, so a plain `FINAL`
+read would scan the whole table. A test page reads `FINAL` by its primary key.
+Attempt expansion reads a commit page's bundles the same way and a test page's
+through `FINAL` by primary key. Grouping by configuration and job must not
+merge different test IDs or silently drop attempts from separate reports.
+Page selection and attempt expansion are separate reads of current data, so newly
+ingested attempts or replacements may change a bundle between those reads.
+
+The live service runs the old analyzer. It materializes a tuple-typed scalar as
+one value, which fails above 1,000,000 elements, so return arrays from scalar
+subqueries. It copies the WITH clause into every subquery, so keep each IN set
+one subquery level deep, keep predicate pushdown from copying page filters
+into union branches, and keep large subqueries out of WITH scalars that nested
+subqueries reference: a scalar holding the shared-start classification overflowed
+the 500,000-node AST limit, so that set is an inline IN subquery. Do not ask a `by_job` read for DISTINCT `tests_id`, which
+reads the main table in its sorting-key order instead.
+
+Use [Tests API SQL validation](../../lib/api/tests/query-validation.md) for
+current defaults, checked-in query evidence and the reproducible validation
+command. The [commit notes](../../lib/api/tests/commit/query-validation.md)
+and other notes beside the queries record earlier design experiments; their
+measurements are historical. Preserve the correctness guarantees and measure
+working-tree SQL with fixed, nonempty inputs when evaluating a rewrite.
+
+### Commit jobs
+
+`GET /api/tests/commit/{sha}/jobs` answers every job of a commit, for the
+commit page's timeline, in two fields. `jobs` holds each job's times and its
+Test and container steps from `workflow_job`. `tests` holds, for each job
+with retained runs, its bundles by status, the stretches in which a recorded
+attempt was running, in steps of 5 seconds, and how many attempts failed, under
+the job's ID (`job_id`); a job without retained runs has no entry. Each field
+is one read, made only when the field is asked for (`fields`), and both at
+once when both are: the jobs' read takes a tenth of a second or less, and
+the runs' read covers every retained run of the commit once, as the
+summary's counts do. The commit page asks for the two apart, at once, and
+draws the jobs while their tests are read. `GET /api/tests/job/{job_id}`
+answers one job with what its tests did beside it (`tests`, null without
+retained runs), its steps and its test files, and the `job_id` filter narrows
+`GET /api/tests/commit/{sha}` to jobs. A job's `workflow.run_attempt` is the
+attempt of its run that it
+ran in, which with `workflow.run_id` gives the page a row for each run and
+attempt of a workflow. The
+[commit notes](../../lib/api/tests/commit/query-validation.md) hold the
+measurements.
+
+A job's `started_at` is null when no runner took it. GitHub sets a job's
+start to its creation, at times a second before it, until a runner takes the
+job, and a job that ends first keeps that start, so a completed job with
+that start and no steps waited until it ended (`startedAt`). Of the
+2,172,530 pytorch/pytorch jobs created in the two weeks to 2026-11-17 that
+completed and were not skipped, 34,721 were such, 6,896 hours from creation
+to end and 1,367 of them an hour or more: all cancelled but 9. They are
+every job GitHub names no runner for, and 36 it names one for, each
+cancelled within seven minutes. A job that a rerun carries over has no
+steps either, and a start minutes or hours before its creation.
+
+### Pull requests
+
+`GET /api/tests/pull/{number}` answers with a pull request's newest head
+commit as HUD knows it, for the pull request page to open that commit's page.
+The head is the one the pull request's latest `default.pull_request` record
+names, unless the record fell behind a push: that table keeps the last row
+inserted for a pull request, and a row written just after a push sometimes
+still names the head before it (4 of the 1,500 most recently updated
+pull requests on 2026-11-05, one of them a day behind). The heads every
+record has named stay in `materialized_views.pr_by_sha`, and runs are created
+as heads are pushed, so when the recorded head ran a `pull_request` workflow
+on the pull request's branch, the recorded head with the newest run there is
+the newest head (`newestHead` in `lib/api/tests/pull/head.ts`). A push back
+to an earlier head runs again, and a push waiting for a maintainer's approval
+records its run (`action_required`), so both count. A recorded head that ran
+none stands: GitHub runs no `pull_request` workflow while a pull request has
+a merge conflict. That makes the rule's one wrong answer: a conflicting pull
+request pushed back to an earlier head that ran gets no new run, and the
+later head is answered. None was seen: the 9 pushes back to an earlier head
+in the 60 days to 2026-11-05 all ran again and were answered right. The two
+reads, the record and the heads' runs, run concurrently, each well under a
+tenth of a second of server time. GitHub is not asked: the endpoint reads
+HUD's database only, so a push that has not reached HUD yet is not seen. The
+comparison with GitHub's heads and the measurements are in
+[query-validation.md](../../lib/api/tests/pull/query-validation.md).
+
+### GreenLight verdict
+
+`GET /api/tests/commit/{sha}/greenlight` answers with GreenLight's latest
+status for a commit, for the pill in the commit page's header. GreenLight is
+the automated review that decides whether a pull request may merge without
+human review. The endpoint has no SQL of its own. The commit's lookup is the
+summary's (`lookUpCommit` in `lib/api/tests/commit/summary/summary.ts`), which
+names the commit's pull request and says whether the commit is one of its
+heads; the ledger, `misc.greenlight_pr_state`, is then read through the saved
+query the HUD's verdict panel reads
+(`clickhouse_queries/greenlight_pr_state_history`), and the row is chosen by
+the panel's own rule (`selectStateForSha` in
+`lib/greenlight/greenlightHudState.ts`), so the pull request page and the
+commit page cannot name different verdicts for a commit.
+
+- A pull request head is matched as it is. A commit on a branch never carries
+  the SHA that was reviewed, so for one the query is also given the commit
+  and its committer timestamp, from which it recovers the head that landed as
+  it; `head_sha` in the answer is that head.
+- Never another commit's verdict. A head GreenLight did not review answers
+  `verdict: null`, and so do a commit of no pull request, a commit HUD does
+  not know (200, not 404: a page asks for every commit it shows, and most
+  have no verdict) and a repository GreenLight does not review, which is
+  answered without a query. `no_verdict_reason` says which it is,
+  `not_reviewed`, `no_pull_request`, `unknown_commit` or
+  `repository_not_reviewed`, so that a page can tell its reader why there is
+  no verdict, or `unrecognized_status` for a ledger status the API has no
+  value for; it is null beside a verdict.
+- `message` is written by the model and the pull request can influence it:
+  show it as text, never as markup. `job_url` is null unless the recorded job
+  is a `github.com` URL.
+- An in-flight status, `AI_REVIEW_DISPATCHED` or `AI_REVIEW_STARTED`, more
+  than an hour old is a review that did not complete. The answer keeps the
+  recorded status and `updated_at`; the reader applies the hour
+  (`describeGreenlightStatus`), as the verdict panel does.
+- The lookups run one after the other, the commit's and then the ledger's,
+  and are untagged: on 2026-11-11 the two took about 0.2 seconds of server
+  time together, 0.5 at worst over six rounds (the commit's read 65,000 rows,
+  the ledger's 7,000 for a pull request head and 115,000 for a commit on
+  main). `query_duration_ms`, which includes the client and the network, was
+  0.6 to 1.5 seconds from a devserver, 0.8 typically, and 0.3 to 0.6 for a
+  commit HUD does not know.
+
+### Cost
+
+`GET /api/tests/cost` is a prototype: where a repository's test-job
+runner-hours go, as one small fact table by owner, workflow, machine and
+machine source (about 1,500 rows a day), which the cost page sums for any
+scope itself. It counts runner time only, no queue, and reads the rollup
+`ci.test_cost` (`clickhouse_db_schema/ci/000004` and `000005` hold its table
+and the view that fills it; `test/api/tests/cost/query.test.ts` keeps the SQL
+on its columns). Its SQL is in
+`lib/api/tests/cost/query.ts`; measurements and checks against
+`workflow_job` and HUD's cost analysis are in
+[query-validation.md](../../lib/api/tests/cost/query-validation.md).
+
+- `window` is the last 1, 3 or 7 whole UTC days, 7 by default, ending at the
+  start of today. Each day is read as last computed; `days` is how many of the
+  window's days the rollup holds, what a daily average divides by.
+- Runner-hours are test jobs' wall time, `started_at` to `completed_at`, of
+  completed, not skipped jobs on a runner, at most 24 hours long, by the day
+  they started. Builds and other jobs are not counted.
+- Each job's wall time is split among its test files by occupancy (the runner
+  time each file's test processes held, setup and idle time shared in
+  proportion), then evenly among each file's owners in `ci.owners`, read at
+  request time. Hours no owner can be given are `unattributed:no_owner` (files
+  without owners) and `unattributed:no_test_reports` (test jobs without test
+  reports); `contributors` lists the first by file and the second by runner
+  label.
+- A machine is what the tests catalog records (`ci.environments`): the
+  device, or a CPU-only machine's OS, architecture and CPU capability. Test
+  jobs without reports have none of their own: theirs is estimated as the
+  machine their runner label's reporting jobs recorded for most of their
+  hours (`machine_source` `runner_label`), or unknown (`none`, its labels in
+  `unprobed_labels`). A machine's family comes from the same columns: its
+  accelerator when it has a device (CUDA, ROCm, XPU, MPS, a new accelerator
+  under its own name), otherwise its OS's CPUs. Device short names drop the
+  leading words other devices of their family share. No list of machines,
+  vendors or labels is kept in code.
+- Each row keeps its runner label (the labels the jobs asked for, sorted and
+  comma-separated), so a caller can price the hours by runner. The API holds
+  no prices: the cost page prices them in the browser from a rates file the
+  reader adds.
+- `time_to_signal` names two signals and the workflow that gives each: PR
+  update signals (pull, on every pull request update) and PR merge signals
+  (trunk, which gates a merge), each as HUD's `workflow_duration_percentile` on
+  pushes to main, median and 90th percentile. Pushes to main stand in for a
+  pull request's wait: not exact, but the numbers readers know.
+  `workflow_presets` names scopes such as the PR Critical Path, pull and
+  trunk.
+- The queries are cheap, about 0.3 CPU-seconds for 3 days of the rollup, so
+  none runs in the heavy workload.
+- Planned: the rollup moves from the sandbox to `ci`.

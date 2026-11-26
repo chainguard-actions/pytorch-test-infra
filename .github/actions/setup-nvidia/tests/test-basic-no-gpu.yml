@@ -1,0 +1,36 @@
+name: Test basic usage (no GPU in act container)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure no container marker files exist
+        run: |
+          SUDO=""; [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1 && SUDO="sudo"
+          $SUDO rm -f /.inarc /.incontainer || true
+      - id: action
+        uses: .
+      - name: Assert outputs
+        env:
+          HAS_NVIDIA: ${{ steps.action.outputs.has-nvidia }}
+          IN_CONTAINER: ${{ steps.action.outputs.in-container-runner }}
+        run: |
+          echo "has-nvidia: $HAS_NVIDIA"
+          echo "in-container-runner: $IN_CONTAINER"
+          echo "HAS_NVIDIA_GPU: ${HAS_NVIDIA_GPU:-<unset>}"
+          echo "GPU_FLAG: ${GPU_FLAG:-<unset>}"
+          if [ "$IN_CONTAINER" != "false" ]; then
+            echo "FAIL: expected in-container-runner=false"; exit 1
+          fi
+          if [ "$HAS_NVIDIA" != "false" ]; then
+            echo "FAIL: expected has-nvidia=false in act container"; exit 1
+          fi
+          if [ "$HAS_NVIDIA_GPU" != "false" ]; then
+            echo "FAIL: expected HAS_NVIDIA_GPU=false"; exit 1
+          fi
+          if [ -n "${GPU_FLAG:-}" ]; then
+            echo "FAIL: GPU_FLAG should not be set"; exit 1
+          fi
+          echo "PASS"

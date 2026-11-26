@@ -1,0 +1,53 @@
+name: Test nightly with in_progress status is rejected
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          rm -rf /tmp/mock-relay
+          mkdir -p /tmp/mock-relay
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" --dir /tmp/mock-relay > /tmp/mock-relay.log 2>&1 &
+          for i in $(seq 1 30); do
+            [ -f /tmp/mock-relay/port ] && break
+            sleep 1
+          done
+          if [ ! -f /tmp/mock-relay/port ]; then cat /tmp/mock-relay.log; echo "FAIL: mock server did not start"; exit 1; fi
+          PORT="$(cat /tmp/mock-relay/port)"
+          curl -sf --noproxy '*' "http://127.0.0.1:$PORT/health"
+          echo "MOCK_URL=http://127.0.0.1:$PORT" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:$PORT/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token" >> "$GITHUB_ENV"
+          echo "NO_PROXY=127.0.0.1,localhost" >> "$GITHUB_ENV"
+          echo "no_proxy=127.0.0.1,localhost" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          status: in_progress
+          delivery-id: abc123
+          event-type: nightly
+          callback-url: ${{ env.MOCK_URL }}/github/callback/
+      - name: Assert validation failure and no callback sent
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          cat /tmp/mock-relay.log || true
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected failure for nightly + in_progress"
+            exit 1
+          fi
+          if ! grep -q 'audience=pytorch-cross-repo-ci-relay' /tmp/mock-relay/token-requests.log; then
+            echo "FAIL: OIDC step did not reach the mock token endpoint (failure came from the wrong step)"
+            exit 1
+          fi
+          n=$(ls /tmp/mock-relay/request-*.json 2>/dev/null | wc -l)
+          if [ "$n" -ne 0 ]; then
+            echo "FAIL: no callback should be sent on validation error, got $n"
+            exit 1
+          fi
+          echo "PASS"

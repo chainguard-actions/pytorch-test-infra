@@ -1,0 +1,57 @@
+name: Test push=false with default context
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker on PATH
+        run: |
+          rm -rf /tmp/fakebin /tmp/fake-docker-*
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/usr/bin/env bash
+          echo "$*" >> /tmp/fake-docker-calls.log
+          if [ "$1" = "buildx" ] && [ "$2" = "build" ]; then
+            n=$(( $(cat /tmp/fake-docker-count 2>/dev/null || echo 0) + 1 ))
+            echo "$n" > /tmp/fake-docker-count
+            : > /tmp/fake-docker-build-args
+            for a in "$@"; do printf '%s\n' "$a" >> /tmp/fake-docker-build-args; done
+            echo "#1 [internal] load build definition from Dockerfile"
+            exit 0
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: ghcr.io/example/only:tag
+          push: 'false'
+          connect-attempts: '2'
+          connect-delay: '0'
+      - name: Assert image output
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/only:tag" ]; then
+            echo "FAIL: expected 'ghcr.io/example/only:tag'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert no --push and optional flags absent
+        run: |
+          cat /tmp/fake-docker-build-args
+          for flag in --push --file --target --build-arg --label --cache-from --cache-to; do
+            if grep -qx -- "$flag" /tmp/fake-docker-build-args; then
+              echo "FAIL: unexpected flag $flag"
+              exit 1
+            fi
+          done
+          grep -qx -- "--tag" /tmp/fake-docker-build-args || { echo "FAIL: --tag missing"; exit 1; }
+          LAST="$(tail -n1 /tmp/fake-docker-build-args)"
+          [ "$LAST" = "." ] || { echo "FAIL: expected default context '.', got '$LAST'"; exit 1; }
+          echo "PASS"

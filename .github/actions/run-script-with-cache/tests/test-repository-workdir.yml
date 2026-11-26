@@ -1,0 +1,36 @@
+name: Test repository input sets working directory
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env
+        run: |
+          rm -f "$GITHUB_WORKSPACE/marker.txt" "$GITHUB_WORKSPACE/pwd.txt"
+          echo "BUILD_ENV_FILE=$GITHUB_WORKSPACE/tests/fixtures/build_env.sh" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          repository: tests/fixtures
+          script: write-marker.sh
+      - name: Assert script ran inside repository directory
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/pwd.txt" ]; then
+            echo "FAIL: pwd.txt not created"
+            exit 1
+          fi
+          ACTUAL="$(cat "$GITHUB_WORKSPACE/pwd.txt")"
+          echo "actual pwd: $ACTUAL"
+          case "$ACTUAL" in
+            */tests/fixtures) echo "PASS" ;;
+            *) echo "FAIL: expected working dir ending in tests/fixtures"; exit 1 ;;
+          esac
+          MARKER="$(cat "$GITHUB_WORKSPACE/marker.txt")"
+          echo "marker: $MARKER"
+          if [ "$MARKER" != "from-build-env" ]; then
+            echo "FAIL: expected 'from-build-env'"
+            exit 1
+          fi
+          echo "PASS"

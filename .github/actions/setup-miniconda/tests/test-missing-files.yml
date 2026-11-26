@@ -1,0 +1,29 @@
+name: Test missing env and pip files are tolerated
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          python-version: "3.12"
+          default-packages: "pip"
+          environment-file: tests/fixtures/does-not-exist.txt
+          pip-requirements-file: tests/fixtures/does-not-exist-requirements.txt
+      - name: Assert env created despite missing files
+        shell: bash
+        run: |
+          echo "outcome: ${{ steps.action.outcome }}"
+          if [ -z "$CONDA_PREFIX" ] || [ ! -d "$CONDA_PREFIX" ]; then
+            echo "FAIL: conda env not created"; exit 1
+          fi
+          PYV=$($CONDA_RUN python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          echo "python: $PYV"
+          if [ "$PYV" != "3.12" ]; then echo "FAIL: expected python 3.12"; exit 1; fi
+          if $CONDA_RUN python -c 'import six' 2>/dev/null; then
+            echo "FAIL: six should not be installed"; exit 1
+          fi
+          echo "PASS"

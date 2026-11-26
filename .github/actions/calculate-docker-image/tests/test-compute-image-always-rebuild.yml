@@ -1,0 +1,68 @@
+name: Test compute image name and rebuild
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws and docker CLIs (no real AWS/ECR access in act)
+        run: |
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/aws <<'EOF'
+          #!/bin/sh
+          echo "fake-password"
+          exit 0
+          EOF
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/bin/sh
+          if [ "$1" = "login" ]; then
+            cat >/dev/null
+            echo "Login Succeeded (fake)"
+            exit 0
+          fi
+          echo "fake docker: $*"
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/aws /tmp/fakebin/docker
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/calc-docker-build-args.txt
+      - id: action
+        uses: .
+        with:
+          docker-image-name: myimage
+          docker-build-dir: tests/fixtures/docker-build
+          repo-name: myrepo
+          docker-registry: registry.example.com
+          always-rebuild: "true"
+      - name: Assert computed docker image
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          HASH="$(git rev-parse HEAD:tests/fixtures/docker-build)"
+          EXPECTED="registry.example.com/myrepo/myimage:${HASH}"
+          echo "actual:   $ACTUAL"
+          echo "expected: $EXPECTED"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "FAIL: docker-image mismatch"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert build script was invoked
+        env:
+          IMAGE: ${{ steps.action.outputs.docker-image }}
+        run: |
+          if [ ! -f /tmp/calc-docker-build-args.txt ]; then
+            echo "FAIL: build script was not invoked"
+            exit 1
+          fi
+          cat /tmp/calc-docker-build-args.txt
+          if ! grep -qx -- "-t" /tmp/calc-docker-build-args.txt; then
+            echo "FAIL: expected -t argument"
+            exit 1
+          fi
+          if ! grep -qxF -- "$IMAGE" /tmp/calc-docker-build-args.txt; then
+            echo "FAIL: expected image '$IMAGE' as argument"
+            exit 1
+          fi
+          echo "PASS"

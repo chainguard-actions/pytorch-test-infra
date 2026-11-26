@@ -1,0 +1,42 @@
+name: Test pip requirements file is installed (simulated macOS)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake Homebrew and macOS shim
+        run: |
+          set -e
+          F="$GITHUB_WORKSPACE/tests/fixtures/fake-macos"
+          rm -rf /tmp/fakebrew
+          mkdir -p /tmp/fakebrew/bin /tmp/fakebrew/prefix/bin
+          cp "$F/brew" /tmp/fakebrew/bin/brew
+          cp "$F/venv-python" /tmp/fakebrew/venv-python
+          cp "$F/darwin-preload.js" /tmp/fakebrew/darwin-preload.js
+          for v in 3.11 3.12 3.13; do
+            cp "$F/python-fake" "/tmp/fakebrew/prefix/bin/python$v"
+          done
+          chmod +x /tmp/fakebrew/bin/brew /tmp/fakebrew/venv-python /tmp/fakebrew/prefix/bin/*
+          echo "/tmp/fakebrew/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require /tmp/fakebrew/darwin-preload.js
+        with:
+          python-version: "3.13"
+          pip-requirements-file: tests/fixtures/requirements.txt
+      - name: Assert requirements installed with venv python
+        run: |
+          echo "VENV_PATH: '${VENV_PATH:-}'"
+          if [ ! -f /tmp/fakebrew/venv-python.log ]; then
+            echo "FAIL: venv python was never invoked"; exit 1
+          fi
+          cat /tmp/fakebrew/venv-python.log
+          grep -q -- "-m pip install -r tests/fixtures/requirements.txt" /tmp/fakebrew/venv-python.log || { echo "FAIL: pip install -r not run with requirements file"; exit 1; }
+          case "$(basename "${VENV_PATH:-}")" in
+            venv-3.13-*) ;;
+            *) echo "FAIL: unexpected venv dir name"; exit 1 ;;
+          esac
+          echo "PASS"

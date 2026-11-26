@@ -1,0 +1,4 @@
+#!/bin/sh
+# Fake venv python: logs invocations.
+echo "venv-python $*" >> /tmp/fakebrew/venv-python.log
+exit 0

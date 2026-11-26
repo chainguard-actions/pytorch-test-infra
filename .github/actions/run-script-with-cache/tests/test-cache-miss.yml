@@ -1,0 +1,36 @@
+name: Test cache-path with cache miss runs script
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/marker.txt" "$GITHUB_WORKSPACE/cache-dir"
+          echo "BUILD_ENV_FILE=$GITHUB_WORKSPACE/tests/fixtures/build_env.sh" >> "$GITHUB_ENV"
+          echo "UNIQUE_KEY=act-test-$(date +%s%N)-$RANDOM" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          cache-path: cache-dir
+          cache-key: ${{ env.UNIQUE_KEY }}
+          script: tests/fixtures/write-marker.sh
+      - name: Assert script ran on cache miss
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/marker.txt" ]; then
+            echo "FAIL: marker.txt not created (script did not run)"
+            exit 1
+          fi
+          ACTUAL="$(cat "$GITHUB_WORKSPACE/marker.txt")"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "from-build-env" ]; then
+            echo "FAIL: expected 'from-build-env'"
+            exit 1
+          fi
+          if [ ! -f "$GITHUB_WORKSPACE/cache-dir/data.txt" ]; then
+            echo "FAIL: cache-dir/data.txt not created"
+            exit 1
+          fi
+          echo "PASS"

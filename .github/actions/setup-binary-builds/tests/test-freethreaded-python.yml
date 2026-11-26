@@ -1,0 +1,61 @@
+name: Test free-threaded python version handling
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      REPOSITORY: octocat/Hello-World
+      REF: master
+      PACKAGE_TYPE: wheel
+      GPU_ARCH_VERSION: cpu
+      GPU_ARCH_TYPE: cpu
+      CHANNEL: nightly
+      BUILD_VERSION: 0.0.1
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide pkg-helpers at $GITHUB_WORKSPACE/test-infra
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: pytorch/test-infra
+          ref: main
+          path: test-infra
+      - id: action
+        uses: .
+        with:
+          repository: octocat/Hello-World
+          ref: master
+          submodules: "false"
+          setup-miniconda: "true"
+          python-version: "3.14t"
+          cuda-version: cpu
+          arch: x86_64
+      - name: Assert ARTIFACT_NAME preserves the 't' suffix
+        run: |
+          echo "ARTIFACT_NAME: ${ARTIFACT_NAME:-}"
+          if [ "${ARTIFACT_NAME:-}" != "octocat_Hello-World_master_3.14t_cpu_x86_64" ]; then
+            echo "FAIL: unexpected ARTIFACT_NAME"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert conda env is free-threaded python 3.14
+        shell: bash -l {0}
+        run: |
+          echo "CONDA_ENV: ${CONDA_ENV:-}"
+          if [ -z "${CONDA_ENV:-}" ] || [ ! -d "$CONDA_ENV" ]; then
+            echo "FAIL: CONDA_ENV directory missing"
+            exit 1
+          fi
+          VER=$(conda run --no-capture-output -p "$CONDA_ENV" python -c 'import sys; print("%d.%d" % sys.version_info[:2])')
+          echo "python: $VER"
+          if [ "$VER" != "3.14" ]; then
+            echo "FAIL: expected python 3.14"
+            exit 1
+          fi
+          GIL=$(conda run --no-capture-output -p "$CONDA_ENV" python -c 'import sysconfig; print(sysconfig.get_config_var("Py_GIL_DISABLED"))')
+          echo "Py_GIL_DISABLED: $GIL"
+          if [ "$GIL" != "1" ]; then
+            echo "FAIL: expected free-threaded build"
+            exit 1
+          fi
+          echo "PASS"

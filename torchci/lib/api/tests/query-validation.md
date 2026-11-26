@@ -1,0 +1,274 @@
+# Tests API SQL validation
+
+These notes describe the current implementation and point at the checked-in
+evidence for each query family. Each bundle ships with a replay script under
+`scripts/`; run without `--live` it regenerates every recorded case from the
+working-tree builders and fails when the SQL or bindings differ, so a query
+change must regenerate and remeasure the affected evidence rather than assume an
+old result still applies. `yarn test` runs every replay this way
+(`test/scripts/validateQueries.test.ts`), so a stale bundle fails the suite
+instead of waiting to be run by hand. The specialized notes beside the queries
+record design experiments; their measurements are historical.
+
+| Queries                                            | Evidence and replay script                                                                                                                               |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tests list, boundary probe, test detail            | [query-validation.json](query-validation.json), `scripts/validateTestsApiQueries.cjs`                                                                    |
+| Tests list pages chosen before the catalog joins   | [page-first-query-validation.json](page-first-query-validation.json), `scripts/validateListPageFirstQueries.cjs`                                         |
+| Summary figures, read in shared statements         | [summary/query-validation.md](summary/query-validation.md), [query-validation.json](summary/query-validation.json), `scripts/validateSummaryQueries.cjs` |
+| Run bundles, attempt fetch (test and commit pages) | [attempts-query-validation.md](test/runs/attempts-query-validation.md), `scripts/validateRunAttemptsQueries.cjs`                                         |
+| `last_attempt_outcome` filter                      | [last-attempt-outcome-query-validation.md](test/runs/last-attempt-outcome-query-validation.md), `scripts/validateLastAttemptOutcomeQueries.cjs`          |
+| Commit pages reading `FINAL` only at shared starts | [commit/query-validation.md](commit/query-validation.md), `scripts/validateCommitSharedStartsQueries.cjs`                                                |
+| Commit summary: counts by status and lookups       | [commit/query-validation.md](commit/query-validation.md), `scripts/validateCommitSummaryQueries.cjs`                                                     |
+| Previous-page cursors                              | [bidirectional-pagination-query-validation.md](bidirectional-pagination-query-validation.md), `scripts/validateBidirectionalPaginationQueries.cjs`       |
+| Workflow metadata lookup                           | [workflow-query-validation.md](test/runs/workflow-query-validation.md), `scripts/validateRunWorkflowQuery.cjs`                                           |
+| Runs grouped by commit (`group_by=commit`)         | [grid-query-validation.md](test/runs/grid-query-validation.md), `scripts/validateRunGridQuery.cjs`                                                       |
+| Run detail by execution UUID                       | [run/query-validation.md](run/query-validation.md)                                                                                                       |
+| Pull request head: record and the heads' runs      | [pull/query-validation.md](pull/query-validation.md)                                                                                                     |
+
+## Current contract
+
+The list defaults to `window=3h`, `ran_on=main`,
+`sort=-status,-failure_rate,-failed_runs,-last_failed_at,-skip_rate,-mean_passed_duration_milliseconds`
+(the Health header's chain, worst first, so a bare page opens on the failing
+tests) and `limit=25`.
+It returns one row per test, environment and environment-variable set. The public
+ID filters are `environments_id` and `env_vars_id`; IDs used for pagination ties
+are not public sort choices. The generated OpenAPI document is the parameter
+reference, including JSON encoding for `env_vars` and its accepted legacy bracket
+syntax.
+
+The detail endpoint has no window filter. It returns every retained health
+window and code source for a test, ordered by environment ID, env-var ID, window
+length, then code source. The `health.window` Enum8 codes increase with window
+length: `3h`, `12h`, `1d`, `3d`, `7d`, `14d`. Order directly by the enum. Comparing
+it to a string array with `indexOf` invokes numeric conversion and produces the
+wrong order. A known test without health still returns its catalog identity and
+owners, so the detail query must keep its catalog-first **LEFT JOIN**.
+
+The list chooses its page before it joins the catalogs. One code source is
+one `(ran_on, window)` partition, which holds one row per configuration, so
+its rows are read as they are (`SINGLE_SOURCE_HEALTH_SQL`, each aggregate
+read off the row at the aggregate's type); several sources are combined in
+the health table's identity order (`COMBINED_HEALTH_SQL`), with the exact
+distinct workflow-path union. The tests a page may show are matched by ID
+against the tests catalog read without `FINAL`, which is exact because the
+test filters read only the columns a test ID hashes. The page's rows are then
+chosen from the health rows alone: every filter has applied by then, a health
+or ID sort key is a column of the row, and a catalog sort key is read from its
+catalog's row of the health row's ID (`KEY_CATALOGS` in `query.ts`), the test
+catalog's with an `INNER JOIN` since every matched test is in it, an
+environment's or env var set's with a `LEFT JOIN` that reads a missing record
+as empty, as the results do. The page names every health column with an
+alias: with keys from two catalogs its `SELECT` joins three or more tables,
+which the old analyzer rewrites into nested subqueries, and a column selected
+without an alias, as `health.*` selects them, comes out under its qualified
+name. Only the page's rows, at most 101, are joined to the tests, environment
+and env var catalogs for the response. See the 2026-11-03 history entry for
+the before/after comparison.
+
+For one test's runs, the test catalog can use the already-bound test ID directly.
+A commit's test filter reads the catalog whole, and a sort by a test field joins
+it bounded by the test IDs of the commit's runs. Both endpoints
+paginate bundles by test, environment, environment-variable set and workflow job;
+attempt filters select bundles and the full attempts fetch returns every execution
+as `FINAL` would. Commit pages can group the `by_job` projection directly when
+only immutable keys and minimum start time matter: duplicate versions cannot
+change these groups or whether a rerun-number predicate matches. Outcome filters
+and sorting by outcome, rerun number or end time need replacement resolution;
+since 2026-10-24 a commit page reads `FINAL` only at the test starts holding more
+than one stored row and the rest through `by_job`, as the statistics do (see the
+[commit notes](commit/query-validation.md)). Missing catalog
+rows remain available when sorting unless an explicit filter excludes them.
+Commit statistics count bundles by final outcome for the entire
+repository/commit regardless of page filters: one `by_job` pass groups the
+commit's rows by job and test, counts the keys holding one stored row directly,
+and resolves only the other keys' rows before grouping them into bundles.
+
+## Reproduce the list and detail validation
+
+The list and detail queries' standing evidence is a current-SQL fixture; the
+list's 2026-11-03 rewrite has its own before/after comparison,
+[page-first-query-validation.json](page-first-query-validation.json), replayed
+the same way with `scripts/validateListPageFirstQueries.cjs` (with `--live`
+and optional case names, three alternating pairs at four threads).
+[query-validation.json](query-validation.json) records each
+request, the exact generated SQL and bound parameters, the cursors taken from
+live pages the way the API builds them, `EXPLAIN indexes = 1` and
+`EXPLAIN ESTIMATE` plans, three executions with server timing, rows read and
+memory, and complete-row digests. It records the database, server version and
+measurement date, and no credentials.
+
+From `torchci/`, with dependencies installed and Node 22:
+
+```sh
+node scripts/validateTestsApiQueries.cjs
+node scripts/validateTestsApiQueries.cjs --live > tests-api-validation.json
+node scripts/validateTestsApiQueries.cjs --live detail > detail-validation.json
+```
+
+The first command needs no database. Live mode reads `CLICKHOUSE_HUD_USER_*`
+from the environment or `.env.local`, runs read-only with the query cache
+disabled and a 90-second timeout, and requires every execution of a case to
+return the same nonempty complete rows. Health refreshes every 15 minutes and
+replaces every row, so a list page can change between executions; the runner
+then fails, and the comparison is repeated rather than relaxed. Cursor cases
+embed the recorded cursor and expire with the entries they point at; record a
+new cursor from a live page rather than editing one.
+
+## List and detail results (2026-11-25)
+
+Every case returned the same nonempty complete rows in all three executions on 2026-11-25, at the health table's 01:15 UTC refresh, against `ci` on ClickHouse 26.6.1.2455, at the server's default thread count. Memory is the HTTP summary peak; rows read include the catalog joins. Health granules are the final primary-key selection within the partitions `window` and `ran_on` prune, kept of total.
+
+| Case                  | Request                                                                                                                                                   | Rows | Server seconds, median (range) | Rows read, millions | Memory MB | Health granules |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---: | -----------------------------: | ------------------: | --------: | --------------: |
+| `main_default`        | defaults: `window=3h`, `ran_on=main`, `sort=-status,-failure_rate,-failed_runs,-last_failed_at,-skip_rate,-mean_passed_duration_milliseconds`, `limit=25` |   26 |            0.964 (0.727–1.119) |                 7.3 |       623 |         512/512 |
+| `main_both_sources`   | `ran_on=main,pull_request`                                                                                                                                |   26 |            2.909 (2.899–3.765) |                10.8 |       991 |         938/938 |
+| `main_filtered`       | `owner=nn`, `accelerator=cuda`, `window=14d`, `sort=-failed_runs,-runs`                                                                                   |   26 |            1.465 (0.943–1.757) |                16.1 |       257 |       1607/1607 |
+| `main_search`         | `search=test/test_nn.py`                                                                                                                                  |   26 |            0.811 (0.734–0.914) |                 7.3 |       200 |         512/512 |
+| `main_env_vars`       | `env_vars={"TEST_CONFIG":["default"]}`, `window=1d`, `sort=file,suite,case_name`                                                                          |   26 |            1.584 (1.379–1.868) |                10.2 |      1055 |         682/682 |
+| `main_second_page`    | defaults continued from the first page cursor                                                                                                             |   26 |            0.795 (0.703–1.375) |                 7.3 |       606 |         512/512 |
+| `main_boundary_probe` | previous-direction probe the second page issues, one row                                                                                                  |    1 |            0.853 (0.848–0.904) |                 7.3 |       599 |         512/512 |
+| `detail`              | test `12347295505799784290`                                                                                                                               |  145 |            0.081 (0.076–0.433) |                 0.1 |        35 |        12/11092 |
+
+The default page reads the whole `(main, 3h)` partition, 512 granules on 2026-11-25, and sorts its rows by the six-field health chain before taking 26, so its cost is still the partition size rather than the page; since 2026-11-03 it reads one source's rows as they are and joins the catalogs to the page's rows alone (see History), and the boundary probe a cursor page issues reads and sorts the same rows for one. Both sources still combine two partitions' rows by configuration, 2.9 seconds over the two 3-hour partitions. The detail query prunes health to 12 granules through its test ID. On 2026-11-03, when the default window was 12 hours, the same cases took 0.70, 5.09, 0.76, 0.62, 0.84, 0.89, 0.67 and 0.14 seconds, and on 2026-10-26 5.0, 5.4, 1.1, 0.6, 6.8, 5.0, 4.6 and 0.08. The days do not compare case for case: `main_filtered` and `main_env_vars`, whose requests did not change, took 1.9 times as long on 2026-11-25 as on 2026-11-03, reading 16.1 against 11.2 million rows and 10.2 against 11.5 million. The 2026-11-03 comparison of the old and new list SQL at the heavy workload's four threads is [the page-first evidence](page-first-query-validation.json).
+
+## History
+
+On 2026-11-24 the default window changed from `12h` to `3h`. No statement's
+text changed: a request that leaves `window` off binds `3h` where it bound
+`12h`. The five cases that leave `window` off, `main_default`,
+`main_both_sources`, `main_search`, `main_second_page` and
+`main_boundary_probe`, were re-recorded, the two cursor cases from fresh live
+pages walked through the local API (the second page shared no row with the
+first, and its previous cursor returned the first page's rows exactly), and
+the whole bundle re-measured on 2026-11-25 within the 01:15 UTC refresh; the
+table above is that run, and the paragraph under it holds the 2026-11-03
+figures. The window is the functional change, so the rows differ by design
+and there is no equivalent baseline to show; the plans still prune to one
+partition, `(main, 3h)`, 3 parts and 512 granules where `(main, 12h)` was 4
+parts and 624 granules at the same refresh. Alternating the old default
+(`window=12h`) and the new one, one statement with the other window bound,
+eight times each within that refresh gave medians of 0.97 seconds of server
+time for 12 hours and 0.73 for 3 (0.71–1.13 against 0.60–1.53), 8.2 against
+7.3 million rows read and 650 against 632 MB. The ranges overlap: the 3-hour
+partition holds 4.28 million rows against 5.22 million, so the gain is small
+and the cost remains the partition. The page-first comparison's cases that
+left `window` off now name the `12h` they were recorded at
+([page-first-query-validation.json](page-first-query-validation.json)): that
+bundle compares two forms of the SQL as measured on 2026-11-03 and was not
+measured again. [The summary's bundle](summary/query-validation.md) was
+recorded again the same night.
+
+On 2026-11-03 the list began choosing its page before it joins the
+catalogs (`buildListQuery` in `query.ts`; [the comparison
+evidence](page-first-query-validation.json),
+`scripts/validateListPageFirstQueries.cjs`). Until then every request built
+the combined health of every configuration in its window, grouped by
+configuration even when one code source made each group a single row,
+joined all of them, 8.4 million on the default page, to the tests catalog,
+the environments and the env var sets, and only then sorted them for 26
+rows; the catalog `CTE` was also evaluated a second time for the `IN` that
+matched tests. Now one source's rows are read as they are, the tests are
+matched by ID without `FINAL`, the page's rows are chosen from the health
+rows with any catalog sort key read beside them from a narrow subquery of
+its catalog, and the catalogs are joined to the page's rows alone. The
+`ORDER BY` and every filter are unchanged, so the rows are the same: the
+evidence runs 23 cases' old and new SQL in three alternating pairs at the
+heavy workload's four threads and requires identical complete ordered rows,
+cursor keys included, which every case returned. Medians, old against new:
+the default page 8.3 against 1.2 seconds, its second page 8.2 against 1.4
+and its boundary probe 5.6 against 0.9; the saved views 3.7 to 9.6 against
+0.6 to 1.3 seconds (4.6 to 8.0 times); name, owner, language, OS and
+`TEST_CONFIG` sorts 3.1 to 6.4 times faster, and sorts by keys from two or
+three catalogs 8.0 to 8.5 against 1.6 to 1.7 seconds; both code sources,
+which still combine two partitions, 10.4 against 5.3 seconds (14 days, 12.4
+against 6.4); the owner and accelerator filter and the search page, already
+narrow, 1.56 against 1.33 and 1.25 against 1.14 seconds. Peak memory fell
+from 600 to 900 MB to under 400 MB on the single-source pages sorted by
+health values, and to 540 to 630 MB with catalog sort keys. Measured with
+one thread the same day, the default page took 36.4 against 4.3 seconds, the
+owner sort 28.8 against 4.8 and both sources 38.3 against 18.1, so the page
+now costs a few CPU-seconds where it cost thirty. Two further rewrites were
+measured and dropped: joining the catalog with the page's rows on the hash
+side, and reading the catalog for the page's rows in a second request; the
+catalog's own read takes 0.09 seconds, so neither could save more than a few
+percent.
+
+The first committed form of this change (26b19b27b) selected `health.*` in
+the page, and a sort with keys from two catalogs, such as `sort=os,file`,
+failed there with "There's no column 'health.tests_id' in table 'health'":
+the page's `SELECT` then joins three tables, which the old analyzer rewrites
+into nested subqueries, and only aliased columns keep their names through
+the rewrite. Review found it the same day; the page now names every health
+column with an alias, and the evidence gained four such cases
+(`two_catalog_sort`, its second page, `three_catalog_sort` and
+`two_catalog_boundary_probe`), whose old SQL had read the keys off the
+aliased result columns and worked.
+
+On 2026-10-25 the default sort changed from `-last_run_at` to
+`-mean_passed_duration_milliseconds`, slowest passing tests first. The five
+cases that leave `sort` off, `main_default`, `main_both_sources`,
+`main_search`, `main_second_page` and `main_boundary_probe`, were
+re-recorded, the two cursor cases from fresh live pages, and the whole bundle
+re-measured; this file's history holds the 2026-10-24 bundle. The new default
+reads and plans exactly as the old one did: `EXPLAIN indexes = 1` and
+`EXPLAIN ESTIMATE` for the two default pages are identical line for line, and
+both read 10.5 million rows. The three cases whose SQL did not change ran 1.4
+to 1.8 times slower than on 2026-10-24, so the day's load, not the sort,
+accounts for the higher figures above. Alternating the two default pages
+three times each once the 19:00 refresh had landed gave medians of 7.1
+seconds for the old sort and 6.2 for the new (6.1–7.9 against 6.0–7.2), the
+same 10.5 million rows read, and 952 against 969 MB.
+
+Later on 2026-10-25 `search` changed from an exact, case-sensitive match on
+any of file, suite, case name and declared case name to a match anywhere in
+the test's node id, `file::suite::case_name` with an empty suite left out,
+ignoring ASCII case (`searchPredicateSql` in `shared-sql.ts`, shared with the
+runs endpoints), so a page can search names as they are typed. `main_search`
+was regenerated and re-measured. For its request, `search=test/test_nn.py`,
+the old and new queries have identical `EXPLAIN indexes = 1` and `ESTIMATE`
+plans, read the same 10.5 million rows (`ci.tests` is ordered by id alone, so
+either predicate scans the whole catalog) and return the same 26 rows;
+alternating runs gave medians of 0.97 seconds for the exact match and 0.82 for
+the new one, at 140 against 139 MB.
+
+Two earlier bundles under `validation/` were removed on 2026-10-24 because they
+generated `fortesting.` SQL for builders that have since changed; commit
+3226fefe3 holds them. Their conclusions, which still shape the queries:
+
+- 2026-10-22 review of the list, detail and test-runs queries: the detail
+  query's window ordering was corrected to order by the enum, the list's
+  `INNER JOIN` was reversed to put the aggregated health relation first, cutting
+  median memory on the default page from 2.95 GB to 0.75 GB with latencies
+  overlapping (the filtered 14-day page got slower, 0.78 to 2.41 seconds, and
+  was accepted for the memory reduction), and the test-runs queries dropped a
+  redundant catalog discovery scan, halving rows read. Every case returned equal
+  rows in eight alternating executions.
+- 2026-10-23 commit runs: pages and statistics moved from a `FINAL` read of
+  every partition holding the commit's jobs to `by_job` reads resolved by
+  replacement key; medians fell from 4.95 to 13.57 seconds to 0.85 to 1.79
+  seconds on a 7.27-million-run commit with equal rows. The commit notes keep
+  the design record; the shared-start section at their end records the current
+  form of the pages that need replacement resolution.
+- 2026-10-26 default page: the default window changed from `7d` to `12h`
+  and the default sort from `-mean_passed_duration_milliseconds` to the
+  Health header's chain,
+  `-status,-failure_rate,-failed_runs,-last_failed_at,-skip_rate,-mean_passed_duration_milliseconds`,
+  which gained `-last_failed_at` and the mean at its end at the same time, so
+  that a bare page opens on what is failing now. On main that night the
+  health table held 20 failing and 32 flaky configurations in the 12 hour
+  window against 137 and 152 over 7 days, and only 20 of the 137 had failed
+  within the last 12 hours, 109 having only been skipped since. The five
+  cases that leave `sort` and `window` off were re-recorded, the two cursor
+  cases from fresh live pages walked through the local API (the second page
+  shared no row with the first, and its previous cursor returned the first
+  page's rows exactly, with `last_failed_at` deciding millisecond ties and
+  the passing mean NULL on the rows without a pass), and the whole bundle
+  re-measured; the table above is that run. The ORDER BY is the functional
+  change, so there is no equivalent baseline to show; the SQL is otherwise
+  unchanged and the plans still prune to one partition. Alternating the old
+  default (`window=7d&sort=-mean_passed_duration_milliseconds`) and the new
+  one through the local dev server three times each gave 5.4–6.3 seconds
+  against 5.0–5.1 wall time: the `(main, 12h)` partition holds 8.33 million
+  rows against 8.73 million, so the gain is small and the cost remains the
+  partition aggregation.

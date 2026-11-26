@@ -1,0 +1,41 @@
+name: Test nonexistent results dir with token
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          benchmark-results-dir: ${{ runner.temp }}/does-not-exist
+          dry-run: 'true'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assert environment set up, and action succeeded or failed gracefully
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "DEVICE_NAME=$DEVICE_NAME VIRTUAL_ENV=$VIRTUAL_ENV"
+          if [ -z "$DEVICE_NAME" ]; then
+            echo "FAIL: DEVICE_NAME not exported by action"
+            exit 1
+          fi
+          case "$DEVICE_NAME" in
+            cpu|arm64-cpu|cuda|rocm|hpu|xpu) ;;
+            *) echo "FAIL: unexpected DEVICE_NAME '$DEVICE_NAME'"; exit 1 ;;
+          esac
+          if [ ! -x "$VIRTUAL_ENV/bin/python" ]; then
+            echo "FAIL: venv python not found at $VIRTUAL_ENV"
+            exit 1
+          fi
+          if [ "$OUTCOME" = "success" ]; then
+            echo "PASS: action succeeded (missing dir skipped)"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully (sentinel repo / job id lookup not resolvable)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

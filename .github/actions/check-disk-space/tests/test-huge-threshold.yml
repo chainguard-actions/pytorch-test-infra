@@ -1,0 +1,38 @@
+name: Test unreachable minimum space threshold
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Determine expected outcome
+        id: expect
+        shell: bash
+        run: |
+          # The action parses columns 4 (avail) and 9 (mount) of `df -k`.
+          # On macOS-style df output the root mount is in column 9 and a huge
+          # threshold must fail; on Linux df output there is no column 9, so the
+          # root mount is never matched and the check passes.
+          if df -k | tr -s ' ' | awk '{print $9}' | grep -qx '/'; then
+            echo "expected=failure" >> "$GITHUB_OUTPUT"
+          else
+            echo "expected=success" >> "$GITHUB_OUTPUT"
+          fi
+          df -k
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          minimum-available-space-in-gb: 100000000
+      - name: Assert outcome
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          EXPECTED: ${{ steps.expect.outputs.expected }}
+        run: |
+          echo "outcome: $OUTCOME expected: $EXPECTED"
+          if [ "$OUTCOME" != "$EXPECTED" ]; then
+            echo "FAIL: expected '$EXPECTED'"
+            exit 1
+          fi
+          echo "PASS"

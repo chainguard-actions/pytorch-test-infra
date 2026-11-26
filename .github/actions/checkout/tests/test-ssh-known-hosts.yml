@@ -1,0 +1,39 @@
+name: Test ssh-known-hosts with token auth (no ssh-key)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          repository: actions/checkout
+          ref: main
+          path: known-hosts-target
+          ssh-known-hosts: |
+            example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          ssh-strict: "true"
+      - name: Assert checkout via HTTPS succeeded
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/known-hosts-target/action.yml" ]; then
+            echo "FAIL: action.yml not found"
+            exit 1
+          fi
+          URL="$(git -C "$GITHUB_WORKSPACE/known-hosts-target" remote get-url origin)"
+          echo "origin: $URL"
+          case "$URL" in
+            https://*) echo "PASS" ;;
+            *) echo "FAIL: expected HTTPS origin when no ssh-key is given"; exit 1 ;;
+          esac
+      - name: Assert commit output is a SHA
+        env:
+          COMMIT: ${{ steps.action.outputs.commit }}
+        run: |
+          echo "commit: $COMMIT"
+          if ! echo "$COMMIT" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "FAIL: commit output is not a 40-char SHA"
+            exit 1
+          fi
+          echo "PASS"

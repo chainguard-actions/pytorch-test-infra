@@ -1,0 +1,68 @@
+name: Test nightly commit cut from a non-default branch
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create local fixture remote and redirect GitHub URL to it
+        run: |
+          set -euo pipefail
+          BASE="$RUNNER_TEMP/nightly-fixture-rel"
+          rm -rf "$BASE"
+          mkdir -p "$BASE"
+          git init --bare "$BASE/remote" >/dev/null
+          ln -s "$BASE/remote" "$BASE/remote.git"
+          git init "$BASE/src" >/dev/null
+          cd "$BASE/src"
+          git config user.email "test@example.com"
+          git config user.name "Test User"
+          git checkout -b main
+          echo "main content" > file.txt
+          git add file.txt
+          git commit -m "main commit" >/dev/null
+          git checkout -b release/1.0
+          echo "release content" > file.txt
+          echo "extra" > release.txt
+          git add file.txt release.txt
+          git commit -m "release commit" >/dev/null
+          git checkout --orphan nightly
+          git rm -rf . >/dev/null
+          echo "old nightly" > file.txt
+          git add file.txt
+          git commit -m "old nightly" >/dev/null
+          git push "$BASE/remote" main release/1.0 nightly
+          git -C "$BASE/remote" symbolic-ref HEAD refs/heads/main
+          echo "REL_SHA=$(git -C "$BASE/remote" rev-parse refs/heads/release/1.0)" >> "$GITHUB_ENV"
+          echo "OLD_NIGHTLY_SHA=$(git -C "$BASE/remote" rev-parse refs/heads/nightly)" >> "$GITHUB_ENV"
+          echo "FIXTURE_REMOTE=$BASE/remote" >> "$GITHUB_ENV"
+          git config --global url."file://$BASE/remote".insteadOf "https://github.com/actionchain-test/nightly-fixture-rel"
+      - id: action
+        uses: .
+        with:
+          token: ${{ github.token }}
+          repository: actionchain-test/nightly-fixture-rel
+          ref: release/1.0
+          path: rel-checkout
+      - name: Assert release branch was checked out
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/rel-checkout/release.txt" ]; then
+            echo "FAIL: release.txt missing in checkout"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert nightly built from release branch tree
+        run: |
+          set -euo pipefail
+          NEW="$(git -C "$FIXTURE_REMOTE" rev-parse refs/heads/nightly)"
+          echo "old nightly: $OLD_NIGHTLY_SHA new nightly: $NEW release: $REL_SHA"
+          [ "$NEW" != "$OLD_NIGHTLY_SHA" ] || { echo "FAIL: nightly not updated"; exit 1; }
+          PARENT="$(git -C "$FIXTURE_REMOTE" rev-parse "$NEW^1")"
+          [ "$PARENT" = "$OLD_NIGHTLY_SHA" ] || { echo "FAIL: wrong parent"; exit 1; }
+          [ "$(git -C "$FIXTURE_REMOTE" rev-parse "$NEW^{tree}")" = "$(git -C "$FIXTURE_REMOTE" rev-parse "$REL_SHA^{tree}")" ] \
+            || { echo "FAIL: tree does not match release branch"; exit 1; }
+          MSG="$(git -C "$FIXTURE_REMOTE" log -1 --format=%s "$NEW")"
+          echo "message: $MSG"
+          echo "$MSG" | grep -q "nightly release (${REL_SHA})" || { echo "FAIL: message lacks release sha"; exit 1; }
+          echo "PASS"

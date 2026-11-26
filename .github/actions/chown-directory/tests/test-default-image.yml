@@ -1,0 +1,52 @@
+name: Test default ALPINE_IMAGE is used (mocked docker)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker that records its arguments
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/bash
+          log="${FAKE_DOCKER_LOG:-/tmp/fake-docker.log}"
+          : > "$log"
+          for a in "$@"; do printf '%s\n' "$a" >> "$log"; done
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          echo "FAKE_DOCKER_LOG=$RUNNER_TEMP/fake-docker.log" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          directory: ${{ github.workspace }}
+      - name: Assert default image used
+        env:
+          EXPECTED_DIR: ${{ github.workspace }}
+        run: |
+          cat "$FAKE_DOCKER_LOG"
+          mapfile -t ARGS < "$FAKE_DOCKER_LOG"
+          IMG=""
+          VOL=""
+          for i in "${!ARGS[@]}"; do
+            if [ "${ARGS[$i]}" = "-v" ] && [ -z "$VOL" ]; then VOL="${ARGS[$((i+1))]}"; fi
+            if [ "${ARGS[$i]}" = "chown" ] && [ -z "$IMG" ] && [ "$i" -gt 0 ]; then IMG="${ARGS[$((i-1))]}"; fi
+          done
+          echo "image: $IMG"
+          echo "volume: $VOL"
+          if [ "${ARGS[0]}" != "run" ]; then
+            echo "FAIL: expected 'docker run'"
+            exit 1
+          fi
+          if [ "$IMG" != "308535385114.dkr.ecr.us-east-1.amazonaws.com/tool/alpine" ]; then
+            echo "FAIL: default image not used"
+            exit 1
+          fi
+          if [ "$VOL" != "${EXPECTED_DIR}:/v" ]; then
+            echo "FAIL: unexpected volume '$VOL'"
+            exit 1
+          fi
+          echo "PASS"

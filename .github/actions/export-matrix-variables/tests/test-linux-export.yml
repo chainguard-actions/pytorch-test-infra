@@ -1,0 +1,43 @@
+name: Test linux matrix export (no quotes)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide test-infra export script (stub of upstream script)
+        run: |
+          rm -f "${RUNNER_TEMP}/matrix_to_export.json" "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          mkdir -p "$GITHUB_WORKSPACE/test-infra/.github/scripts"
+          cat > "$GITHUB_WORKSPACE/test-infra/.github/scripts/export_matrix_variables.py" <<'EOF'
+          import argparse, json
+          p = argparse.ArgumentParser()
+          p.add_argument("--input-file", required=True)
+          p.add_argument("--add-quotes-around-value", action="store_true")
+          a = p.parse_args()
+          with open(a.input_file) as f:
+              m = json.load(f)
+          for k, v in m.items():
+              key = k.upper().replace("-", "_")
+              print(f'{key}="{v}"' if a.add_quotes_around_value else f"{key}={v}")
+          EOF
+      - id: action
+        uses: .
+        with:
+          binary-matrix: '{"python_version": "3.11", "gpu_arch_type": "cuda"}'
+          target-os: linux
+      - name: Assert exported variables
+        run: |
+          JSON="${RUNNER_TEMP}/matrix_to_export.json"
+          ENVF="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          echo "--- json"; cat "$JSON" || { echo "FAIL: json missing"; exit 1; }
+          echo "--- env"; cat "$ENVF" || { echo "FAIL: env file missing"; exit 1; }
+          grep -q '"python_version": "3.11"' "$JSON" || { echo "FAIL: json content wrong"; exit 1; }
+          grep -qx 'PYTHON_VERSION=3.11' "$ENVF" || { echo "FAIL: PYTHON_VERSION=3.11 missing"; exit 1; }
+          grep -qx 'GPU_ARCH_TYPE=cuda' "$ENVF" || { echo "FAIL: GPU_ARCH_TYPE=cuda missing"; exit 1; }
+          if grep -q '"' "$ENVF"; then
+            echo "FAIL: linux should not add quotes"
+            exit 1
+          fi
+          echo "PASS"

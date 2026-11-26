@@ -1,0 +1,14 @@
+{
+  "params": {
+    "org": "String",
+    "repo": "String"
+  },
+  "defaults": {
+    "org": "pytorch",
+    "repo": "pytorch"
+  },
+  "tests": [
+    { "org": "pytorch", "repo": "pytorch" },
+    { "org": "pytorch", "repo": "" }
+  ]
+}

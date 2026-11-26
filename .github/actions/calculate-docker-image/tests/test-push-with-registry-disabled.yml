@@ -1,0 +1,31 @@
+name: Test push input with custom registry disabled
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+        with:
+          docker-image-name: push-test-image:v1
+          docker-build-dir: tests/fixtures/docker-build
+          use-custom-docker-registry: "false"
+          push: "true"
+          force-push: "true"
+          repo-name: myrepo
+      - name: Assert docker-image passed through and nothing was built or pushed
+        env:
+          ACTUAL: ${{ steps.action.outputs.docker-image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "push-test-image:v1" ]; then
+            echo "FAIL: expected 'push-test-image:v1'"
+            exit 1
+          fi
+          if [ -f /tmp/calc-docker-build-args.txt ]; then
+            echo "FAIL: build script should not have run"
+            exit 1
+          fi
+          echo "PASS"

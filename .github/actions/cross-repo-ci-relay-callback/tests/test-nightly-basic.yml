@@ -1,0 +1,77 @@
+name: Test nightly self-report
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          rm -rf /tmp/mock-relay
+          mkdir -p /tmp/mock-relay
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" --dir /tmp/mock-relay > /tmp/mock-relay.log 2>&1 &
+          for i in $(seq 1 30); do
+            [ -f /tmp/mock-relay/port ] && break
+            sleep 1
+          done
+          if [ ! -f /tmp/mock-relay/port ]; then cat /tmp/mock-relay.log; echo "FAIL: mock server did not start"; exit 1; fi
+          PORT="$(cat /tmp/mock-relay/port)"
+          curl -sf --noproxy '*' "http://127.0.0.1:$PORT/health"
+          echo "MOCK_URL=http://127.0.0.1:$PORT" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:$PORT/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token" >> "$GITHUB_ENV"
+          echo "NO_PROXY=127.0.0.1,localhost" >> "$GITHUB_ENV"
+          echo "no_proxy=127.0.0.1,localhost" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: success
+          delivery-id: 0e797b5a6acf1234567890abcdef1234567890ab
+          event-type: nightly
+          callback-url: ${{ env.MOCK_URL }}/github/callback/
+      - name: Assert callback payload
+        run: |
+          cat /tmp/mock-relay.log || true
+          python3 - <<'EOF'
+          import glob, json, sys
+          def fail(msg):
+              print("FAIL:", msg); sys.exit(1)
+          tokens = open("/tmp/mock-relay/token-requests.log").read()
+          print("token requests:", tokens)
+          if "audience=pytorch-cross-repo-ci-relay" not in tokens:
+              fail("OIDC token not requested with the relay audience")
+          if "Bearer fake-request-token" not in tokens:
+              fail("OIDC request did not use ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+          files = sorted(glob.glob("/tmp/mock-relay/request-*.json"))
+          if len(files) != 1:
+              fail("expected exactly 1 callback request, got %d" % len(files))
+          req = json.load(open(files[0]))
+          print(json.dumps(req, indent=2))
+          if req["path"] != "/github/callback":
+              fail("unexpected path %r" % req["path"])
+          if req["headers"].get("authorization") != "Bearer fake-oidc-token-for-test":
+              fail("Authorization header does not carry the minted OIDC token")
+          if "application/json" not in req["headers"].get("content-type", ""):
+              fail("content-type not json")
+          b = req["body"]
+          sha = "0e797b5a6acf1234567890abcdef1234567890ab"
+          if b.get("event_type") != "nightly": fail("event_type")
+          if b.get("delivery_id") != sha: fail("delivery_id")
+          if b["payload"]["head_sha"] != sha: fail("head_sha")
+          if b["payload"]["repository"]["full_name"] != "pytorch/pytorch": fail("repository")
+          w = b["workflow"]
+          if w["status"] != "completed": fail("status")
+          if w["conclusion"] != "success": fail("conclusion")
+          if w["schema_version"] != "1": fail("schema_version")
+          if w["job_name"] != "test": fail("job_name should default to github.job, got %r" % w["job_name"])
+          if w["name"] != "Test nightly self-report": fail("workflow name %r" % w["name"])
+          if not w.get("started_at") or not w.get("completed_at"): fail("timestamps missing")
+          if not w.get("check_run_id"): fail("check_run_id missing")
+          if not w.get("run_id"): fail("run_id missing")
+          if "/actions/runs/" not in w.get("url", ""): fail("url")
+          for k in ("test_results", "failed_tests_detail", "triage_verdict", "artifact_url"):
+              if k in w: fail("unexpected optional key %s" % k)
+          print("PASS")
+          EOF

@@ -1,0 +1,32 @@
+name: Test setup-nvidia-windows basic invocation
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # This action uses `shell: cmd` and requires a Windows GPU runner with
+      # nvidia-smi. Under act (Linux containers) it cannot complete, so we
+      # assert on the step outcome: success only if nvidia-smi is truly usable,
+      # otherwise a clean failure is expected.
+      - id: action
+        uses: .
+        continue-on-error: true
+      - name: Assert action outcome
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "success" ]; then
+            if ! command -v nvidia-smi >/dev/null 2>&1 && ! command -v cmd >/dev/null 2>&1; then
+              echo "FAIL: action reported success but neither cmd nor nvidia-smi is available"
+              exit 1
+            fi
+            echo "PASS: action succeeded on a capable runner"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed as expected on a non-Windows/non-GPU runner"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

@@ -1,0 +1,95 @@
+name: Test basic buildx invocation with all inputs
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker on PATH
+        run: |
+          rm -rf /tmp/fakebin /tmp/fake-docker-*
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/usr/bin/env bash
+          echo "$*" >> /tmp/fake-docker-calls.log
+          if [ "$1" = "buildx" ] && [ "$2" = "build" ]; then
+            n=$(( $(cat /tmp/fake-docker-count 2>/dev/null || echo 0) + 1 ))
+            echo "$n" > /tmp/fake-docker-count
+            : > /tmp/fake-docker-build-args
+            for a in "$@"; do printf '%s\n' "$a" >> /tmp/fake-docker-build-args; done
+            mode="$(cat /tmp/fake-docker-mode 2>/dev/null || echo success)"
+            case "$mode" in
+              success) echo "#1 [internal] load build definition from Dockerfile"; exit 0 ;;
+              cold-then-success)
+                if [ "$n" -lt 3 ]; then echo "ERROR: failed to dial gRPC: connection refused" >&2; exit 1; fi
+                echo "#1 [internal] load build definition from Dockerfile"; exit 0 ;;
+              cold-forever) echo "ERROR: failed to dial gRPC: connection refused" >&2; exit 1 ;;
+              build-error) echo "#5 [2/3] RUN false"; echo "ERROR: process did not complete successfully: exit code: 1" >&2; exit 1 ;;
+            esac
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker
+          echo success > /tmp/fake-docker-mode
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          tags: |
+            ghcr.io/example/img:abc123, ghcr.io/example/img:latest
+            ghcr.io/example/img:v1
+          context: ./ctx-dir
+          file: ./ctx-dir/Dockerfile.custom
+          target: runtime
+          build-args: |
+            FOO=bar
+            BAZ=qux
+          labels: |
+            org.opencontainers.image.source=https://example.com
+          cache-from: type=registry,ref=ghcr.io/example/img:cache
+          cache-to: type=registry,ref=ghcr.io/example/img:cache,mode=max
+          connect-attempts: '3'
+          connect-delay: '0'
+      - name: Assert image output is first tag
+        env:
+          ACTUAL: ${{ steps.action.outputs.image }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "ghcr.io/example/img:abc123" ]; then
+            echo "FAIL: expected 'ghcr.io/example/img:abc123'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert buildx builder registered and build args correct
+        run: |
+          echo "--- calls ---"; cat /tmp/fake-docker-calls.log
+          echo "--- build args ---"; cat /tmp/fake-docker-build-args
+          grep -q "^buildx create --name remote-buildkit --driver remote --use tcp://buildkitd-" /tmp/fake-docker-calls.log || { echo "FAIL: builder not created"; exit 1; }
+          [ "$(cat /tmp/fake-docker-count)" = "1" ] || { echo "FAIL: expected exactly 1 build"; exit 1; }
+          ARGS="$(tr '\n' ' ' < /tmp/fake-docker-build-args)"
+          case "$(uname -m)" in
+            aarch64|arm64) PLAT=linux/arm64 ;;
+            *) PLAT=linux/amd64 ;;
+          esac
+          for expected in \
+            "--tag ghcr.io/example/img:abc123 " \
+            "--tag ghcr.io/example/img:latest " \
+            "--tag ghcr.io/example/img:v1 " \
+            "--platform $PLAT " \
+            "--file ./ctx-dir/Dockerfile.custom " \
+            "--target runtime " \
+            "--build-arg FOO=bar " \
+            "--build-arg BAZ=qux " \
+            "--label org.opencontainers.image.source=https://example.com " \
+            "--cache-from type=registry,ref=ghcr.io/example/img:cache " \
+            "--cache-to type=registry,ref=ghcr.io/example/img:cache,mode=max " \
+            "--push " ; do
+            case "$ARGS" in
+              *"$expected"*) echo "ok: $expected" ;;
+              *) echo "FAIL: missing '$expected'"; exit 1 ;;
+            esac
+          done
+          LAST="$(tail -n1 /tmp/fake-docker-build-args)"
+          [ "$LAST" = "./ctx-dir" ] || { echo "FAIL: context should be last arg, got '$LAST'"; exit 1; }
+          echo "PASS"

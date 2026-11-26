@@ -1,0 +1,69 @@
+name: Test periodic full payload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          rm -rf /tmp/mock-relay
+          mkdir -p /tmp/mock-relay
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" --dir /tmp/mock-relay > /tmp/mock-relay.log 2>&1 &
+          for i in $(seq 1 30); do
+            [ -f /tmp/mock-relay/port ] && break
+            sleep 1
+          done
+          if [ ! -f /tmp/mock-relay/port ]; then cat /tmp/mock-relay.log; echo "FAIL: mock server did not start"; exit 1; fi
+          PORT="$(cat /tmp/mock-relay/port)"
+          curl -sf --noproxy '*' "http://127.0.0.1:$PORT/health"
+          echo "MOCK_URL=http://127.0.0.1:$PORT" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:$PORT/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token" >> "$GITHUB_ENV"
+          echo "NO_PROXY=127.0.0.1,localhost" >> "$GITHUB_ENV"
+          echo "no_proxy=127.0.0.1,localhost" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          status: completed
+          conclusion: failure
+          delivery-id: deadbeefcafe
+          event-type: periodic
+          job-name: build-cuda
+          artifact-url: https://example.com/artifacts/123
+          test-results: '{"passed": 10, "failed": 2, "skipped": 1}'
+          failed-tests-detail: '[{"name":"test_foo","classname":"TestBar","message":"AssertionError"},{"name":"test_baz"}]'
+          triage-verdict: '{"schema_version":1,"category":"upstream","confidence":"high","summary":"aten::foo lost its out= overload"}'
+          callback-url: ${{ env.MOCK_URL }}/github/callback
+      - name: Assert callback payload
+        run: |
+          cat /tmp/mock-relay.log || true
+          python3 - <<'EOF'
+          import glob, json, sys
+          def fail(msg):
+              print("FAIL:", msg); sys.exit(1)
+          files = sorted(glob.glob("/tmp/mock-relay/request-*.json"))
+          if len(files) != 1:
+              fail("expected exactly 1 callback request, got %d" % len(files))
+          req = json.load(open(files[0]))
+          print(json.dumps(req, indent=2))
+          if req["headers"].get("authorization") != "Bearer fake-oidc-token-for-test":
+              fail("Authorization header")
+          b = req["body"]
+          if b.get("event_type") != "periodic": fail("event_type")
+          if b.get("delivery_id") != "deadbeefcafe": fail("delivery_id")
+          w = b["workflow"]
+          if w["status"] != "completed": fail("status")
+          if w["conclusion"] != "failure": fail("conclusion")
+          if w["job_name"] != "build-cuda": fail("job_name %r" % w["job_name"])
+          if w.get("artifact_url") != "https://example.com/artifacts/123": fail("artifact_url")
+          if w.get("test_results") != {"passed": 10, "failed": 2, "skipped": 1}: fail("test_results %r" % w.get("test_results"))
+          ftd = w.get("failed_tests_detail")
+          if not isinstance(ftd, list) or len(ftd) != 2 or ftd[0]["name"] != "test_foo" or ftd[0]["classname"] != "TestBar":
+              fail("failed_tests_detail %r" % ftd)
+          tv = w.get("triage_verdict")
+          if not isinstance(tv, dict) or tv.get("category") != "upstream" or tv.get("confidence") != "high":
+              fail("triage_verdict %r" % tv)
+          print("PASS")
+          EOF

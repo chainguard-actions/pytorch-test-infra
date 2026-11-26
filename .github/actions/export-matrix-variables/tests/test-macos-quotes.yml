@@ -1,0 +1,35 @@
+name: Test non-linux matrix export adds quotes
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Provide test-infra export script (stub of upstream script)
+        run: |
+          rm -f "${RUNNER_TEMP}/matrix_to_export.json" "${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          mkdir -p "$GITHUB_WORKSPACE/test-infra/.github/scripts"
+          cat > "$GITHUB_WORKSPACE/test-infra/.github/scripts/export_matrix_variables.py" <<'EOF'
+          import argparse, json
+          p = argparse.ArgumentParser()
+          p.add_argument("--input-file", required=True)
+          p.add_argument("--add-quotes-around-value", action="store_true")
+          a = p.parse_args()
+          with open(a.input_file) as f:
+              m = json.load(f)
+          for k, v in m.items():
+              key = k.upper().replace("-", "_")
+              print(f'{key}="{v}"' if a.add_quotes_around_value else f"{key}={v}")
+          EOF
+      - id: action
+        uses: .
+        with:
+          binary-matrix: '{"desired_cuda": "cpu"}'
+          target-os: macos
+      - name: Assert exported variables are quoted
+        run: |
+          ENVF="${RUNNER_TEMP}/github_env_${GITHUB_RUN_ID}"
+          cat "$ENVF" || { echo "FAIL: env file missing"; exit 1; }
+          grep -qx 'DESIRED_CUDA="cpu"' "$ENVF" || { echo "FAIL: expected DESIRED_CUDA=\"cpu\""; exit 1; }
+          echo "PASS"

@@ -1,0 +1,73 @@
+name: Test basic nightly commit push
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create local fixture remote and redirect GitHub URL to it
+        run: |
+          set -euo pipefail
+          BASE="$RUNNER_TEMP/nightly-fixture"
+          rm -rf "$BASE"
+          mkdir -p "$BASE"
+          git init --bare "$BASE/remote" >/dev/null
+          ln -s "$BASE/remote" "$BASE/remote.git"
+          git init "$BASE/src" >/dev/null
+          cd "$BASE/src"
+          git config user.email "test@example.com"
+          git config user.name "Test User"
+          git checkout -b main
+          echo "main content" > file.txt
+          git add file.txt
+          git commit -m "main commit" >/dev/null
+          git checkout --orphan nightly
+          echo "old nightly" > file.txt
+          git add file.txt
+          git commit -m "old nightly" >/dev/null
+          git push "$BASE/remote" main nightly
+          git -C "$BASE/remote" symbolic-ref HEAD refs/heads/main
+          echo "MAIN_SHA=$(git -C "$BASE/remote" rev-parse refs/heads/main)" >> "$GITHUB_ENV"
+          echo "OLD_NIGHTLY_SHA=$(git -C "$BASE/remote" rev-parse refs/heads/nightly)" >> "$GITHUB_ENV"
+          echo "FIXTURE_REMOTE=$BASE/remote" >> "$GITHUB_ENV"
+          git config --global url."file://$BASE/remote".insteadOf "https://github.com/actionchain-test/nightly-fixture"
+      - id: action
+        uses: .
+        with:
+          token: ${{ github.token }}
+          repository: actionchain-test/nightly-fixture
+          ref: main
+          path: nightly-checkout
+      - name: Assert checkout landed in path
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/nightly-checkout/file.txt" ]; then
+            echo "FAIL: checkout file missing"
+            exit 1
+          fi
+          CONTENT="$(cat "$GITHUB_WORKSPACE/nightly-checkout/file.txt")"
+          echo "content: $CONTENT"
+          [ "$CONTENT" = "main content" ] || { echo "FAIL: wrong content"; exit 1; }
+          echo "PASS"
+      - name: Assert nightly branch updated correctly
+        run: |
+          set -euo pipefail
+          NEW="$(git -C "$FIXTURE_REMOTE" rev-parse refs/heads/nightly)"
+          echo "old nightly: $OLD_NIGHTLY_SHA new nightly: $NEW main: $MAIN_SHA"
+          if [ "$NEW" = "$OLD_NIGHTLY_SHA" ]; then
+            echo "FAIL: nightly branch not updated"; exit 1
+          fi
+          PARENT="$(git -C "$FIXTURE_REMOTE" rev-parse "$NEW^1")"
+          [ "$PARENT" = "$OLD_NIGHTLY_SHA" ] || { echo "FAIL: parent $PARENT != old nightly"; exit 1; }
+          NEW_TREE="$(git -C "$FIXTURE_REMOTE" rev-parse "$NEW^{tree}")"
+          MAIN_TREE="$(git -C "$FIXTURE_REMOTE" rev-parse "$MAIN_SHA^{tree}")"
+          [ "$NEW_TREE" = "$MAIN_TREE" ] || { echo "FAIL: tree mismatch"; exit 1; }
+          MSG="$(git -C "$FIXTURE_REMOTE" log -1 --format=%s "$NEW")"
+          echo "message: $MSG"
+          echo "$MSG" | grep -qE "^[0-9]{4}-[0-9]{2}-[0-9]{2} nightly release \(${MAIN_SHA}\)$" \
+            || { echo "FAIL: unexpected commit message"; exit 1; }
+          AUTHOR="$(git -C "$FIXTURE_REMOTE" log -1 --format='%an <%ae>' "$NEW")"
+          echo "author: $AUTHOR"
+          [ "$AUTHOR" = "pytorchbot <pytorchbot@pytorch.com>" ] || { echo "FAIL: wrong author"; exit 1; }
+          git -C "$FIXTURE_REMOTE" rev-parse refs/heads/main | grep -qx "$MAIN_SHA" || { echo "FAIL: main changed"; exit 1; }
+          echo "PASS"

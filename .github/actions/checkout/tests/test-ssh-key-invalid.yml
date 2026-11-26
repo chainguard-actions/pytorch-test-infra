@@ -1,0 +1,38 @@
+name: Test ssh-key with an unauthorized key fails
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # The key below is not registered with any GitHub account, so an SSH
+      # fetch cannot succeed. The action must fail rather than silently
+      # falling back or producing a checkout.
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          repository: actions/checkout
+          ref: main
+          path: ssh-key-target
+          ssh-key: |
+            -----BEGIN OPENSSH PRIVATE KEY-----
+            not-a-real-key-used-only-for-testing
+            -----END OPENSSH PRIVATE KEY-----
+          ssh-known-hosts: |
+            example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+      - name: Assert action failed with unauthorized ssh key
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected failure with an invalid ssh key, got '$OUTCOME'"
+            exit 1
+          fi
+          if [ -f "$GITHUB_WORKSPACE/ssh-key-target/action.yml" ]; then
+            echo "FAIL: repository content unexpectedly checked out"
+            exit 1
+          fi
+          echo "PASS"

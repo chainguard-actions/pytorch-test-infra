@@ -1,0 +1,58 @@
+name: Test late report
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock OIDC + relay server
+        run: |
+          rm -rf /tmp/mock-relay
+          mkdir -p /tmp/mock-relay
+          nohup python3 "$GITHUB_WORKSPACE/tests/fixtures/mock_relay.py" --dir /tmp/mock-relay > /tmp/mock-relay.log 2>&1 &
+          for i in $(seq 1 30); do
+            [ -f /tmp/mock-relay/port ] && break
+            sleep 1
+          done
+          if [ ! -f /tmp/mock-relay/port ]; then cat /tmp/mock-relay.log; echo "FAIL: mock server did not start"; exit 1; fi
+          PORT="$(cat /tmp/mock-relay/port)"
+          curl -sf --noproxy '*' "http://127.0.0.1:$PORT/health"
+          echo "MOCK_URL=http://127.0.0.1:$PORT" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL=http://127.0.0.1:$PORT/token?api-version=2.0" >> "$GITHUB_ENV"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN=fake-request-token" >> "$GITHUB_ENV"
+          echo "NO_PROXY=127.0.0.1,localhost" >> "$GITHUB_ENV"
+          echo "no_proxy=127.0.0.1,localhost" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          event-type: late-report
+          triage-verdict-list: >-
+            [{"delivery_id": "d1", "workflow_name": "wf", "job_name": "build-npu", "check_run_id": 123456789,
+              "triage_verdict": {"schema_version": 1, "category": "backend", "confidence": "medium", "summary": "s1"}},
+             {"delivery_id": "d2", "workflow_name": "wf", "job_name": "build-cpu",
+              "triage_verdict": {"schema_version": 1, "category": "flake", "confidence": "low", "summary": "s2"}}]
+          callback-url: ${{ env.MOCK_URL }}/github/callback/
+      - name: Assert late report payload
+        run: |
+          cat /tmp/mock-relay.log || true
+          python3 - <<'EOF'
+          import glob, json, sys
+          def fail(msg):
+              print("FAIL:", msg); sys.exit(1)
+          files = sorted(glob.glob("/tmp/mock-relay/request-*.json"))
+          if len(files) != 1:
+              fail("expected exactly 1 request, got %d" % len(files))
+          req = json.load(open(files[0]))
+          print(json.dumps(req, indent=2))
+          if req["headers"].get("authorization") != "Bearer fake-oidc-token-for-test":
+              fail("Authorization header")
+          b = req["body"]
+          if b.get("event_type") != "late-report": fail("event_type")
+          if "workflow" in b: fail("late report must not carry a workflow block")
+          reports = b.get("reports")
+          if not isinstance(reports, list) or len(reports) != 2: fail("reports %r" % reports)
+          if reports[0]["job_name"] != "build-npu" or reports[0]["check_run_id"] != 123456789: fail("report 0")
+          if reports[1]["delivery_id"] != "d2" or reports[1]["triage_verdict"]["category"] != "flake": fail("report 1")
+          print("PASS")
+          EOF

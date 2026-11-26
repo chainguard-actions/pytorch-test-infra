@@ -1,0 +1,47 @@
+name: Test image already present locally (no pull)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      MOCK_INSPECT_RC: "0"
+      MOCK_PULL_RC: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock aws and docker
+        run: |
+          mkdir -p /tmp/mockbin /tmp/mock
+          : > /tmp/mock/calls.log
+          cat > /tmp/mockbin/aws <<'EOF'
+          #!/bin/bash
+          echo "aws $*" >> /tmp/mock/calls.log
+          echo "fake-ecr-password"
+          exit ${MOCK_AWS_RC:-0}
+          EOF
+          cat > /tmp/mockbin/docker <<'EOF'
+          #!/bin/bash
+          echo "docker $*" >> /tmp/mock/calls.log
+          case "$1" in
+            login) pw=$(cat); echo "login-password:$pw" >> /tmp/mock/calls.log; exit ${MOCK_LOGIN_RC:-0} ;;
+            manifest) echo '{"config":{"size":1048576},"layers":[{"size":1048576},{"size":2097152}]}'; exit 0 ;;
+            inspect) exit ${MOCK_INSPECT_RC:-1} ;;
+            pull) exit ${MOCK_PULL_RC:-0} ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/mockbin/aws /tmp/mockbin/docker
+          echo "/tmp/mockbin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/my/image:local
+      - name: Assert no pull performed
+        run: |
+          cat /tmp/mock/calls.log
+          grep -q "^docker inspect --type=image example.com/my/image:local$" /tmp/mock/calls.log || { echo "FAIL: inspect missing"; exit 1; }
+          if grep -q "^docker pull" /tmp/mock/calls.log; then
+            echo "FAIL: pull should not happen when image is local"
+            exit 1
+          fi
+          echo "PASS"

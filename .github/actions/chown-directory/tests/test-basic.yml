@@ -1,0 +1,46 @@
+name: Test basic chown with custom image (mocked docker)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker that records its arguments
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/bash
+          log="${FAKE_DOCKER_LOG:-/tmp/fake-docker.log}"
+          : > "$log"
+          for a in "$@"; do printf '%s\n' "$a" >> "$log"; done
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          echo "FAKE_DOCKER_LOG=$RUNNER_TEMP/fake-docker.log" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/target-dir"
+      - id: action
+        uses: .
+        with:
+          directory: ${{ runner.temp }}/target-dir
+          ALPINE_IMAGE: alpine:3.19
+      - name: Assert docker was invoked correctly
+        env:
+          EXPECTED_DIR: ${{ runner.temp }}/target-dir
+        run: |
+          echo "--- recorded args ---"
+          cat "$FAKE_DOCKER_LOG"
+          mapfile -t ARGS < "$FAKE_DOCKER_LOG"
+          EXPECTED=(run --rm -v "${EXPECTED_DIR}:/v" -w /v alpine:3.19 chown -R "$(id -u):$(id -g)" .)
+          if [ "${#ARGS[@]}" -ne "${#EXPECTED[@]}" ]; then
+            echo "FAIL: expected ${#EXPECTED[@]} args, got ${#ARGS[@]}"
+            exit 1
+          fi
+          for i in "${!EXPECTED[@]}"; do
+            if [ "${ARGS[$i]}" != "${EXPECTED[$i]}" ]; then
+              echo "FAIL: arg $i expected '${EXPECTED[$i]}' got '${ARGS[$i]}'"
+              exit 1
+            fi
+          done
+          echo "PASS"

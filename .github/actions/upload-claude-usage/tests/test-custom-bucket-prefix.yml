@@ -1,0 +1,63 @@
+name: Test custom bucket and prefix with defaulted fields
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake aws CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/fake-aws-args
+          cp "$3" /tmp/fake-aws-uploaded.json
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/fake-aws-args /tmp/fake-aws-uploaded.json
+      - name: Create metrics file with two results and sparse fields
+        run: |
+          cat > "$RUNNER_TEMP/metrics.json" <<'EOF'
+          [
+            {"type": "result", "duration_ms": 1, "num_turns": 1},
+            {"type": "result", "duration_ms": "999", "num_turns": "abc"}
+          ]
+          EOF
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+          s3-bucket: my-test-bucket
+          s3-prefix: my/prefix
+      - name: Assert upload destination and defaults
+        run: |
+          if [ ! -f /tmp/fake-aws-args ]; then
+            echo "FAIL: aws was not called"
+            exit 1
+          fi
+          ARGS="$(cat /tmp/fake-aws-args)"
+          echo "aws args: $ARGS"
+          case "$ARGS" in
+            "s3 cp /tmp/claude_usage.json s3://my-test-bucket/my/prefix/"*.json) ;;
+            *) echo "FAIL: unexpected aws args"; exit 1 ;;
+          esac
+          P=/tmp/fake-aws-uploaded.json
+          cat "$P"
+          check() {
+            actual="$(jq -r "$1" "$P")"
+            if [ "$actual" != "$2" ]; then
+              echo "FAIL: $1 = '$actual', expected '$2'"
+              exit 1
+            fi
+            echo "ok: $1 = $actual"
+          }
+          check .duration_ms 999
+          check .num_turns 0
+          check .total_cost_usd 0
+          check .input_tokens 0
+          check .output_tokens 0
+          check .model ""
+          echo "PASS"

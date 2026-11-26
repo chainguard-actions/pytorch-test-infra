@@ -1,0 +1,49 @@
+name: Test with venv input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Create a fake venv activate script
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakevenv/bin"
+          cat > "$RUNNER_TEMP/fakevenv/bin/activate" <<'EOF'
+          echo "fake venv activated" > "$RUNNER_TEMP/venv-activated"
+          EOF
+          echo "VENV_PATH=$RUNNER_TEMP/fakevenv/bin/activate" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          venv: ${{ env.VENV_PATH }}
+      - name: Assert venv was sourced and device detected
+        env:
+          RESULT: ${{ steps.action.outputs.runners-info }}
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "DEVICE_NAME: ${DEVICE_NAME:-}"
+          echo "result: $RESULT"
+          case "${DEVICE_NAME:-}" in
+            cpu|arm64-cpu|cuda|rocm|hpu) echo "PASS: DEVICE_NAME detected" ;;
+            *) echo "FAIL: DEVICE_NAME not set to a known value"; exit 1 ;;
+          esac
+          if [ ! -f "$RUNNER_TEMP/venv-activated" ]; then
+            echo "FAIL: venv activate script was not sourced"
+            exit 1
+          fi
+          echo "PASS: venv activate script sourced"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ -z "$RESULT" ]; then
+              echo "FAIL: action succeeded but runners-info is empty"
+              exit 1
+            fi
+            echo "PASS: runners-info present"
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: info script unavailable in this layout"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

@@ -1,0 +1,65 @@
+name: Test basic usage without S3 upload
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install python3 shim that records check_s3.py invocations
+        run: |
+          set -e
+          REAL_PY="$(command -v python3 || true)"
+          echo "real python3: $REAL_PY"
+          mkdir -p "$RUNNER_TEMP/shim"
+          LOG="$RUNNER_TEMP/check_s3_calls.log"
+          : > "$LOG"
+          cat > "$RUNNER_TEMP/shim/python3" <<EOF
+          #!/bin/sh
+          case "\$*" in
+            *tools/clang-tidy-checks/check_s3.py*)
+              echo "\$*" >> "$LOG"
+              exit 0
+              ;;
+          esac
+          exec "$REAL_PY" "\$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/shim/python3"
+          echo "$RUNNER_TEMP/shim" >> "$GITHUB_PATH"
+          # Ensure no binaries exist so GHA uploads hit the warn path
+          rm -f "$GITHUB_WORKSPACE/clang-tidy" "$GITHUB_WORKSPACE/clang-format"
+      - id: action
+        uses: .
+        with:
+          platform: linux64
+          version: "17.0.6"
+          upload-to-s3: false
+      - name: Assert check_s3.py was called with correct arguments
+        run: |
+          LOG="$RUNNER_TEMP/check_s3_calls.log"
+          echo "--- calls ---"
+          cat "$LOG"
+          COUNT=$(wc -l < "$LOG")
+          if [ "$COUNT" -ne 2 ]; then
+            echo "FAIL: expected 2 calls, got $COUNT"
+            exit 1
+          fi
+          if ! grep -q -- '--s3-key linux64/17.0.6/clang-tidy --local-file clang-tidy' "$LOG"; then
+            echo "FAIL: clang-tidy check call missing or wrong"
+            exit 1
+          fi
+          if ! grep -q -- '--s3-key linux64/17.0.6/clang-format --local-file clang-format' "$LOG"; then
+            echo "FAIL: clang-format check call missing or wrong"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert action outcome
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          echo "PASS"

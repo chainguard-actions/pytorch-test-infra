@@ -1,0 +1,43 @@
+name: Test command mode
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker on PATH
+        run: |
+          rm -rf /tmp/fakebin /tmp/fake-docker-* /tmp/command-ran
+          mkdir -p /tmp/fakebin
+          cat > /tmp/fakebin/docker <<'EOF'
+          #!/usr/bin/env bash
+          echo "$*" >> /tmp/fake-docker-calls.log
+          if [ "$1" = "buildx" ] && [ "$2" = "build" ]; then
+            echo "#1 [internal] load build definition from Dockerfile"
+          fi
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/docker
+          echo /tmp/fakebin >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          command: echo "ran-command" > /tmp/command-ran && docker buildx build --tag my/custom:1 --push .
+          tags: ghcr.io/example/ignored:tag
+          connect-attempts: '2'
+          connect-delay: '0'
+      - name: Assert command ran and image output empty
+        env:
+          IMAGE: ${{ steps.action.outputs.image }}
+        run: |
+          echo "image: '$IMAGE'"
+          cat /tmp/fake-docker-calls.log
+          [ -z "$IMAGE" ] || { echo "FAIL: image output should be empty in command mode"; exit 1; }
+          [ "$(cat /tmp/command-ran)" = "ran-command" ] || { echo "FAIL: command did not run"; exit 1; }
+          grep -q "^buildx create --name remote-buildkit --driver remote --use tcp://buildkitd-" /tmp/fake-docker-calls.log || { echo "FAIL: builder not registered"; exit 1; }
+          grep -qx "buildx build --tag my/custom:1 --push ." /tmp/fake-docker-calls.log || { echo "FAIL: custom build command not run"; exit 1; }
+          if grep -q "ghcr.io/example/ignored" /tmp/fake-docker-calls.log; then
+            echo "FAIL: tags input should be ignored in command mode"; exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,128 @@
+import { RELEASES_TAG, releasesApiOpenApi } from "lib/api/releases/openapi";
+import {
+  ApiResource,
+  componentSchemas,
+  ErrorResponseSchema,
+  SchemaRef,
+} from "lib/api/schema";
+import { commitGreenlightApiOpenApi } from "lib/api/tests/commit/greenlight/openapi";
+import { commitJobsApiOpenApi } from "lib/api/tests/commit/jobs/openapi";
+import { commitRunsApiOpenApi } from "lib/api/tests/commit/openapi";
+import { commitSummaryApiOpenApi } from "lib/api/tests/commit/summary/openapi";
+import { costApiOpenApi } from "lib/api/tests/cost/openapi";
+import { jobDetailApiOpenApi } from "lib/api/tests/job/openapi";
+import { testsApiOpenApi } from "lib/api/tests/openapi";
+import { testOptionsApiOpenApi } from "lib/api/tests/options/openapi";
+import { PAGES_TAG, testsPagesOpenApi } from "lib/api/tests/pages/openapi";
+import { pullRequestApiOpenApi } from "lib/api/tests/pull/openapi";
+import { runDetailApiOpenApi } from "lib/api/tests/run/openapi";
+import { testSummaryApiOpenApi } from "lib/api/tests/summary/openapi";
+import { testDetailApiOpenApi } from "lib/api/tests/test/openapi";
+import { runsApiOpenApi } from "lib/api/tests/test/runs/openapi";
+import type { z } from "zod/v4";
+
+// Every resource served under app/api is listed here, and the HUD pages
+// built on them; the document covers them all. Component names are unique
+// across the document, whatever the domain. Every operation under the
+// `tests` tag is behind the GitHub gate in lib/api/auth.ts, declared once as
+// the document's security requirement; the pages, under the `pages` tag,
+// declare none, since they are public, and neither do the operations under
+// the `releases` tag, which are public too (lib/api/public.ts).
+const SECURITY_SCHEME = "githubToken";
+export const API_TAG = "tests";
+const RESOURCES: ApiResource[] = [
+  testsApiOpenApi,
+  testOptionsApiOpenApi,
+  testSummaryApiOpenApi,
+  testDetailApiOpenApi,
+  runsApiOpenApi,
+  commitRunsApiOpenApi,
+  commitSummaryApiOpenApi,
+  commitGreenlightApiOpenApi,
+  commitJobsApiOpenApi,
+  jobDetailApiOpenApi,
+  pullRequestApiOpenApi,
+  runDetailApiOpenApi,
+  costApiOpenApi,
+  testsPagesOpenApi,
+  releasesApiOpenApi,
+];
+
+const SHARED_SCHEMAS: Record<string, z.ZodType> = {
+  ErrorResponse: ErrorResponseSchema,
+};
+
+export function buildOpenApiDocument() {
+  const schemasByName: Record<string, z.ZodType> = { ...SHARED_SCHEMAS };
+  const nameOf = new Map<z.ZodType, string>(
+    Object.entries(SHARED_SCHEMAS).map(([name, schema]) => [schema, name])
+  );
+  const ref: SchemaRef = (schema) => {
+    const name = nameOf.get(schema);
+    if (name === undefined) {
+      throw new Error("a response points at a schema no resource registered");
+    }
+    return { $ref: `#/components/schemas/${name}` };
+  };
+  const paths: Record<string, unknown> = {};
+
+  for (const resource of RESOURCES) {
+    for (const [name, schema] of Object.entries(resource.schemas)) {
+      if (name in schemasByName) {
+        throw new Error(`two resources register the component ${name}`);
+      }
+      schemasByName[name] = schema;
+      nameOf.set(schema, name);
+    }
+  }
+  for (const resource of RESOURCES) {
+    for (const [path, item] of Object.entries(resource.paths(ref))) {
+      if (path in paths) {
+        throw new Error(`two resources describe ${path}`);
+      }
+      paths[path] = item;
+    }
+  }
+
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "PyTorch HUD API",
+      // The API has no version; the document describes what this deploy serves.
+      version: process.env.VERCEL_GIT_COMMIT_SHA || "development",
+      description:
+        "Generated from the zod schemas the HUD API handlers validate with. The API is unversioned: endpoints change together with their consumers, and info.version names the deploy that serves this document. Operations tagged `tests` are the JSON API behind the GitHub gate; those tagged `releases` are the public release portal API; those tagged `pages` are the HUD pages built on the tests API, listed so that a caller can give a reader the page that shows what it fetched.",
+    },
+    servers: [{ url: "https://hud.pytorch.org" }],
+    tags: [
+      {
+        name: API_TAG,
+        description:
+          "The tests API: JSON, behind the GitHub gate, for programs.",
+      },
+      {
+        name: RELEASES_TAG,
+        description:
+          "The release portal API: JSON, public, for programs and people who want to see where a PyTorch release stands. No token needed.",
+      },
+      {
+        name: PAGES_TAG,
+        description:
+          "HUD pages built on the tests API: HTML, for people. Give a reader the URL; do not fetch it from a program. Each page's parameters are the ones it reads from its URL, generated from the same definitions the API validates with. A response that has a page carries it as hud_url: each test, each list entry, the list and the grid.",
+      },
+    ],
+    security: [{ [SECURITY_SCHEME]: [] }],
+    paths,
+    components: {
+      securitySchemes: {
+        [SECURITY_SCHEME]: {
+          type: "http",
+          scheme: "bearer",
+          description:
+            "A GitHub token (for example `gh auth token`) of a user with write access to pytorch/pytorch, or on the HUD allow list. A browser signed in to HUD is accepted without the header.",
+        },
+      },
+      schemas: componentSchemas(schemasByName),
+    },
+  };
+}

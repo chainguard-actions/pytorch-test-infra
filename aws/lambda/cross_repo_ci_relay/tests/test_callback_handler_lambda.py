@@ -1,0 +1,240 @@
+import base64
+import json
+import unittest
+from unittest.mock import patch
+
+from callback.lambda_function import lambda_handler
+from utils.misc import HTTPException
+
+
+def _event(
+    *,
+    method="POST",
+    path="/github/callback",
+    body=None,
+    headers=None,
+    base64_encoded=False,
+):
+    if body is None:
+        body = json.dumps({"status": "completed", "head_sha": "abc123"})
+    if base64_encoded:
+        body = base64.b64encode(body.encode()).decode()
+    if headers is None:
+        hdrs = {"authorization": "Bearer oidc.tok"}
+    else:
+        hdrs = dict(headers)
+    return {
+        "requestContext": {"http": {"method": method, "path": path}},
+        "body": body,
+        "isBase64Encoded": base64_encoded,
+        "headers": hdrs,
+    }
+
+
+class TestSweeper(unittest.TestCase):
+    @patch(
+        "callback.lambda_function.demotion.reconcile",
+        side_effect=RuntimeError("github down"),
+    )
+    @patch(
+        "callback.lambda_function.cleanup_handler.handle",
+        return_value={"ok": True, "cleaned": 2, "errors": 0},
+    )
+    @patch("callback.lambda_function.get_config")
+    def test_sweep_cleans_up_and_reconciles_demotions(
+        self, _config, mock_cleanup, mock_reconcile
+    ):
+        response = lambda_handler({"source": "crcr.sweeper"}, {})
+
+        mock_cleanup.assert_called_once()
+        mock_reconcile.assert_called_once()
+        # A failing reconcile does not fail the sweep.
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(json.loads(response["body"])["cleaned"], 2)
+
+
+class TestCallbackLambdaHandler(unittest.TestCase):
+    def setUp(self):
+        import utils.config
+
+        utils.config._cached_config = None
+
+    def test_route_validation(self):
+        response = lambda_handler(_event(path="/other"), {})
+        self.assertEqual(response["statusCode"], 404)
+        response = lambda_handler(_event(method="GET"), {})
+        self.assertEqual(response["statusCode"], 405)
+
+    @patch("callback.lambda_function.get_config")
+    def test_invalid_json_body_returns_400(self, mock_get_config):
+        response = lambda_handler(_event(body="not-json"), {})
+        self.assertEqual(response["statusCode"], 400)
+
+    @patch("callback.lambda_function.jwt_helper.load_ci_providers")
+    @patch("callback.lambda_function.get_config")
+    def test_missing_authorization_header_returns_401(self, mock_get_config, _):
+        response = lambda_handler(_event(headers={}), {})
+        self.assertEqual(response["statusCode"], 401)
+        self.assertIn("Missing", json.loads(response["body"])["detail"])
+
+    @patch("callback.lambda_function.jwt_helper.load_ci_providers")
+    @patch("callback.lambda_function.get_config")
+    @patch("callback.lambda_function.jwt_helper.verify_oidc_token")
+    def test_oidc_failure_returns_401(self, mock_oidc, mock_get_config, _):
+        mock_oidc.side_effect = HTTPException(401, "Invalid authorization token")
+
+        response = lambda_handler(_event(), {})
+
+        self.assertEqual(response["statusCode"], 401)
+
+    @patch("callback.lambda_function.jwt_helper.load_ci_providers")
+    @patch("callback.lambda_function.get_config")
+    @patch("callback.lambda_function.jwt_helper.verify_oidc_token")
+    @patch("callback.lambda_function.callback_handler.handle")
+    def test_happy_path_forwards_body_and_verified_repo(
+        self, mock_handle, mock_oidc, mock_get_config, _
+    ):
+        mock_oidc.return_value = {"repository": "org/repo"}
+        mock_handle.return_value = {"ok": True, "status": "completed"}
+
+        response = lambda_handler(_event(), {})
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(
+            json.loads(response["body"]), {"ok": True, "status": "completed"}
+        )
+        # Body passed through verbatim, verified_repo comes from OIDC claims.
+        args = mock_handle.call_args[0]
+        self.assertEqual(args[1], {"status": "completed", "head_sha": "abc123"})
+        self.assertEqual(args[2], "org/repo")
+
+    @patch("callback.lambda_function.jwt_helper.load_ci_providers")
+    @patch("callback.lambda_function.get_config")
+    @patch("callback.lambda_function.jwt_helper.verify_oidc_token")
+    @patch("callback.lambda_function.callback_handler.handle")
+    def test_hud_error_from_handler_is_forwarded(
+        self, mock_handle, mock_oidc, mock_get_config, _
+    ):
+        mock_oidc.return_value = {"repository": "org/repo"}
+        mock_handle.side_effect = HTTPException(503, "HUD unreachable")
+
+        response = lambda_handler(_event(), {})
+
+        self.assertEqual(response["statusCode"], 503)
+        self.assertEqual(json.loads(response["body"])["detail"], "HUD unreachable")
+        self.assertNotIn("Retry-After", response["headers"])
+
+    @patch("callback.lambda_function.jwt_helper.load_ci_providers")
+    @patch("callback.lambda_function.get_config")
+    @patch("callback.lambda_function.jwt_helper.verify_oidc_token")
+    @patch("callback.lambda_function.callback_handler.handle")
+    def test_exception_headers_reach_the_response(
+        self, mock_handle, mock_oidc, mock_get_config, _
+    ):
+        mock_oidc.return_value = {"repository": "org/repo"}
+        mock_handle.side_effect = HTTPException(
+            429, "rate limit exceeded for org/repo", headers={"Retry-After": "1"}
+        )
+
+        response = lambda_handler(_event(), {})
+
+        self.assertEqual(response["statusCode"], 429)
+        self.assertEqual(response["headers"]["Retry-After"], "1")
+        self.assertEqual(response["headers"]["content-type"], "application/json")
+
+    @patch("callback.lambda_function.jwt_helper.load_ci_providers")
+    @patch("callback.lambda_function.get_config")
+    @patch("callback.lambda_function.jwt_helper.verify_oidc_token")
+    @patch("callback.lambda_function.callback_handler.handle")
+    def test_unhandled_exception_returns_500(
+        self, mock_handle, mock_oidc, mock_get_config, _
+    ):
+        mock_oidc.return_value = {"repository": "org/repo"}
+        mock_handle.side_effect = Exception("boom")
+
+        response = lambda_handler(_event(), {})
+
+        self.assertEqual(response["statusCode"], 500)
+
+
+class TestDelegatedLateReport(unittest.TestCase):
+    """A late report from a configured workflow is handled as the repo it names."""
+
+    WORKFLOW = (
+        "pytorch/test-infra/.github/workflows/vllm-torch-nightly-triage.yml"
+        "@refs/heads/main"
+    )
+
+    def setUp(self):
+        import utils.config
+        from utils import jwt_helper
+
+        utils.config._cached_config = None
+        jwt_helper.load_ci_provider_mappings(
+            {
+                "providers": {
+                    "github": {
+                        "late_report_delegates": [
+                            {
+                                "repository": "pytorch/test-infra",
+                                "job_workflow_ref": self.WORKFLOW,
+                                "on_behalf_of": "vllm-project/vllm",
+                            }
+                        ]
+                    }
+                }
+            }
+        )
+        self.addCleanup(jwt_helper.LATE_REPORT_DELEGATES.clear)
+        for target in (
+            "callback.lambda_function.jwt_helper.load_ci_providers",
+            "callback.lambda_function.get_config",
+        ):
+            patcher = patch(target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _send(self, body, claims):
+        with patch(
+            "callback.lambda_function.jwt_helper.verify_oidc_token",
+            return_value=claims,
+        ), patch(
+            "callback.lambda_function.callback_handler.handle",
+            return_value={"ok": True},
+        ) as handle:
+            response = lambda_handler(_event(body=json.dumps(body)), {})
+        return response, handle
+
+    def test_the_triage_workflow_reports_for_vllm(self):
+        claims = {"repository": "pytorch/test-infra", "job_workflow_ref": self.WORKFLOW}
+        response, handle = self._send({"event_type": "late-report"}, claims)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(handle.call_args[0][2], "vllm-project/vllm")
+
+    def test_the_repo_to_report_for_cannot_be_chosen_by_the_body(self):
+        claims = {"repository": "pytorch/test-infra", "job_workflow_ref": self.WORKFLOW}
+        body = {"event_type": "late-report", "on_behalf_of": "someone/else"}
+        _, handle = self._send(body, claims)
+
+        self.assertEqual(handle.call_args[0][2], "vllm-project/vllm")
+
+    def test_other_events_from_the_triage_workflow_stay_test_infra(self):
+        claims = {"repository": "pytorch/test-infra", "job_workflow_ref": self.WORKFLOW}
+        _, handle = self._send({"event_type": "nightly"}, claims)
+
+        self.assertEqual(handle.call_args[0][2], "pytorch/test-infra")
+
+    def test_another_workflow_cannot_report_for_vllm(self):
+        claims = {
+            "repository": "pytorch/test-infra",
+            "job_workflow_ref": "pytorch/test-infra/.github/workflows/x.yml"
+            "@refs/heads/main",
+        }
+        _, handle = self._send({"event_type": "late-report"}, claims)
+
+        self.assertEqual(handle.call_args[0][2], "pytorch/test-infra")
+
+
+if __name__ == "__main__":
+    unittest.main()

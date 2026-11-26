@@ -1,0 +1,53 @@
+name: Test basic setup of TD scorer
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure tools/torchci exists (stub only if missing)
+        run: |
+          if [ -f tools/torchci/requirements.txt ]; then
+            echo "Using real tools/torchci"
+            echo "STUB_CREATED=false" >> "$GITHUB_ENV"
+          else
+            echo "tools/torchci missing; creating minimal stub package"
+            mkdir -p tools/torchci/torchci_stub_pkg
+            echo "# no extra requirements" > tools/torchci/requirements.txt
+            echo "VALUE = 'ok'" > tools/torchci/torchci_stub_pkg/__init__.py
+            cat > tools/torchci/setup.py <<'EOF'
+          from setuptools import setup
+          setup(name="torchci-stub-pkg", version="0.0.1", packages=["torchci_stub_pkg"])
+          EOF
+            echo "STUB_CREATED=true" >> "$GITHUB_ENV"
+          fi
+      - id: action
+        uses: .
+      - name: Assert python is 3.11
+        run: |
+          V="$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          echo "python version: $V"
+          if [ "$V" != "3.11" ]; then
+            echo "FAIL: expected python 3.11"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert tools/torchci installed in editable mode
+        run: |
+          python -m pip list --editable -v || true
+          OUT="$(python -m pip list --editable -v 2>/dev/null)"
+          if ! echo "$OUT" | grep -q "tools/torchci"; then
+            echo "FAIL: no editable install from tools/torchci found"
+            exit 1
+          fi
+          if [ "$STUB_CREATED" = "true" ]; then
+            R="$(python -c 'import torchci_stub_pkg; print(torchci_stub_pkg.VALUE)')"
+            echo "stub import: $R"
+            [ "$R" = "ok" ] || { echo "FAIL: stub package not importable"; exit 1; }
+          fi
+          echo "PASS"
+      - name: Cleanup stub
+        if: always()
+        run: |
+          if [ "$STUB_CREATED" = "true" ]; then rm -rf tools/torchci; fi

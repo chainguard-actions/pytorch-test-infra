@@ -1,0 +1,53 @@
+name: Test directory path containing spaces (mocked docker)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake docker that records its arguments
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/docker" <<'EOF'
+          #!/bin/bash
+          log="${FAKE_DOCKER_LOG:-/tmp/fake-docker.log}"
+          : > "$log"
+          for a in "$@"; do printf '%s\n' "$a" >> "$log"; done
+          exit 0
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/docker"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          echo "FAKE_DOCKER_LOG=$RUNNER_TEMP/fake-docker.log" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/dir with spaces"
+      - id: action
+        uses: .
+        with:
+          directory: ${{ runner.temp }}/dir with spaces
+          ALPINE_IMAGE: alpine:latest
+      - name: Assert directory passed as a single argument
+        env:
+          EXPECTED_DIR: ${{ runner.temp }}/dir with spaces
+        run: |
+          cat "$FAKE_DOCKER_LOG"
+          mapfile -t ARGS < "$FAKE_DOCKER_LOG"
+          COUNT="${#ARGS[@]}"
+          VOL=""
+          for i in "${!ARGS[@]}"; do
+            if [ "${ARGS[$i]}" = "-v" ] && [ -z "$VOL" ]; then VOL="${ARGS[$((i+1))]}"; fi
+          done
+          echo "count: $COUNT volume: $VOL"
+          # run --rm -v VOL -w /v IMAGE chown -R UID:GID .  => 11 args
+          if [ "$COUNT" -ne 11 ]; then
+            echo "FAIL: expected 11 args (path must not be word-split), got $COUNT"
+            exit 1
+          fi
+          if [ "$VOL" != "${EXPECTED_DIR}:/v" ]; then
+            echo "FAIL: unexpected volume arg '$VOL'"
+            exit 1
+          fi
+          if ! grep -qxF "alpine:latest" "$FAKE_DOCKER_LOG"; then
+            echo "FAIL: custom image not passed"
+            exit 1
+          fi
+          echo "PASS"

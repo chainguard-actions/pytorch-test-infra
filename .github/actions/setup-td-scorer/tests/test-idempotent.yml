@@ -1,0 +1,46 @@
+name: Test running TD scorer setup twice
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Ensure tools/torchci exists (stub only if missing)
+        run: |
+          if [ -f tools/torchci/requirements.txt ]; then
+            echo "STUB_CREATED=false" >> "$GITHUB_ENV"
+          else
+            mkdir -p tools/torchci/torchci_stub_pkg
+            echo "# no extra requirements" > tools/torchci/requirements.txt
+            echo "VALUE = 'ok'" > tools/torchci/torchci_stub_pkg/__init__.py
+            cat > tools/torchci/setup.py <<'EOF'
+          from setuptools import setup
+          setup(name="torchci-stub-pkg", version="0.0.1", packages=["torchci_stub_pkg"])
+          EOF
+            echo "STUB_CREATED=true" >> "$GITHUB_ENV"
+          fi
+      - id: first
+        uses: .
+      - id: second
+        uses: .
+      - name: Assert both runs succeeded and env is usable
+        env:
+          FIRST: ${{ steps.first.outcome }}
+          SECOND: ${{ steps.second.outcome }}
+        run: |
+          echo "first: $FIRST second: $SECOND"
+          if [ "$FIRST" != "success" ] || [ "$SECOND" != "success" ]; then
+            echo "FAIL: expected both runs to succeed"
+            exit 1
+          fi
+          V="$(python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+          echo "python version: $V"
+          [ "$V" = "3.11" ] || { echo "FAIL: expected python 3.11"; exit 1; }
+          python -m pip check || echo "warning: pip check reported issues"
+          python -m pip list --editable -v | grep -q "tools/torchci" || { echo "FAIL: editable install missing"; exit 1; }
+          echo "PASS"
+      - name: Cleanup stub
+        if: always()
+        run: |
+          if [ "$STUB_CREATED" = "true" ]; then rm -rf tools/torchci; fi

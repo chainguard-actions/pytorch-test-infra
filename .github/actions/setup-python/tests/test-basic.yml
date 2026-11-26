@@ -1,0 +1,59 @@
+name: Test basic venv creation (simulated macOS)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake Homebrew and macOS shim
+        run: |
+          set -e
+          F="$GITHUB_WORKSPACE/tests/fixtures/fake-macos"
+          rm -rf /tmp/fakebrew
+          mkdir -p /tmp/fakebrew/bin /tmp/fakebrew/prefix/bin
+          cp "$F/brew" /tmp/fakebrew/bin/brew
+          cp "$F/venv-python" /tmp/fakebrew/venv-python
+          cp "$F/darwin-preload.js" /tmp/fakebrew/darwin-preload.js
+          for v in 3.11 3.12 3.13; do
+            cp "$F/python-fake" "/tmp/fakebrew/prefix/bin/python$v"
+          done
+          chmod +x /tmp/fakebrew/bin/brew /tmp/fakebrew/venv-python /tmp/fakebrew/prefix/bin/*
+          echo "/tmp/fakebrew/bin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        env:
+          NODE_OPTIONS: --require /tmp/fakebrew/darwin-preload.js
+        with:
+          python-version: "3.12"
+      - name: Assert brew was used to install python@3.12
+        run: |
+          cat /tmp/fakebrew/brew.log
+          grep -qx "brew update" /tmp/fakebrew/brew.log || { echo "FAIL: brew update not run"; exit 1; }
+          grep -qx "brew install python@3.12" /tmp/fakebrew/brew.log || { echo "FAIL: brew install python@3.12 not run"; exit 1; }
+          echo "PASS"
+      - name: Assert venv created and exported
+        run: |
+          echo "VENV_PATH: '${VENV_PATH:-}'"
+          echo "RUNNER_TEMP: '$RUNNER_TEMP'"
+          cat /tmp/fakebrew/python.log
+          if [ -z "${VENV_PATH:-}" ]; then echo "FAIL: VENV_PATH not set"; exit 1; fi
+          case "$(basename "$VENV_PATH")" in
+            venv-3.12-*) ;;
+            *) echo "FAIL: unexpected venv dir name"; exit 1 ;;
+          esac
+          if [ "$(dirname "$VENV_PATH")" != "$RUNNER_TEMP" ]; then
+            echo "FAIL: venv not under RUNNER_TEMP"; exit 1
+          fi
+          grep -q "^python3.12 -m venv $VENV_PATH\$" /tmp/fakebrew/python.log || { echo "FAIL: venv not created with python3.12"; exit 1; }
+          if [ ! -x "$VENV_PATH/bin/python" ]; then echo "FAIL: venv python missing"; exit 1; fi
+          case ":$PATH:" in
+            *":$VENV_PATH/bin:"*) ;;
+            *) echo "FAIL: venv bin not on PATH: $PATH"; exit 1 ;;
+          esac
+          if [ -f /tmp/fakebrew/venv-python.log ]; then
+            echo "FAIL: pip should not have been run without a requirements file"
+            cat /tmp/fakebrew/venv-python.log
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,81 @@
+name: Test ECR login retries transient failure
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake curl/aws/docker/sudo on PATH (aws ecr fails once)
+        run: |
+          set -eu
+          BIN="$RUNNER_TEMP/fakebin"
+          mkdir -p "$BIN"
+          LOG="$RUNNER_TEMP/fake-calls.log"
+          COUNT="$RUNNER_TEMP/ecr-count"
+          : > "$LOG"
+          echo 0 > "$COUNT"
+
+          cat > "$BIN/curl" <<'EOF'
+          #!/bin/bash
+          case "$*" in
+            *169.254.169.254/latest/api/token*) echo "fake-token"; exit 0 ;;
+            *169.254.169.254/latest/meta-data/*) echo "fake-value"; exit 0 ;;
+            *169.254.169.254*) exit 22 ;;
+          esac
+          exec /usr/bin/curl "$@"
+          EOF
+
+          cat > "$BIN/aws" <<EOF
+          #!/bin/bash
+          echo "aws \$*" >> "$LOG"
+          case "\$1 \$2" in
+            "sts get-caller-identity")
+              printf '{\n    "Account": "210987654321",\n}\n'
+              ;;
+            "ecr get-login-password")
+              n=\$(cat "$COUNT"); n=\$((n+1)); echo \$n > "$COUNT"
+              if [ "\$n" -lt 2 ]; then echo "transient error" >&2; exit 1; fi
+              echo "retry-password"
+              ;;
+            *) exit 1 ;;
+          esac
+          EOF
+
+          cat > "$BIN/docker" <<EOF
+          #!/bin/bash
+          echo "docker \$*" >> "$LOG"
+          case "\$1" in
+            version) echo "fake docker" ;;
+            login)
+              pw=\$(cat)
+              echo "docker-login-password: \$pw" >> "$LOG"
+              [ "\$pw" = "retry-password" ] || exit 1
+              ;;
+            stop) exit 1 ;;
+          esac
+          exit 0
+          EOF
+
+          cat > "$BIN/sudo" <<'EOF'
+          #!/bin/bash
+          exec "$@"
+          EOF
+
+          chmod +x "$BIN"/*
+          echo "$BIN" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert retry happened and login succeeded
+        run: |
+          LOG="$RUNNER_TEMP/fake-calls.log"
+          cat "$LOG"
+          n=$(grep -c '^aws ecr get-login-password' "$LOG")
+          echo "ecr calls: $n"
+          if [ "$n" -lt 2 ]; then
+            echo "FAIL: expected at least 2 ecr get-login-password calls"
+            exit 1
+          fi
+          grep -q '^docker login --username AWS --password-stdin 210987654321.dkr.ecr.us-east-1.amazonaws.com' "$LOG" || { echo "FAIL: docker login wrong"; exit 1; }
+          grep -q '^docker-login-password: retry-password' "$LOG" || { echo "FAIL: retry password not piped"; exit 1; }
+          echo "PASS"

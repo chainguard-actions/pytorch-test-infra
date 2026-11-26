@@ -1,0 +1,56 @@
+name: Test teardown with extra-delete-dir input
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake powershell recorder (action is Windows-only)
+        run: |
+          mkdir -p /tmp/fakebin /tmp/fake-powershell
+          : > /tmp/fake-powershell/log.txt
+          cat > /tmp/fakebin/powershell <<'EOF'
+          #!/bin/bash
+          LOG=/tmp/fake-powershell/log.txt
+          echo "=== INVOCATION: $*" >> "$LOG"
+          for a in "$@"; do
+            p="${a#. }"
+            p="${p#\'}"; p="${p%\'}"
+            p="${p#\"}"; p="${p%\"}"
+            if [ -f "$p" ]; then
+              cat "$p" >> "$LOG"
+              echo >> "$LOG"
+            fi
+          done
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/powershell
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+          mkdir -p "$RUNNER_TEMP/extra-dir"
+          touch "$RUNNER_TEMP/extra-dir/keep.txt"
+      - id: action
+        uses: .
+        with:
+          extra-delete-dir: ${{ runner.temp }}/extra-dir
+      - name: Assert teardown steps ran and action succeeded
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          LOG=/tmp/fake-powershell/log.txt
+          cat "$LOG"
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: action did not succeed"
+            exit 1
+          fi
+          COUNT=$(grep -c '^=== INVOCATION' "$LOG" || true)
+          if [ "$COUNT" -ne 2 ]; then
+            echo "FAIL: expected 2 powershell invocations, got $COUNT"
+            exit 1
+          fi
+          if ! grep -q 'Get-SSH-Sessions' "$LOG"; then
+            echo "FAIL: kill-sessions step script not found"
+            exit 1
+          fi
+          echo "PASS"

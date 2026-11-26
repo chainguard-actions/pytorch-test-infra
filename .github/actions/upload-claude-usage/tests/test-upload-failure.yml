@@ -1,0 +1,41 @@
+name: Test S3 upload failure is best-effort
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install failing fake aws CLI
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          cat > "$RUNNER_TEMP/fakebin/aws" <<'EOF'
+          #!/bin/sh
+          echo "$@" > /tmp/fake-aws-args
+          echo "upload failed: access denied" >&2
+          exit 1
+          EOF
+          chmod +x "$RUNNER_TEMP/fakebin/aws"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+          rm -f /tmp/fake-aws-args
+      - name: Create metrics file
+        run: |
+          echo '[{"type": "result", "duration_ms": 5, "num_turns": 2, "total_cost_usd": 0.01}]' > "$RUNNER_TEMP/metrics.json"
+      - id: action
+        uses: .
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+      - name: Assert action succeeded despite upload failure
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL: expected success"
+            exit 1
+          fi
+          if [ ! -f /tmp/fake-aws-args ]; then
+            echo "FAIL: aws should have been attempted"
+            exit 1
+          fi
+          echo "PASS"

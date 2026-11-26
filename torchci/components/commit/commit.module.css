@@ -1,0 +1,67 @@
+.commitMessage {
+  background-color: var(--commit-message-bg);
+  white-space: pre;
+  max-height: 13em;
+  overflow: scroll;
+  margin: 10px;
+}
+
+.workflowContainer {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-gap: 10px;
+}
+
+.workflowBoxFail {
+  border: 1px solid gray;
+  padding: 10px;
+  border-radius: 5px;
+  background-color: var(--workflow-box-fail-bg);
+}
+
+.workflowBoxSuccess {
+  border: 1px solid gray;
+  padding: 10px;
+  border-radius: 5px;
+  background-color: var(--workflow-box-success-bg);
+}
+
+.workflowBoxPending {
+  border: 1px solid gray;
+  padding: 10px;
+  border-radius: 5px;
+  background-color: var(--workflow-box-pending-bg);
+}
+
+.crcrSection {
+  grid-column: 1 / -1;
+  border: 2px solid var(--color-crcr-border, #0288d1);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.crcrBackendsGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-gap: 10px;
+}
+
+.crcrLevelBadge {
+  display: inline-block;
+  font-size: 0.6rem;
+  padding: 1px 5px;
+  border-radius: 8px;
+  border: 1px solid var(--color-crcr-border, #0288d1);
+  color: var(--color-crcr-border, #0288d1);
+  font-weight: 600;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.buttonBorder {
+  border: 1px solid;
+}
+
+.buttonBorder:hover {
+  background-color: var(--button-hover-bg);
+}

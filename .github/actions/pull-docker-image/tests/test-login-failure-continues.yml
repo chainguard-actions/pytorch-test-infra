@@ -1,0 +1,47 @@
+name: Test login failure is retried and tolerated
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      MOCK_INSPECT_RC: "1"
+      MOCK_PULL_RC: "0"
+      MOCK_LOGIN_RC: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install mock aws and docker
+        run: |
+          mkdir -p /tmp/mockbin /tmp/mock
+          : > /tmp/mock/calls.log
+          cat > /tmp/mockbin/aws <<'EOF'
+          #!/bin/bash
+          echo "aws $*" >> /tmp/mock/calls.log
+          echo "fake-ecr-password"
+          exit ${MOCK_AWS_RC:-0}
+          EOF
+          cat > /tmp/mockbin/docker <<'EOF'
+          #!/bin/bash
+          echo "docker $*" >> /tmp/mock/calls.log
+          case "$1" in
+            login) pw=$(cat); echo "login-password:$pw" >> /tmp/mock/calls.log; exit ${MOCK_LOGIN_RC:-0} ;;
+            manifest) echo '{"config":{"size":1048576},"layers":[{"size":1048576},{"size":2097152}]}'; exit 0 ;;
+            inspect) exit ${MOCK_INSPECT_RC:-1} ;;
+            pull) exit ${MOCK_PULL_RC:-0} ;;
+          esac
+          exit 0
+          EOF
+          chmod +x /tmp/mockbin/aws /tmp/mockbin/docker
+          echo "/tmp/mockbin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+        with:
+          docker-image: example.com/my/image:retry
+      - name: Assert login retried 3 times and pull still happened
+        run: |
+          cat /tmp/mock/calls.log
+          n=$(grep -c "^docker login " /tmp/mock/calls.log)
+          echo "login count: $n"
+          [ "$n" = "3" ] || { echo "FAIL: expected 3 login attempts"; exit 1; }
+          grep -q "^docker pull example.com/my/image:retry$" /tmp/mock/calls.log || { echo "FAIL: pull missing"; exit 1; }
+          echo "PASS"

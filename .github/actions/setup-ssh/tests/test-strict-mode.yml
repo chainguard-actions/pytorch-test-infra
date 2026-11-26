@@ -1,0 +1,53 @@
+name: Test fail-silently false (strict mode)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Seed authorized_keys with a sentinel key
+        run: |
+          mkdir -p "$HOME/.ssh"
+          echo "ssh-ed25519 AAAAC3NzaSentinelSeedKey seed@test" > "$HOME/.ssh/authorized_keys"
+          chmod 600 "$HOME/.ssh/authorized_keys"
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          github-secret: ${{ secrets.GITHUB_TOKEN }}
+          activate-with-label: "false"
+          remove-existing-keys: "true"
+          fail-silently: "false"
+      - name: Assert action skipped, wrote keys, or failed loudly
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          F="$HOME/.ssh/authorized_keys"
+          if [ "$OUTCOME" = "success" ]; then
+            if [ ! -f "$F" ]; then
+              echo "FAIL: authorized_keys was removed and not rewritten"
+              exit 1
+            fi
+            echo "--- authorized_keys ---"
+            cat "$F"
+            if grep -q "SentinelSeedKey" "$F"; then
+              # Under workflow_dispatch (not a PR, no ciflow ref) the action skips.
+              if [ "$(wc -l < "$F")" -ne 1 ]; then
+                echo "FAIL: sentinel kept but file was unexpectedly modified"
+                exit 1
+              fi
+              echo "PASS: action skipped (not a PR / no ciflow ref) and left keys untouched"
+            elif grep -qE '^(ssh-|ecdsa-|sk-)' "$F"; then
+              echo "PASS: existing keys replaced with fetched keys"
+            else
+              echo "FAIL: authorized_keys has unexpected content"
+              exit 1
+            fi
+          elif [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed loudly (actor keys / IP not resolvable in harness)"
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi

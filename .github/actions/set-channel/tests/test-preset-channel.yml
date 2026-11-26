@@ -1,0 +1,20 @@
+name: Test preset CHANNEL is not overwritten
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      CHANNEL: preset-channel
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: action
+        uses: .
+      - name: Assert CHANNEL keeps preset value
+        run: |
+          echo "CHANNEL: '${CHANNEL:-}'"
+          if [ "${CHANNEL:-}" != "preset-channel" ]; then
+            echo "FAIL: expected CHANNEL to remain 'preset-channel' (default step should be skipped)"
+            exit 1
+          fi
+          echo "PASS"

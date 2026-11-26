@@ -1,0 +1,29 @@
+name: Test basic script run without cache
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Prepare env
+        run: |
+          rm -f "$GITHUB_WORKSPACE/marker.txt" "$GITHUB_WORKSPACE/pwd.txt"
+          echo "BUILD_ENV_FILE=$GITHUB_WORKSPACE/tests/fixtures/build_env.sh" >> "$GITHUB_ENV"
+      - id: action
+        uses: .
+        with:
+          script: tests/fixtures/write-marker.sh
+      - name: Assert script ran with build env sourced
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/marker.txt" ]; then
+            echo "FAIL: marker.txt not created"
+            exit 1
+          fi
+          ACTUAL="$(cat "$GITHUB_WORKSPACE/marker.txt")"
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "from-build-env" ]; then
+            echo "FAIL: expected 'from-build-env'"
+            exit 1
+          fi
+          echo "PASS"

@@ -1,0 +1,59 @@
+name: Test basic teardown (default inputs)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install fake powershell recorder (action is Windows-only)
+        run: |
+          mkdir -p /tmp/fakebin /tmp/fake-powershell
+          : > /tmp/fake-powershell/log.txt
+          cat > /tmp/fakebin/powershell <<'EOF'
+          #!/bin/bash
+          # Records each invocation and the script contents, then succeeds.
+          LOG=/tmp/fake-powershell/log.txt
+          echo "=== INVOCATION: $*" >> "$LOG"
+          for a in "$@"; do
+            p="${a#. }"
+            p="${p#\'}"; p="${p%\'}"
+            p="${p#\"}"; p="${p%\"}"
+            if [ -f "$p" ]; then
+              cat "$p" >> "$LOG"
+              echo >> "$LOG"
+            fi
+          done
+          exit 0
+          EOF
+          chmod +x /tmp/fakebin/powershell
+          echo "/tmp/fakebin" >> "$GITHUB_PATH"
+      - id: action
+        uses: .
+      - name: Assert both teardown steps ran via powershell
+        run: |
+          LOG=/tmp/fake-powershell/log.txt
+          cat "$LOG"
+          COUNT=$(grep -c '^=== INVOCATION' "$LOG" || true)
+          echo "invocations: $COUNT"
+          if [ "$COUNT" -ne 2 ]; then
+            echo "FAIL: expected 2 powershell invocations"
+            exit 1
+          fi
+          for pat in 'Get-SSH-Users' 'Holding runner until all ssh sessions have logged out' 'Get-SSH-Sessions' 'Stop-Process'; do
+            if ! grep -q "$pat" "$LOG"; then
+              echo "FAIL: expected script content '$pat' not found"
+              exit 1
+            fi
+          done
+          echo "PASS"
+      - name: Assert action outcome success
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" != "success" ]; then
+            echo "FAIL"
+            exit 1
+          fi
+          echo "PASS"

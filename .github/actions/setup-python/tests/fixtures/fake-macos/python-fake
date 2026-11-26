@@ -1,0 +1,10 @@
+#!/bin/sh
+# Fake Homebrew python: handles "-m venv DIR" by creating a fake venv whose
+# bin/python logs its invocations.
+echo "$(basename "$0") $*" >> /tmp/fakebrew/python.log
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  mkdir -p "$3/bin"
+  cp /tmp/fakebrew/venv-python "$3/bin/python"
+  chmod +x "$3/bin/python"
+fi
+exit 0
